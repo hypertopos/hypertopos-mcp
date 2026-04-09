@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hypertopos-mcp"
+version = "0.1.0"
+description = "MCP server for hypertopos geometric data sphere"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+dependencies = [
+    "hypertopos",
+    "mcp[cli]>=1.20",
+    "tzdata>=2024.1",
+]
+
+[project.scripts]
+hypertopos-mcp = "hypertopos_mcp.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hypertopos_mcp"]
