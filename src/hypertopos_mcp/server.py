@@ -273,6 +273,7 @@ _TOOL_TIERS: dict[str, str] = {
     "propagate_influence": "edge",
     "cluster_bridges": "edge",
     "anomalous_edges": "edge",
+    "find_witness_cohort": "edge",
     # temporal — visible after sphere_overview IF sphere has temporal data
     "dive_solid": "temporal",
     "get_solid": "temporal",

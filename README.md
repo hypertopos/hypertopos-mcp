@@ -5,9 +5,9 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-compatible-green.svg)](https://modelcontextprotocol.io)
-[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-0.2.1-blue.svg)](pyproject.toml)
 
-**hypertopos-mcp** gives AI agents a safe, stateful way to explore Geometric Data Spheres without writing SQL or touching the storage layer. It wraps the [hypertopos](https://github.com/hypertopos/hypertopos-py) core library into 66 MCP tools with automatic context management, 3-phase tool visibility, smart detection recipes, and graph+geometry fusion — runtime graph traversal scored by population-relative geometry, anomaly contagion tracing, influence propagation, and cluster bridge discovery.
+**hypertopos-mcp** gives AI agents a safe, stateful way to explore Geometric Data Spheres without writing SQL or touching the storage layer. It wraps the [hypertopos](https://github.com/hypertopos/hypertopos-py) core library into 67 MCP tools with automatic context management, 3-phase tool visibility, smart detection recipes, and graph+geometry fusion — runtime graph traversal scored by population-relative geometry, anomaly contagion tracing, influence propagation, cluster bridge discovery, and witness cohort discovery.
 
 ## Quick Start
 
@@ -62,8 +62,8 @@ Tool registration is dynamic to minimize token consumption:
 | Phase | Trigger | Tools visible |
 |-------|---------|---------------|
 | **Phase 1** | Server start | 3 tools (`open_sphere`, `close_sphere`, `get_session_stats`) |
-| **Phase 2** | `open_sphere` | 16 tools (Phase 1 + gateway + 11 edge table tools) |
-| **Phase 3** | `sphere_overview` | 40-66 tools (full manual toolset, capability-dependent) |
+| **Phase 2** | `open_sphere` | 17 tools (Phase 1 + gateway + 12 edge table tools) |
+| **Phase 3** | `sphere_overview` | 41-67 tools (full manual toolset, capability-dependent) |
 
 ## Recommended First Calls
 
@@ -98,7 +98,7 @@ Launch `hypertopos-mcp` alongside the agent process and make sure the same Pytho
 
 If the platform supports MCP, wire it to `hypertopos-mcp` and keep a local sphere path available. If it only supports Markdown instructions, pair it with the README plus the relevant `benchmark/` notes for the sphere you are using.
 
-## Tool Groups (66 tools)
+## Tool Groups (67 tools)
 
 | Group | Tools | What it covers |
 |-------|:-----:|----------------|
@@ -110,7 +110,7 @@ If the platform supports MCP, wire it to `hypertopos-mcp` and keep a local spher
 | Similarity & Comparison | 3 | Similar entities, pairwise compare, common relations |
 | Aggregation | 1 | Count, sum, avg, min, max, median, percentiles, pivots, filters |
 | Population Analysis | 4 | Contrast populations, centroids, clusters (π8), boundary (π6) |
-| Hub & Network | 14 | Hubs (π7), neighborhood, counterparties, chains, flow, contagion, velocity, coverage, influence, bridges, anomalous edges |
+| Hub & Network | 15 | Hubs (π7), neighborhood, counterparties, chains, flow, contagion, velocity, coverage, influence, bridges, anomalous edges, witness cohort |
 | Temporal | 8 | Solid (dive, get), hub history, drift (π9), trajectory similarity (π10), time windows, regime changes |
 | Risk Profiling | 4 | Cross-pattern profile, composite risk, passive scan |
 | Detection Recipes | 2 | `detect_pattern` meta-tool + `sphere_overview` |

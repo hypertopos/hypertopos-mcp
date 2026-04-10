@@ -1030,6 +1030,40 @@ Find edges between two entities enriched with event-level anomaly scores. Unlike
 
 ---
 
+### `find_witness_cohort`
+
+Rank entities that share an anchor entity's witness signature. **Investigative peer ranking — NOT a forecast of future edges.** Validated on AML HI-small: 20.5× lift over random base rate for co-laundering precision@10 (25.3% vs 1.2%), 2.6× improvement over `find_similar_entities + is_anomaly` baseline (6.5%), 15.5% top-10 overlap with that baseline (so results are substantively different — not ANN with extra steps), temporal hold-out recall@10 = 0% (confirms cohort discovery, not edge prediction).
+
+Combines four signals into a composite score in [0, 1]:
+- delta similarity: `exp(-distance / theta_norm)`, absolute and pool-independent
+- witness overlap: Jaccard on witness dimension labels
+- trajectory alignment: cosine on trajectory vectors (optional, [0, 1])
+- anomaly bonus: graded by `delta_rank_pct / 100`
+
+Excludes entities already connected via the resolved event pattern's edge table — this is the function's main contribution over plain ANN, removing legitimate counterparties so the cohort is denser in unknown peers worth investigating.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `primary_key` | string | required | Anchor entity key |
+| `pattern_id` | string | required | Anchor pattern (raises if event pattern given) |
+| `top_n` | int | `10` | Max cohort members returned |
+| `candidate_pool` | int | `100` | ANN over-fetch pool before filtering |
+| `min_witness_overlap` | float | `0.0` | Drop candidates whose witness Jaccard is below this |
+| `min_score` | float | `0.0` | Drop candidates whose composite score is below this |
+| `weight_delta` | float | `0.40` | Weight on delta similarity component |
+| `weight_witness` | float | `0.30` | Weight on witness overlap component |
+| `weight_trajectory` | float | `0.20` | Weight on trajectory alignment component |
+| `weight_anomaly` | float | `0.10` | Weight on anomaly bonus component |
+| `use_trajectory` | bool | `null` | `null` = auto-detect trajectory index; explicit `false` skips and renormalizes weights |
+| `bidirectional_check` | bool | `true` | When false, only outgoing edges count as existing connections |
+| `edge_pattern_id` | string | `null` | Override the auto-resolved event pattern with edge table |
+
+**Returns:** `members[]` sorted by `score` desc (each with `primary_key`, `score`, `delta_similarity`, `witness_overlap`, `trajectory_alignment`, `is_anomaly`, `delta_rank_pct`, `explanation`, `component_scores`), `excluded_existing_edges`, `excluded_low_score`, `candidate_pool_size`, `weights_used`, `summary` (`max_score`, `mean_score`, `anomaly_count`, `trajectory_used`, `target_witness_size`, `target_is_anomaly`).
+
+**When weights are not 1.0:** they should sum to 1.0 for the final score to stay in `[0, 1]`. Defaults satisfy this.
+
+---
+
 ## Temporal Analysis
 
 ### `dive_solid`
