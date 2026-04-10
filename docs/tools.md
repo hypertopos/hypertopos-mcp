@@ -651,7 +651,7 @@ aggregate("tx_pattern", "accounts",
 aggregate("tx_pattern", "districts", metric="sum:amount",
           pivot_event_field="type")
 
-# Orphaned transactions (no counterparty bank link)
+# Orphaned events (no edge to a specific line)
 aggregate("tx_pattern", "accounts", metric="count",
           missing_edge_to="cpty_banks")
 
@@ -810,7 +810,7 @@ BFS traversal through polygon edges, returning entities within N hops with anoma
 
 ### `find_counterparties`
 
-Finds transaction counterparties of an entity via an event line (outgoing targets and incoming sources).
+Finds counterparty entities via an event line (outgoing targets and incoming sources). When `pattern_id` is given and the pattern has an edge table, uses fast BTREE lookup with amount aggregates.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -818,16 +818,17 @@ Finds transaction counterparties of an entity via an event line (outgoing target
 | `line_id` | string | required | Event line containing from/to columns |
 | `from_col` | string | required | Column naming the sender |
 | `to_col` | string | required | Column naming the receiver |
-| `pattern_id` | string | `null` | When set, enriches results with `is_anomaly` + `delta_rank_pct` |
+| `pattern_id` | string | `null` | When set, enriches results with `is_anomaly` + `delta_rank_pct`. Enables edge table fast path |
 | `top_n` | int | `20` | Max counterparties to return per direction (outgoing/incoming) |
+| `use_edge_table` | bool | `true` | Set `false` to force full points scan instead of edge table |
 
-**Returns:** `outgoing[]` (entity sends TO), `incoming[]` (entity receives FROM), each with `key`, `tx_count`, and optionally `is_anomaly`, `delta_rank_pct`. Plus `summary` (`{total_outgoing, anomalous_outgoing, ...}`).
+**Returns:** `outgoing[]` (entity sends TO), `incoming[]` (entity receives FROM), each with `key`, `tx_count`, and optionally `is_anomaly`, `delta_rank_pct`. Edge table fast path adds `amount_sum`, `amount_max` per entry. Plus `summary` (`{total_outgoing, anomalous_outgoing, ...}`).
 
 ---
 
 ### `extract_chains`
 
-Extracts transaction chain patterns from an event line.
+Extracts chain patterns from an event line.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -853,7 +854,7 @@ Extracts transaction chain patterns from an event line.
 
 ### `find_chains_for_entity`
 
-Finds which transaction chains involve a specific entity — reverse lookup via chain keys.
+Finds which chains involve a specific entity — reverse lookup via chain keys.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -861,6 +862,171 @@ Finds which transaction chains involve a specific entity — reverse lookup via 
 | `pattern_id` | string | required | Chain pattern (entity line must have `chain_keys` column) |
 
 **Returns:** `chains[]` (`{chain_id, is_anomaly, delta_norm, delta_rank_pct}`), `summary` (`{total, anomalous}`).
+
+---
+
+### `find_geometric_path`
+
+Find paths between two entities scored by geometric coherence. Uses beam search over polygon edges, ranking candidate paths by a configurable scoring function.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `from_key` | string | required | Source entity key |
+| `to_key` | string | required | Target entity key |
+| `pattern_id` | string | required | Pattern with edge table |
+| `max_depth` | int | `5` | Maximum path length (hops) |
+| `beam_width` | int | `10` | Beam search width — higher = more paths explored |
+| `scoring` | string | `"geometric"` | Scoring function: `"geometric"` (delta coherence), `"amount"` (geometric score modulated by log(transaction amount)), `"anomaly"` (anomaly density), `"shortest"` (fewest hops) |
+
+**Returns:** `paths[]` — each with `keys[]`, `hop_count`, `geometric_score`. Higher `geometric_score` = more coherent path.
+
+**Notes:** Requires a pattern with an edge table. Raises an error if the pattern has no edges.
+
+---
+
+### `discover_chains`
+
+Discover entity chains from a starting point via runtime temporal BFS. Unlike `extract_chains` (which scans the full event line), this tool starts from a specific entity and traverses the edge table at query time — no pre-built chain lines required.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `primary_key` | string | required | Starting entity key |
+| `pattern_id` | string | required | Pattern with edge table |
+| `time_window_hours` | int | `168` | Max hours between consecutive hops |
+| `max_hops` | int | `10` | Maximum chain length |
+| `min_hops` | int | `2` | Minimum chain length — shorter chains discarded |
+| `max_chains` | int | `20` | Max chains to return |
+| `direction` | string | `"forward"` | Traversal direction: `"forward"`, `"backward"`, `"both"` |
+
+**Returns:** `chains[]` scored by geometric coherence, `total_chains`, `returned`.
+
+**Notes:** Does NOT require pre-built chain lines. Operates directly on the pattern's edge table via temporal BFS.
+
+---
+
+### `edge_stats`
+
+Show edge table statistics for a pattern — quick diagnostic to verify edge data availability and distribution.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `pattern_id` | string | required | Pattern to inspect |
+
+**Returns:** `row_count`, `unique_from`, `unique_to`, `timestamp_range`, `amount_range`, `avg_degree`. Returns `null` if the pattern has no edge table.
+
+---
+
+### `entity_flow`
+
+Net flow analysis per counterparty via edge table. Computes outgoing/incoming totals and per-counterparty net flow.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `primary_key` | string | required | Entity to analyze |
+| `pattern_id` | string | required | Event pattern with edge table |
+| `top_n` | int | `20` | Max counterparties to return |
+
+**Returns:** `outgoing_total`, `incoming_total`, `net_flow`, `flow_direction`, `counterparties[]` sorted by `|net_flow|` (each with `key`, `net_flow`, `direction`).
+
+---
+
+### `contagion_score`
+
+Score how many of an entity's counterparties are anomalous. Requires event pattern with edge table.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `primary_key` | string | required | Entity to score |
+| `pattern_id` | string | required | Event pattern with edge table |
+
+**Returns:** `score` (0.0–1.0), `total_counterparties`, `anomalous_counterparties`, `interpretation`.
+
+---
+
+### `contagion_score_batch`
+
+Contagion score for multiple entities in one call.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `primary_keys` | list[string] | required | Entity keys to score |
+| `pattern_id` | string | required | Event pattern with edge table |
+| `max_keys` | int | `200` | Max entities to process |
+
+**Returns:** Per-entity `results[]` plus `summary` with `mean_score`, `max_score`, `high_contagion_count`.
+
+---
+
+### `degree_velocity`
+
+Temporal connection velocity — how an entity's degree changes over time. Buckets edges by timestamp and counts unique counterparties per bucket.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `primary_key` | string | required | Entity to analyze |
+| `pattern_id` | string | required | Event pattern with edge table |
+| `n_buckets` | int | `4` | Number of time buckets |
+
+**Returns:** `buckets[]` (each with `period`, `out_degree`, `in_degree`), `velocity_out`, `velocity_in`, `interpretation`. Returns `warning` with null velocities when all timestamps are 0.
+
+---
+
+### `investigation_coverage`
+
+Agent guidance: how much of an entity's edge neighborhood has been explored. Pass explored_keys to see what's left to investigate.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `primary_key` | string | required | Entity to analyze |
+| `pattern_id` | string | required | Event pattern with edge table |
+| `explored_keys` | list[string] | `null` | Entity PKs already investigated |
+
+**Returns:** `total_edges`, `explored`, `unexplored`, `unexplored_anomalous[]` (with `is_anomaly`, `delta_rank_pct`), `coverage_pct`, `summary`.
+
+---
+
+### `propagate_influence`
+
+BFS influence propagation from seed entities with geometric decay. At each hop: influence = parent_score * decay * geometric_coherence.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `seed_keys` | list[string] | required | Starting entities (known bad actors) |
+| `pattern_id` | string | required | Event pattern with edge table |
+| `max_depth` | int | `3` | Maximum hops from seeds |
+| `decay` | float | `0.7` | Score decay per hop |
+| `min_threshold` | float | `0.001` | Stop expanding below this score |
+
+**Returns:** `affected_entities[]` sorted by `influence_score` (each with `key`, `depth`, `influence_score`, `tx_count`, `is_anomaly`), `summary`. Influence weighted by `log1p(tx_count)` — multi-transaction relationships propagate stronger. Output capped to top 100.
+
+---
+
+### `cluster_bridges`
+
+Find entities bridging geometric clusters via edge table. Runs π8 clustering then identifies cross-cluster edges.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `pattern_id` | string | required | Event pattern with edge table |
+| `n_clusters` | int | `5` | Number of geometric clusters |
+| `top_n_bridges` | int | `10` | Max bridge pairs to return |
+
+**Returns:** `clusters[]` (with `cluster_id`, `size`, `anomaly_rate`), `bridges[]` (with `cluster_a`, `cluster_b`, `edge_count`, `bridge_entities[]`), `summary`.
+
+---
+
+### `anomalous_edges`
+
+Find edges between two entities enriched with event-level anomaly scores. Unlike path/chain tools which score entities (anchor geometry), this scores individual transactions (event geometry).
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `from_key` | string | required | First entity key |
+| `to_key` | string | required | Second entity key |
+| `pattern_id` | string | required | Event pattern with edge table |
+| `top_n` | int | `10` | Max edges to return |
+
+**Returns:** `edges[]` sorted by `delta_norm` desc (each with `event_key`, `from_key`, `to_key`, `amount`, `timestamp`, `delta_norm`, `is_anomaly`, `delta_rank_pct`), `summary` with `total_edges`, `anomalous`, `max_delta_norm`.
 
 ---
 
@@ -1040,7 +1206,8 @@ Screens an entire entity population across all geometric patterns in one call. F
   {"type": "borderline", "pattern_id": "account_pattern", "rank_threshold": 80},
   {"type": "points", "line_id": "accounts", "rules": {"return_ratio": [">=", 0.4]}},
   {"type": "compound", "geometry_pattern_id": "chain_pattern",
-   "line_id": "accounts", "rules": {"return_ratio": [">=", 0.4]}}
+   "line_id": "accounts", "rules": {"return_ratio": [">=", 0.4]}},
+  {"type": "graph", "pattern_id": "tx_pattern", "contagion_threshold": 0.3}
 ]
 ```
 
@@ -1048,6 +1215,7 @@ Screens an entire entity population across all geometric patterns in one call. F
 - `borderline` — near-threshold non-anomalous entities (rank ≥ threshold AND NOT anomaly)
 - `points` — entity column rules (no geometry required)
 - `compound` — geometry ∩ points intersection
+- `graph` — graph contagion: flags entities whose anomalous counterparty ratio exceeds `contagion_threshold`. Requires event pattern with edge table. Auto-discovered by `auto_discover()`
 
 Response includes `anomaly_intensity` per source hit for geometry sources.
 
@@ -1162,7 +1330,7 @@ detection methods based on sphere capabilities and query intent.
 
 Falls back to keyword-based planning if MCP sampling is unavailable.
 
-**Available step handlers (39)** — selected automatically based on capabilities.
+**Available step handlers (42)** — selected automatically based on capabilities.
 See [mcp-spec.md](mcp-spec.md) for the full handler table. Categories:
 
 | Category | Count | Examples |
@@ -1173,7 +1341,7 @@ See [mcp-spec.md](mcp-spec.md) for the full handler table. Categories:
 | Aggregation | 1 | aggregate |
 | Observability | 5 | sphere_overview, check_alerts, detect_data_quality, anomaly_summary, aggregate_anomalies |
 | Temporal | 3 | compare_time_windows, find_drifting_similar, hub_history |
-| Network/Fraud | 4 | find_counterparties, extract_chains, find_chains_for_entity, find_common_relations |
+| Network/Graph | 7 | find_counterparties, extract_chains, find_chains_for_entity, find_common_relations, find_geometric_path, discover_chains, edge_stats |
 | Population | 2 | get_centroid_map, attract_boundary |
 | Smart-mode exclusive | 7 | assess_false_positive, detect_event_rate_anomaly, explain_anomaly_chain, detect_hub_anomaly_concentration, detect_composite_subgroup_inflation, detect_collective_drift, detect_temporal_burst |
 

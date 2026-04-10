@@ -703,25 +703,52 @@ async def detect_pattern(query: str, ctx: Context) -> str:
     if plan is None:
         plan = _fallback_plan(query, available, patterns_info)
 
-    # Phase 2: Execute steps with dependency resolution + progress
+    # Phase 2: Execute steps — independent ones in parallel, dependent ones after
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     steps = plan.get("steps", [])
     step_results: dict[str, dict] = {}
-    for i, step_spec in enumerate(steps):
-        step_name = step_spec["name"] if isinstance(step_spec, dict) else step_spec
-        params = step_spec.get("params", {}) if isinstance(step_spec, dict) else {}
+
+    # Partition into independent (no depends_on) and dependent steps
+    independent: list[dict] = []
+    dependent: list[dict] = []
+    for step_spec in steps:
+        spec = step_spec if isinstance(step_spec, dict) else {"name": step_spec}
+        if spec.get("depends_on"):
+            dependent.append(spec)
+        else:
+            independent.append(spec)
+
+    # Execute independent steps in parallel (handlers are sync, Lance releases GIL)
+    def _run_step(spec: dict) -> tuple[str, dict]:
+        name = spec["name"]
+        params = spec.get("params", {})
+        handler = _STEP_HANDLERS.get(name)
+        if handler is None:
+            return name, {"error": f"unknown step: {name}"}
+        try:
+            return name, handler(params)
+        except Exception as exc:
+            return name, {"error": str(exc)}
+
+    if independent:
+        max_workers = min(len(independent), 3)
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(_run_step, s) for s in independent]
+            for f in as_completed(futures):
+                name, result = f.result()
+                step_results[name] = result
+
+    # Execute dependent steps sequentially (need prior results)
+    for step_spec in dependent:
+        step_name = step_spec["name"]
+        params = step_spec.get("params", {})
         handler = _STEP_HANDLERS.get(step_name)
         if handler is None:
             continue
-        # Dependency resolution: inject values from prior step results
-        depends_on = step_spec.get("depends_on") if isinstance(step_spec, dict) else None
+        depends_on = step_spec.get("depends_on")
         if depends_on and depends_on in step_results:
             params = _resolve_dependency(params, step_spec, step_results[depends_on])
-        if ctx is not None and hasattr(ctx, "report_progress"):
-            await ctx.report_progress(
-                progress=i, total=len(steps), message=f"Executing {step_name}"
-            )
-        if ctx is not None and hasattr(ctx, "info"):
-            await ctx.info(f"Step {i+1}/{len(steps)}: {step_name} {params}")
         try:
             step_results[step_name] = handler(params)
         except Exception as exc:
@@ -1328,10 +1355,14 @@ def _fallback_plan(
                     },
                 })
 
-    # Cross-pattern: discrepancy detection
-    if caps.get("multi_pattern") and not step_names & {
-        "detect_cross_pattern_discrepancy", "passive_scan",
-    }:
+    # Cross-pattern: discrepancy detection — only when query explicitly mentions it
+    # (this step is expensive: runs full passive_scan + per-entity cross_pattern_profile)
+    _cross_kw = {"cross-pattern", "discrepancy", "multi-pattern", "inconsistent", "contradicting"}
+    if (
+        caps.get("multi_pattern")
+        and any(kw in query_lower for kw in _cross_kw)
+        and not step_names & {"detect_cross_pattern_discrepancy", "passive_scan"}
+    ):
         el = patterns_info.get(default_pattern, {}).get("entity_line", "")
         steps.append({
             "name": "detect_cross_pattern_discrepancy",

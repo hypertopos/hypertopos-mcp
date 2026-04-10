@@ -374,10 +374,13 @@ def find_counterparties(
     to_col: str,
     pattern_id: str | None = None,
     top_n: int = 20,
+    use_edge_table: bool = True,
 ) -> str:
     """Find transaction counterparties of an entity with optional anomaly enrichment.
 
     from_col/to_col: columns with source/destination entity keys in the event line.
+    When pattern_id is given and edge table exists, uses fast BTREE lookup with
+    amount_sum/amount_max per counterparty. Set use_edge_table=False to force points scan.
     Returns: outgoing targets, incoming sources, each with tx_count and optional anomaly status.
     """
     _require_navigator()
@@ -390,8 +393,179 @@ def find_counterparties(
         to_col,
         pattern_id=pattern_id,
         top_n=top_n,
+        use_edge_table=use_edge_table,
     )
 
+    return json.dumps(result, indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def entity_flow(
+    primary_key: str,
+    pattern_id: str,
+    top_n: int = 20,
+) -> str:
+    """Net flow analysis per counterparty via edge table.
+
+    Computes outgoing/incoming totals and per-counterparty net flow.
+    Requires event pattern with edge table.
+    Returns: outgoing_total, incoming_total, net_flow, flow_direction, counterparties sorted by |net_flow|.
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    result = nav.entity_flow(primary_key, pattern_id, top_n=top_n)
+    return json.dumps(result, indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def contagion_score(
+    primary_key: str,
+    pattern_id: str,
+) -> str:
+    """Score how many of an entity's counterparties are anomalous.
+
+    Requires event pattern with edge table. Score = anomalous/total counterparties (0.0–1.0).
+    Returns: score, total_counterparties, anomalous_counterparties, interpretation.
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    result = nav.contagion_score(primary_key, pattern_id)
+    return json.dumps(result, indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def contagion_score_batch(
+    primary_keys: list[str],
+    pattern_id: str,
+    max_keys: int = 200,
+) -> str:
+    """Contagion score for multiple entities in one call.
+
+    Returns per-entity scores plus summary (mean, max, high_contagion_count).
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    result = nav.contagion_score_batch(primary_keys, pattern_id, max_keys=max_keys)
+    return json.dumps(result, indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def degree_velocity(
+    primary_key: str,
+    pattern_id: str,
+    n_buckets: int = 4,
+) -> str:
+    """Temporal connection velocity — how entity's degree changes over time.
+
+    Buckets edges by timestamp, counts unique counterparties per bucket.
+    Velocity = last_bucket_degree / first_bucket_degree.
+    Requires event pattern with edge table.
+    Returns: buckets with out/in degree, velocity_out, velocity_in, interpretation.
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    result = nav.degree_velocity(primary_key, pattern_id, n_buckets=n_buckets)
+    return json.dumps(result, indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def investigation_coverage(
+    primary_key: str,
+    pattern_id: str,
+    explored_keys: list[str] | None = None,
+) -> str:
+    """Agent guidance: how much of an entity's edge neighborhood has been explored.
+
+    Pass explored_keys (list of entity PKs already investigated) to see coverage
+    and which unexplored counterparties are anomalous. Helps agents decide where to look next.
+    Requires event pattern with edge table.
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    explored_set = set(explored_keys) if explored_keys else set()
+    result = nav.investigation_coverage(primary_key, pattern_id, explored_set)
+    return json.dumps(result, indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def propagate_influence(
+    seed_keys: list[str],
+    pattern_id: str,
+    max_depth: int = 3,
+    decay: float = 0.7,
+    min_threshold: float = 0.001,
+) -> str:
+    """BFS influence propagation from seed entities with geometric decay.
+
+    At each hop: influence = parent_score * decay * geometric_coherence.
+    Use to trace anomaly spread or identify at-risk entities near known bad actors.
+    Requires event pattern with edge table.
+    Returns: affected_entities sorted by influence_score, summary with counts.
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    result = nav.propagate_influence(
+        seed_keys, pattern_id,
+        max_depth=max_depth, decay=decay, min_threshold=min_threshold,
+    )
+    # Cap output to top 100
+    if len(result["affected_entities"]) > 100:
+        result["affected_entities"] = result["affected_entities"][:100]
+        result["summary"]["truncated_to"] = 100
+    return json.dumps(result, indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def cluster_bridges(
+    pattern_id: str,
+    n_clusters: int = 5,
+    top_n_bridges: int = 10,
+    sample_size: int | None = None,
+) -> str:
+    """Find entities bridging geometric clusters via edge table.
+
+    Runs π8 clustering then cross-references with edge table to identify entities
+    connecting different clusters. Useful for finding structural intermediaries.
+    Requires event pattern with edge table.
+    sample_size: cap k-means input. Set to 50000 for faster results on large populations.
+    Default None = full population (accurate but slower on 500K+ entities).
+    Returns: clusters with anomaly rates, bridges with entity details, summary.
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    result = nav.cluster_bridges(
+        pattern_id, n_clusters=n_clusters, top_n_bridges=top_n_bridges,
+        sample_size=sample_size,
+    )
+    return json.dumps(result, indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def anomalous_edges(
+    from_key: str,
+    to_key: str,
+    pattern_id: str,
+    top_n: int = 10,
+) -> str:
+    """Find edges between two entities enriched with event-level anomaly scores.
+
+    Unlike path/chain tools which score entities (anchor geometry), this scores
+    individual transactions (event geometry). Use to inspect which specific
+    transactions between two entities are anomalous.
+    Requires event pattern with edge table.
+    Returns: edges sorted by delta_norm desc, summary with anomalous count.
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    result = nav.anomalous_edges(from_key, to_key, pattern_id, top_n=top_n)
     return json.dumps(result, indent=2, default=str)
 
 
@@ -414,6 +588,110 @@ def find_chains_for_entity(
         top_n=top_n,
     )
     return json.dumps(result, indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def find_geometric_path(
+    from_key: str,
+    to_key: str,
+    pattern_id: str,
+    max_depth: int = 5,
+    beam_width: int = 10,
+    scoring: str = "geometric",
+) -> str:
+    """Find paths between two entities scored by geometric coherence.
+
+    Uses edge table for traversal, delta vectors for scoring.
+    Beam search: at each depth, keep top beam_width candidates.
+
+    Scoring modes:
+    - geometric: witness overlap + delta alignment + anomaly preservation
+    - amount: geometric score modulated by log(transaction amount) — higher = coherent path through high-value transactions
+    - anomaly: prefer paths through anomalous entities
+    - shortest: plain BFS (no geometric scoring)
+
+    Requires pattern with edge table (event pattern with from/to structure).
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    result = nav.find_geometric_path(
+        from_key, to_key, pattern_id,
+        max_depth=max_depth, beam_width=beam_width, scoring=scoring,
+    )
+    # Cap output: return top 20 paths to avoid token explosion
+    total = len(result.get("paths", []))
+    if total > 20:
+        result["paths"] = result["paths"][:20]
+        result["summary"]["paths_truncated_to"] = 20
+        result["warning"] = (
+            f"Found {total} paths, showing top 20 by score. "
+            "Use smaller beam_width or max_depth to reduce results."
+        )
+    return json.dumps(result, indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def discover_chains(
+    primary_key: str,
+    pattern_id: str,
+    time_window_hours: int = 168,
+    max_hops: int = 10,
+    min_hops: int = 2,
+    max_chains: int = 20,
+    direction: str = "forward",
+) -> str:
+    """Discover transaction chains from entity via runtime temporal BFS.
+
+    Does NOT require pre-built chain lines — works on any event pattern
+    with an edge table. For pre-built chain lookups, use find_chains_for_entity.
+
+    Chains are scored by geometric coherence — highest-scored first.
+    Use direction="both" for full neighborhood chain analysis.
+
+    Note: total_amount is sum of hop amounts, not tracked money flow.
+    See "Chain Interpretation" in concepts docs for details.
+
+    Requires pattern with edge table (event pattern with from/to structure).
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    result = nav.discover_chains(
+        primary_key, pattern_id,
+        time_window_hours=time_window_hours, max_hops=max_hops,
+        min_hops=min_hops, max_chains=max_chains, direction=direction,
+    )
+    return json.dumps(result, indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def edge_stats(
+    pattern_id: str,
+) -> str:
+    """Show edge table statistics for a pattern.
+
+    Returns: row_count, unique_from, unique_to, timestamp_range,
+    amount_range, avg_degree. Useful for understanding graph density
+    before running path finding or chain discovery.
+
+    Returns null if pattern has no edge table.
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    stats = nav._storage.edge_table_stats(pattern_id)
+    if stats is None:
+        return json.dumps({
+            "pattern_id": pattern_id,
+            "has_edge_table": False,
+            "hint": "This pattern has no edge table. Rebuild the sphere with edge table support.",
+        })
+    return json.dumps({
+        "pattern_id": pattern_id,
+        "has_edge_table": True,
+        **stats,
+    }, indent=2, default=str)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})

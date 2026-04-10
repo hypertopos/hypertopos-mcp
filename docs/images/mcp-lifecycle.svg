@@ -32,7 +32,7 @@
     <text x="100" y="26" fill="#fbbf24" font-size="14" font-weight="700" text-anchor="middle">Phase 2</text>
     <text x="100" y="44" fill="#fcd34d" font-size="10" text-anchor="middle">Sphere open</text>
     <line x1="20" y1="52" x2="180" y2="52" stroke="#3a2a00" stroke-width="0.5"/>
-    <text x="100" y="70" fill="#ccd6f6" font-size="10" text-anchor="middle">5 tools</text>
+    <text x="100" y="70" fill="#ccd6f6" font-size="10" text-anchor="middle">16 tools</text>
     <text x="100" y="86" fill="#8892b0" font-size="8" text-anchor="middle">detect_pattern (smart mode)</text>
     <text x="100" y="98" fill="#8892b0" font-size="8" text-anchor="middle">sphere_overview (manual mode)</text>
   </g>
@@ -50,7 +50,7 @@
     <text x="85" y="26" fill="#2ed573" font-size="14" font-weight="700" text-anchor="middle">Phase 3</text>
     <text x="85" y="44" fill="#6ee7b7" font-size="10" text-anchor="middle">Full manual</text>
     <line x1="15" y1="52" x2="155" y2="52" stroke="#003a1a" stroke-width="0.5"/>
-    <text x="85" y="70" fill="#ccd6f6" font-size="10" text-anchor="middle">40–55 tools</text>
+    <text x="85" y="70" fill="#ccd6f6" font-size="10" text-anchor="middle">40–66 tools</text>
     <text x="85" y="86" fill="#8892b0" font-size="8" text-anchor="middle">navigation · geometry</text>
     <text x="85" y="98" fill="#8892b0" font-size="8" text-anchor="middle">analysis · detection · ...</text>
   </g>
@@ -68,7 +68,7 @@
     <rect x="0" y="0" width="340" height="85" rx="10" fill="#001a0a" stroke="#2ed573" stroke-width="1"/>
     <text x="170" y="24" fill="#2ed573" font-size="13" font-weight="700" text-anchor="middle">Manual Mode</text>
     <text x="170" y="42" fill="#ccd6f6" font-size="10" text-anchor="middle">sphere_overview → find_anomalies → explain</text>
-    <text x="170" y="58" fill="#8892b0" font-size="9" text-anchor="middle">55 tools · agent-driven exploration</text>
+    <text x="170" y="58" fill="#8892b0" font-size="9" text-anchor="middle">66 tools · agent-driven exploration</text>
     <text x="170" y="72" fill="#8892b0" font-size="9" text-anchor="middle">full control over each step</text>
   </g>
 </svg>

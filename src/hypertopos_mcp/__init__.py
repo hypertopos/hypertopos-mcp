@@ -2,4 +2,4 @@
 # SPDX-License-Identifier: Apache-2.0
 """Hypertopos MCP Server — navigate Geometric Data Spheres via MCP tools."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

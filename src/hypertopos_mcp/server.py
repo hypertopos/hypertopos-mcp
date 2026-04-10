@@ -259,6 +259,20 @@ _TOOL_TIERS: dict[str, str] = {
     "detect_neighbor_contamination": "base",
     "detect_segment_shift": "base",
     "get_centroid_map": "base",
+    # edge — visible after open_sphere (Phase 2), alongside gateway tools
+    # These require a navigator but NOT sphere_overview — they appear immediately
+    # after open_sphere so agents can traverse edges without manual mode unlock.
+    "find_geometric_path": "edge",
+    "discover_chains": "edge",
+    "edge_stats": "edge",
+    "entity_flow": "edge",
+    "contagion_score": "edge",
+    "contagion_score_batch": "edge",
+    "degree_velocity": "edge",
+    "investigation_coverage": "edge",
+    "propagate_influence": "edge",
+    "cluster_bridges": "edge",
+    "anomalous_edges": "edge",
     # temporal — visible after sphere_overview IF sphere has temporal data
     "dive_solid": "temporal",
     "get_solid": "temporal",
@@ -327,7 +341,7 @@ def _detect_capabilities() -> dict[str, bool]:
 
 def _tier_available(tier: str, caps: dict[str, bool] | None) -> bool:
     """Check if a capability tier is available given current sphere capabilities."""
-    if tier in ("always", "gateway"):
+    if tier in ("always", "gateway", "edge"):
         return True
     if caps is None:
         return False
@@ -391,16 +405,17 @@ def _unregister_phase2_tools() -> None:
 
 
 def _register_phase2_tools() -> None:
-    """Re-add gateway tools only. Called after open_sphere (Phase 2).
+    """Re-add gateway + edge tools. Called after open_sphere (Phase 2).
 
-    Exposes detect_pattern + sphere_overview — agent chooses smart or manual path.
+    Exposes detect_pattern + sphere_overview + edge table tools — agent can
+    traverse edges immediately without manual mode unlock.
     Full manual toolset is unlocked by _register_manual_tools() after sphere_overview.
     """
     global _sphere_capabilities
     _sphere_capabilities = _detect_capabilities()
     _state["manual_mode"] = False
     for name, tier in _TOOL_TIERS.items():
-        if tier == "gateway":
+        if tier in ("gateway", "edge"):
             _restore_tool(name)
     _notify_tools_changed()
 
