@@ -29,6 +29,14 @@ from hypertopos_mcp.server import (
 
 _ALWAYS = {"open_sphere", "close_sphere", "get_session_stats"}
 _GATEWAY = {"detect_pattern", "sphere_overview"}
+# Edge tier — always available alongside gateway in Phase 2 (added in 0.2.0).
+# Mirrors the "edge" entries in server._TOOL_TIERS.
+_EDGE = {
+    "find_geometric_path", "discover_chains", "edge_stats", "entity_flow",
+    "contagion_score", "contagion_score_batch", "degree_velocity",
+    "investigation_coverage", "propagate_influence", "cluster_bridges",
+    "anomalous_edges", "find_witness_cohort",
+}
 
 
 def _visible_tool_names() -> set[str]:
@@ -156,7 +164,7 @@ class TestPhase2Gateway:
         }
         _register_phase2_tools()
         visible = _visible_tool_names()
-        assert visible == _ALWAYS | _GATEWAY
+        assert visible == _ALWAYS | _GATEWAY | _EDGE
 
     @patch("hypertopos_mcp.server._detect_capabilities")
     def test_manual_mode_false_after_open(self, mock_caps):

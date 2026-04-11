@@ -375,12 +375,16 @@ def find_counterparties(
     pattern_id: str | None = None,
     top_n: int = 20,
     use_edge_table: bool = True,
+    timestamp_cutoff: float | None = None,
 ) -> str:
     """Find transaction counterparties of an entity with optional anomaly enrichment.
 
     from_col/to_col: columns with source/destination entity keys in the event line.
     When pattern_id is given and edge table exists, uses fast BTREE lookup with
     amount_sum/amount_max per counterparty. Set use_edge_table=False to force points scan.
+    timestamp_cutoff (Unix seconds): edge-table fast path only — only edges with
+    timestamp <= cutoff are considered. Used for as-of graph reconstruction.
+    Points-scan fallback silently ignores it.
     Returns: outgoing targets, incoming sources, each with tx_count and optional anomaly status.
     """
     _require_navigator()
@@ -394,6 +398,7 @@ def find_counterparties(
         pattern_id=pattern_id,
         top_n=top_n,
         use_edge_table=use_edge_table,
+        timestamp_cutoff=timestamp_cutoff,
     )
 
     return json.dumps(result, indent=2, default=str)
@@ -405,16 +410,22 @@ def entity_flow(
     primary_key: str,
     pattern_id: str,
     top_n: int = 20,
+    timestamp_cutoff: float | None = None,
 ) -> str:
     """Net flow analysis per counterparty via edge table.
 
     Computes outgoing/incoming totals and per-counterparty net flow.
     Requires event pattern with edge table.
+    timestamp_cutoff (Unix seconds): only edges with timestamp <= cutoff
+    are considered. Use for as-of flow reconstruction.
     Returns: outgoing_total, incoming_total, net_flow, flow_direction, counterparties sorted by |net_flow|.
     """
     _require_navigator()
     nav = _state["navigator"]
-    result = nav.entity_flow(primary_key, pattern_id, top_n=top_n)
+    result = nav.entity_flow(
+        primary_key, pattern_id, top_n=top_n,
+        timestamp_cutoff=timestamp_cutoff,
+    )
     return json.dumps(result, indent=2, default=str)
 
 
@@ -423,15 +434,20 @@ def entity_flow(
 def contagion_score(
     primary_key: str,
     pattern_id: str,
+    timestamp_cutoff: float | None = None,
 ) -> str:
     """Score how many of an entity's counterparties are anomalous.
 
     Requires event pattern with edge table. Score = anomalous/total counterparties (0.0–1.0).
+    timestamp_cutoff (Unix seconds): only edges with timestamp <= cutoff are considered.
+    Used for as-of graph reconstruction — reproduces contagion state at a prior point in time.
     Returns: score, total_counterparties, anomalous_counterparties, interpretation.
     """
     _require_navigator()
     nav = _state["navigator"]
-    result = nav.contagion_score(primary_key, pattern_id)
+    result = nav.contagion_score(
+        primary_key, pattern_id, timestamp_cutoff=timestamp_cutoff,
+    )
     return json.dumps(result, indent=2, default=str)
 
 
@@ -441,14 +457,19 @@ def contagion_score_batch(
     primary_keys: list[str],
     pattern_id: str,
     max_keys: int = 200,
+    timestamp_cutoff: float | None = None,
 ) -> str:
     """Contagion score for multiple entities in one call.
 
+    timestamp_cutoff (Unix seconds): forwarded to each per-entity contagion_score.
     Returns per-entity scores plus summary (mean, max, high_contagion_count).
     """
     _require_navigator()
     nav = _state["navigator"]
-    result = nav.contagion_score_batch(primary_keys, pattern_id, max_keys=max_keys)
+    result = nav.contagion_score_batch(
+        primary_keys, pattern_id, max_keys=max_keys,
+        timestamp_cutoff=timestamp_cutoff,
+    )
     return json.dumps(result, indent=2, default=str)
 
 
@@ -458,17 +479,23 @@ def degree_velocity(
     primary_key: str,
     pattern_id: str,
     n_buckets: int = 4,
+    timestamp_cutoff: float | None = None,
 ) -> str:
     """Temporal connection velocity — how entity's degree changes over time.
 
     Buckets edges by timestamp, counts unique counterparties per bucket.
     Velocity = last_bucket_degree / first_bucket_degree.
     Requires event pattern with edge table.
+    timestamp_cutoff (Unix seconds): only edges with timestamp <= cutoff are considered;
+    the last bucket endpoint is naturally <= cutoff.
     Returns: buckets with out/in degree, velocity_out, velocity_in, interpretation.
     """
     _require_navigator()
     nav = _state["navigator"]
-    result = nav.degree_velocity(primary_key, pattern_id, n_buckets=n_buckets)
+    result = nav.degree_velocity(
+        primary_key, pattern_id, n_buckets=n_buckets,
+        timestamp_cutoff=timestamp_cutoff,
+    )
     return json.dumps(result, indent=2, default=str)
 
 
@@ -500,12 +527,15 @@ def propagate_influence(
     max_depth: int = 3,
     decay: float = 0.7,
     min_threshold: float = 0.001,
+    timestamp_cutoff: float | None = None,
 ) -> str:
     """BFS influence propagation from seed entities with geometric decay.
 
     At each hop: influence = parent_score * decay * geometric_coherence.
     Use to trace anomaly spread or identify at-risk entities near known bad actors.
     Requires event pattern with edge table.
+    timestamp_cutoff (Unix seconds): BFS only follows edges with timestamp <= cutoff.
+    Used to reconstruct what influence propagation would have surfaced on a prior date.
     Returns: affected_entities sorted by influence_score, summary with counts.
     """
     _require_navigator()
@@ -513,6 +543,7 @@ def propagate_influence(
     result = nav.propagate_influence(
         seed_keys, pattern_id,
         max_depth=max_depth, decay=decay, min_threshold=min_threshold,
+        timestamp_cutoff=timestamp_cutoff,
     )
     # Cap output to top 100
     if len(result["affected_entities"]) > 100:

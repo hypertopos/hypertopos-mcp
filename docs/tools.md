@@ -821,6 +821,7 @@ Finds counterparty entities via an event line (outgoing targets and incoming sou
 | `pattern_id` | string | `null` | When set, enriches results with `is_anomaly` + `delta_rank_pct`. Enables edge table fast path |
 | `top_n` | int | `20` | Max counterparties to return per direction (outgoing/incoming) |
 | `use_edge_table` | bool | `true` | Set `false` to force full points scan instead of edge table |
+| `timestamp_cutoff` | float | `null` | Unix seconds. Edge-table fast path only — consider only edges with `timestamp <= cutoff`. As-of reconstruction. **Raises** `GDSNavigationError` when supplied with the points-scan fallback (no `pattern_id` or `use_edge_table=False`). |
 
 **Returns:** `outgoing[]` (entity sends TO), `incoming[]` (entity receives FROM), each with `key`, `tx_count`, and optionally `is_anomaly`, `delta_rank_pct`. Edge table fast path adds `amount_sum`, `amount_max` per entry. Plus `summary` (`{total_outgoing, anomalous_outgoing, ...}`).
 
@@ -925,6 +926,7 @@ Net flow analysis per counterparty via edge table. Computes outgoing/incoming to
 | `primary_key` | string | required | Entity to analyze |
 | `pattern_id` | string | required | Event pattern with edge table |
 | `top_n` | int | `20` | Max counterparties to return |
+| `timestamp_cutoff` | float | `null` | Unix seconds. Only edges with `timestamp <= cutoff` are considered. As-of flow reconstruction. |
 
 **Returns:** `outgoing_total`, `incoming_total`, `net_flow`, `flow_direction`, `counterparties[]` sorted by `|net_flow|` (each with `key`, `net_flow`, `direction`).
 
@@ -938,6 +940,7 @@ Score how many of an entity's counterparties are anomalous. Requires event patte
 |-----------|------|---------|-------------|
 | `primary_key` | string | required | Entity to score |
 | `pattern_id` | string | required | Event pattern with edge table |
+| `timestamp_cutoff` | float | `null` | Unix seconds. Only edges with `timestamp <= cutoff` are considered. Enables as-of contagion reconstruction — e.g. pass the incident timestamp to see how much of the neighborhood was contaminated on that day. |
 
 **Returns:** `score` (0.0–1.0), `total_counterparties`, `anomalous_counterparties`, `interpretation`.
 
@@ -952,6 +955,7 @@ Contagion score for multiple entities in one call.
 | `primary_keys` | list[string] | required | Entity keys to score |
 | `pattern_id` | string | required | Event pattern with edge table |
 | `max_keys` | int | `200` | Max entities to process |
+| `timestamp_cutoff` | float | `null` | Unix seconds. Forwarded to each per-entity `contagion_score`. |
 
 **Returns:** Per-entity `results[]` plus `summary` with `mean_score`, `max_score`, `high_contagion_count`.
 
@@ -966,6 +970,7 @@ Temporal connection velocity — how an entity's degree changes over time. Bucke
 | `primary_key` | string | required | Entity to analyze |
 | `pattern_id` | string | required | Event pattern with edge table |
 | `n_buckets` | int | `4` | Number of time buckets |
+| `timestamp_cutoff` | float | `null` | Unix seconds. Only edges with `timestamp <= cutoff` are considered; the last bucket endpoint is naturally `<= cutoff`. |
 
 **Returns:** `buckets[]` (each with `period`, `out_degree`, `in_degree`), `velocity_out`, `velocity_in`, `interpretation`. Returns `warning` with null velocities when all timestamps are 0.
 
@@ -996,6 +1001,7 @@ BFS influence propagation from seed entities with geometric decay. At each hop: 
 | `max_depth` | int | `3` | Maximum hops from seeds |
 | `decay` | float | `0.7` | Score decay per hop |
 | `min_threshold` | float | `0.001` | Stop expanding below this score |
+| `timestamp_cutoff` | float | `null` | Unix seconds. BFS only follows edges with `timestamp <= cutoff`. Use to reconstruct what propagation would have surfaced on a prior date. |
 
 **Returns:** `affected_entities[]` sorted by `influence_score` (each with `key`, `depth`, `influence_score`, `tx_count`, `is_anomaly`), `summary`. Influence weighted by `log1p(tx_count)` — multi-transaction relationships propagate stronger. Output capped to top 100.
 

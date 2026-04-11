@@ -49,17 +49,23 @@ class TestFallbackPlan:
         assert not any(s["name"] == "detect_trajectory_anomaly" for s in plan["steps"])
 
     def test_entity_context_tools_excluded(self):
-        """Tools needing entity-specific params must not appear in
-        keyword fallback (which can only supply pattern_id)."""
+        """Tools needing entity-specific params (primary_key, from_col, etc.)
+        must not appear in keyword fallback.
+
+        Note: `attract_boundary` is intentionally NOT in this set — it needs
+        only `alias_id`, which the keyword path supplies automatically by
+        picking the first sphere alias when one exists. See the
+        `elif step_name == "attract_boundary"` branch in `_fallback_plan`.
+        """
         entity_tools = {
             "find_counterparties", "extract_chains", "find_common_relations",
-            "get_centroid_map", "attract_boundary", "assess_false_positive",
+            "get_centroid_map", "assess_false_positive",
             "explain_anomaly_chain", "detect_composite_subgroup_inflation",
             "hub_history",
         }
         # query triggers every keyword bucket; all entity tools marked available
         query = (
-            "counterpart chain common relation centroid boundary "
+            "counterpart chain common relation centroid "
             "false positive anomaly chain subgroup inflat hub history"
         )
         plan = _fallback_plan(

@@ -56,7 +56,7 @@ Server start → Phase 1 (3 tools: always)
 open_sphere(path) → Phase 2 (17 tools: always + gateway + edge)
     ↓
   ├─ detect_pattern(query) → smart mode (no extra tools)
-  └─ sphere_overview()     → Phase 3 (54-67 tools: full manual mode)
+  └─ sphere_overview()     → Phase 3 (41-67 tools: full manual mode)
     ↓
 close_sphere() → Phase 1 (3 tools)
     ↓
@@ -87,7 +87,7 @@ After `open_sphere`, two operation modes are available via the gateway (Phase 2)
 | Mode | Entry point | Tools visible | Tokens/turn | When to use |
 |------|-------------|--------------|-------------|-------------|
 | **Smart** | `detect_pattern` | 1 meta-tool (no Phase 3 unlock) | ~400 tk | Agent describes intent in natural language; server plans steps via MCP sampling, executes internally, filters + interprets results |
-| **Manual** | `sphere_overview` | 54-67 (unlocked in Phase 3) | ~6-8k tk | Debugging, exploration, custom investigation sequences, follow-up on smart mode findings |
+| **Manual** | `sphere_overview` | 41-67 (unlocked in Phase 3) | ~6-8k tk | Debugging, exploration, custom investigation sequences, follow-up on smart mode findings |
 
 Modes are **not exclusive** — an agent can use `detect_pattern` for overview, then call
 `sphere_overview` to unlock granular tools for drill-down.
@@ -208,7 +208,7 @@ doesn't support elicitation (`hasattr(ctx, "elicit")` + `try/except`).
 | **Progress** | `ctx.report_progress(i, total)` during step execution | Silently skip |
 | **Logging** | `ctx.info(step_name)` for structured diagnostics | No-op |
 | **Instructions** | `FastMCP(instructions=...)` — mentions `detect_pattern` as entry point | N/A |
-| **Tool Annotations** | `readOnlyHint=True` on 62 read-only tools | Host assumes worst case |
+| **Tool Annotations** | `readOnlyHint=True` on 63 read-only tools | Host assumes worst case |
 
 ## Token Cost per Phase
 

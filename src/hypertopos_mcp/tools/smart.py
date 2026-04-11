@@ -1255,12 +1255,16 @@ def _fallback_plan(
         ("collective drift", "coordinated", "drifted together"): "detect_collective_drift",
         ("burst", "frequency spike", "event spike"): "detect_temporal_burst",
     }
-    # Tools that require entity-specific params (primary_key, from_col, alias_id,
-    # etc.) that keyword fallback cannot provide — skip them to avoid crashes
-    # with empty-string params.
+    # Tools that require entity-specific params (primary_key, from_col, etc.)
+    # that keyword fallback cannot provide — skip them to avoid crashes with
+    # empty-string params. attract_boundary is intentionally NOT here: it
+    # needs alias_id, which the post-loop alias-special-case below supplies
+    # automatically by picking the first sphere alias. Listing it here would
+    # never fire on alias-equipped spheres anyway, only on alias-less ones
+    # where the special-case is silent.
     _NEEDS_ENTITY_CONTEXT = {
         "find_counterparties", "extract_chains", "find_common_relations",
-        "get_centroid_map", "attract_boundary", "assess_false_positive",
+        "get_centroid_map", "assess_false_positive",
         "explain_anomaly_chain", "detect_composite_subgroup_inflation",
         "hub_history",
     }
@@ -1279,6 +1283,21 @@ def _fallback_plan(
                 if el and el not in seen_lines:
                     seen_lines.add(el)
                     steps.append({"name": step_name, "params": {"entity_line": el}})
+        elif step_name == "attract_boundary":
+            # attract_boundary needs alias_id — pick the first sphere alias as a
+            # representative starting point. If the sphere has no aliases the
+            # tool is unusable in keyword fallback, so skip silently.
+            _sphere = _state["sphere"]._sphere if _state.get("sphere") else None
+            if _sphere and _sphere.aliases:
+                for aid, alias in _sphere.aliases.items():
+                    steps.append({
+                        "name": "attract_boundary",
+                        "params": {
+                            "alias_id": aid,
+                            "pattern_id": alias.base_pattern_id,
+                        },
+                    })
+                    break  # first alias only
         else:
             # Run on all matched patterns (multi-pattern scan)
             for pid in matched:
@@ -1369,9 +1388,16 @@ def _fallback_plan(
             "params": {"entity_line": el},
         })
 
-    # Alias boundary: if sphere has aliases, check boundary entities
+    # Alias boundary fallback: if sphere has aliases and the keyword loop did
+    # not already add attract_boundary (no boundary/cutting-plane keywords in
+    # the query), add one as a default exploratory step. The keyword path
+    # above handles the explicit-keyword case.
     _sphere = _state["sphere"]._sphere if _state.get("sphere") else None
-    if _sphere and _sphere.aliases and "attract_boundary" not in step_names:
+    if (
+        _sphere and _sphere.aliases
+        and "attract_boundary" not in step_names
+        and "attract_boundary" in available
+    ):
         for aid, alias in _sphere.aliases.items():
             steps.append({
                 "name": "attract_boundary",
