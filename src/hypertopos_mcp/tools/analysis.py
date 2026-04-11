@@ -588,13 +588,9 @@ def find_witness_cohort(
 ) -> str:
     """Rank entities that share an anchor entity's witness signature.
 
-    Investigative peer ranking — NOT a forecast of future edges. Validated on
-    AML HI-small: 20.5x lift over random for co-laundering precision@10 (25.3%
-    vs 1.2% base rate), and 2.6x improvement over find_similar_entities with
-    is_anomaly filter (6.5% baseline). Top-10 overlap with that baseline is
-    only 15.5%, so results are substantively different — not ANN with extra
-    steps. Temporal hold-out recall@10 is 0%, confirming the tool surfaces
-    existing peers, not future connections.
+    Investigative peer ranking — NOT a forecast of future edges. Surfaces
+    existing peers sharing the target's anomaly signature, not future
+    connections.
 
     Combines four signals into a composite score in [0, 1]:
     - delta similarity: exp(-distance / theta_norm), absolute and pool-independent

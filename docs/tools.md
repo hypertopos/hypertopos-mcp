@@ -1032,7 +1032,7 @@ Find edges between two entities enriched with event-level anomaly scores. Unlike
 
 ### `find_witness_cohort`
 
-Rank entities that share an anchor entity's witness signature. **Investigative peer ranking — NOT a forecast of future edges.** Validated on AML HI-small: 20.5× lift over random base rate for co-laundering precision@10 (25.3% vs 1.2%), 2.6× improvement over `find_similar_entities + is_anomaly` baseline (6.5%), 15.5% top-10 overlap with that baseline (so results are substantively different — not ANN with extra steps), temporal hold-out recall@10 = 0% (confirms cohort discovery, not edge prediction).
+Rank entities that share an anchor entity's witness signature. **Investigative peer ranking — NOT a forecast of future edges.** Surfaces existing peers sharing the target's anomaly signature, not future connections.
 
 Combines four signals into a composite score in [0, 1]:
 - delta similarity: `exp(-distance / theta_norm)`, absolute and pool-independent
