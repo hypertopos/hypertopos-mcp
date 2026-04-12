@@ -1,35 +1,21 @@
 # hypertopos-mcp
 
-> **MCP server for hypertopos geometric data sphere.**
+> MCP tools for exploring geometric data spaces with AI agents.
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-compatible-green.svg)](https://modelcontextprotocol.io)
-[![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-0.3.1-%235500FF.svg)](pyproject.toml)
 
-**hypertopos-mcp** gives AI agents a safe, stateful way to explore Geometric Data Spheres without writing SQL or touching the storage layer. It wraps the [hypertopos](https://github.com/hypertopos/hypertopos-py) core library into 67 MCP tools with automatic context management, 3-phase tool visibility, smart detection recipes, and graph+geometry fusion — runtime graph traversal scored by population-relative geometry, anomaly contagion tracing, influence propagation, cluster bridge discovery, and witness cohort discovery.
+hypertopos-mcp gives AI agents a way to explore data built with [hypertopos](https://github.com/hypertopos/hypertopos-py). Instead of writing queries, agents navigate a geometric space — finding anomalies, tracing relationships, comparing populations, and tracking change over time.
 
-## Quick Start
+## Quick start
 
 ```bash
 pip install hypertopos-mcp
 ```
 
-Run the server:
-
-```bash
-hypertopos-mcp
-```
-
-Or as a module:
-
-```bash
-python -m hypertopos_mcp.main
-```
-
-## Configuration
-
-Set `HYPERTOPOS_SPHERE_PATH` so the first tool call can open the sphere automatically.
+Configure your MCP client:
 
 ```json
 {
@@ -37,121 +23,49 @@ Set `HYPERTOPOS_SPHERE_PATH` so the first tool call can open the sphere automati
     "hypertopos": {
       "command": "hypertopos-mcp",
       "env": {
-        "PYTHONPATH": "/path/to/hypertopos-mcp/src:/path/to/hypertopos",
-        "HYPERTOPOS_SPHERE_PATH": "/path/to/gds/sphere"
+        "HYPERTOPOS_SPHERE_PATH": "path/to/your/sphere"
       }
     }
   }
 }
 ```
 
-Use relative sphere paths when calling `open_sphere`. Absolute Windows paths are not supported.
+The agent starts with `open_sphere`, then either:
+- `detect_pattern("find anomalous accounts")` — smart detection in a single call
+- `sphere_overview()` — unlock the full manual toolset for step-by-step exploration
 
-## Smart Detection
+## What an agent can do
 
-The primary entry point after opening a sphere is `detect_pattern(query)` — a meta-tool that plans and executes detection workflows server-side. Describe what you want to find in natural language; the server selects from 39 step handlers, chains them with dependency resolution, and returns filtered, interpreted results in a single round-trip.
+- Find anomalies — entities far from the population norm
+- Discover clusters and structural archetypes
+- Navigate between related entities
+- Trace relationship chains and transaction flows
+- Compare populations across groups or time windows
+- Track drift and detect regime changes
+- Score contagion risk through network proximity
 
-For manual exploration, call `sphere_overview()` first to unlock granular tools.
+## How it works
 
-## 3-Phase Tool Visibility
+1. Build a geometric space from relational data using [hypertopos-py](https://github.com/hypertopos/hypertopos-py)
+2. Connect the space via hypertopos-mcp
+3. The agent explores — each finding leads to the next
 
-![MCP Lifecycle](docs/images/mcp-lifecycle.svg)
+Tools are registered dynamically. The agent starts with a small set and unlocks more as it explores — keeping context lean.
 
-Tool registration is dynamic to minimize token consumption:
+## Works best with skills
 
-| Phase | Trigger | Tools visible |
-|-------|---------|---------------|
-| **Phase 1** | Server start | 3 tools (`open_sphere`, `close_sphere`, `get_session_stats`) |
-| **Phase 2** | `open_sphere` | 17 tools (Phase 1 + gateway + 12 edge table tools) |
-| **Phase 3** | `sphere_overview` | 54-67 tools (full manual toolset, capability-dependent) |
-
-## Recommended First Calls
-
-```python
-open_sphere("benchmark/berka/sphere/gds_berka_banking")
-detect_pattern("find anomalous accounts and explain top findings")
-# — or for manual exploration —
-sphere_overview()
-```
-
-## Using The MCP
-
-### Claude Code
-
-Run `hypertopos-mcp` in the same environment as `hypertopos`, then point your agent session at the workspace that contains the sphere data.
-
-### Claude.ai
-
-1. Install the package in the environment that powers the agent.
-2. Configure the MCP server command.
-3. Point `HYPERTOPOS_SPHERE_PATH` at a local sphere directory.
-
-### Cursor
-
-Use the package as a local MCP target and keep the sphere path available in the workspace environment. The quickest loop is `open_sphere()` followed by `get_sphere_info()`.
-
-### Codex and other CLI agents
-
-Launch `hypertopos-mcp` alongside the agent process and make sure the same Python environment can import `hypertopos_mcp`. The server works best when the sphere path is set before the first tool call.
-
-### Other platforms
-
-If the platform supports MCP, wire it to `hypertopos-mcp` and keep a local sphere path available. If it only supports Markdown instructions, pair it with the README plus the relevant `benchmark/` notes for the sphere you are using.
-
-## Tool Groups (67 tools)
-
-| Group | Tools | What it covers |
-|-------|:-----:|----------------|
-| Session & Discovery | 10 | Open/close sphere, schema, search (exact, FTS, hybrid), recalibrate |
-| Health & Observability | 6 | Population summary, alerts, data quality, geometry stats, π11/π12 |
-| Navigation | 6 | goto, walk, jump, dive, emerge, position |
-| Geometry | 3 | Polygon, solid, event polygons |
-| Anomaly Detection | 5 | Find anomalies (π5), summary, batch check, explain |
-| Similarity & Comparison | 3 | Similar entities, pairwise compare, common relations |
-| Aggregation | 1 | Count, sum, avg, min, max, median, percentiles, pivots, filters |
-| Population Analysis | 4 | Contrast populations, centroids, clusters (π8), boundary (π6) |
-| Hub & Network | 15 | Hubs (π7), neighborhood, counterparties, chains, flow, contagion, velocity, coverage, influence, bridges, anomalous edges, witness cohort |
-| Temporal | 8 | Solid (dive, get), hub history, drift (π9), trajectory similarity (π10), time windows, regime changes |
-| Risk Profiling | 4 | Cross-pattern profile, composite risk, passive scan |
-| Detection Recipes | 2 | `detect_pattern` meta-tool + `sphere_overview` |
-
-Full parameter reference: [docs/tools.md](docs/tools.md)
-
-## Project Layout
-
-```text
-src/hypertopos_mcp/
-|-- __init__.py
-|-- main.py          # entry point
-|-- server.py        # FastMCP instance and state management
-|-- serializers.py   # model to JSON serialization
-|-- enrichment.py    # response enrichment helpers
-`-- tools/
-    |-- __init__.py
-    |-- _guards.py        # response-size guards shared across tools
-    |-- session.py        # sphere, entity discovery, search, calibration
-    |-- navigation.py     # navigation primitives (pi1-pi6), anomaly scan
-    |-- geometry.py       # polygon, solid, event polygons
-    |-- analysis.py       # similarity, risk, counterparties, passive scan
-    |-- aggregation.py    # fact aggregation with filters and sampling
-    |-- observability.py  # health checks, alerts, calibration
-    |-- detection.py      # single-call anomaly category recipes
-    `-- smart.py          # detect_pattern meta-tool and step handlers
-```
+hypertopos-mcp provides tools. [hypertopos-skills](https://github.com/hypertopos/hypertopos-skills) provides judgment — structured investigation workflows that guide agents through real tasks like fraud detection, anomaly triage, and drift monitoring.
 
 ## Documentation
 
 | | |
 |---|---|
-| **[MCP Specification](docs/mcp-spec.md)** | Full server spec: 3-phase loading, 39 step handlers, sampling, resources, prompts |
-| **[Tool Reference](docs/tools.md)** | All MCP tool parameters, return shapes, filters |
-| **[Core Concepts](https://github.com/hypertopos/hypertopos-py/blob/main/docs/concepts.md)** | GDS mental model, objects, mathematical foundation |
-| **[API Reference](https://github.com/hypertopos/hypertopos-py/blob/main/docs/api-reference.md)** | Python API — classes, methods, navigation primitives |
+| [Tool Reference](docs/tools.md) | All tool parameters, return shapes, filters |
+| [MCP Specification](docs/mcp-spec.md) | Server spec, lifecycle, transport, error codes |
 
-## Notes
+## Status
 
-- `open_sphere` returns status information only; call `get_sphere_info` right after to learn the full schema.
-- Every tool response includes `elapsed_ms` for quick performance checks.
+Research-stage project. Tooling and API may evolve.
 
 ## License
 
