@@ -5,7 +5,7 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-compatible-green.svg)](https://modelcontextprotocol.io)
-[![Version](https://img.shields.io/badge/version-0.2.2-blue.svg)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)](pyproject.toml)
 
 **hypertopos-mcp** gives AI agents a safe, stateful way to explore Geometric Data Spheres without writing SQL or touching the storage layer. It wraps the [hypertopos](https://github.com/hypertopos/hypertopos-py) core library into 67 MCP tools with automatic context management, 3-phase tool visibility, smart detection recipes, and graph+geometry fusion — runtime graph traversal scored by population-relative geometry, anomaly contagion tracing, influence propagation, cluster bridge discovery, and witness cohort discovery.
 
@@ -63,7 +63,7 @@ Tool registration is dynamic to minimize token consumption:
 |-------|---------|---------------|
 | **Phase 1** | Server start | 3 tools (`open_sphere`, `close_sphere`, `get_session_stats`) |
 | **Phase 2** | `open_sphere` | 17 tools (Phase 1 + gateway + 12 edge table tools) |
-| **Phase 3** | `sphere_overview` | 41-67 tools (full manual toolset, capability-dependent) |
+| **Phase 3** | `sphere_overview` | 54-67 tools (full manual toolset, capability-dependent) |
 
 ## Recommended First Calls
 

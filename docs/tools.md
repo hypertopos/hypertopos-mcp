@@ -628,7 +628,7 @@ Aggregates event polygon data. Equivalent to SQL `SELECT metric FROM pattern GRO
 
 **Dead entities:** `aggregate` only returns entities appearing as edges in at least one polygon. Entities with no polygon connections are excluded from `total_groups`. Compare with `search_entities(total)` to detect zero-event entities.
 
-**DataFusion acceleration:** For `sum/avg/min/max` metrics on patterns >500K rows, `aggregate` automatically uses Apache DataFusion (requires `pip install hypertopos[datafusion]`; falls back to Arrow path if unavailable). `event_filters` bypasses DataFusion.
+**Lance SQL acceleration:** All aggregate paths (count, sum, avg, min, max, pivot, percentile) push GROUP BY into the Lance scanner via built-in DataFusion. No extra install required.
 
 **Examples:**
 ```python
