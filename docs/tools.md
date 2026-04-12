@@ -453,6 +453,9 @@ Finds the most anomalous polygons in a pattern, ranked by `delta_norm` descendin
 | `rank_by_property` | string | `null` | Re-rank by raw property value (DESC) instead of delta_norm |
 | `missing_edge_to` | string | `null` | Keep only anomalies with NO edge to this line (orphan detection) |
 | `include_emerging` | bool | `false` | Append `emerging[]`: non-anomalous entities whose forecast crosses the threshold. Scans up to 100 entities. Only evaluated when `offset=0`. |
+| `fdr_alpha` | float | `null` | Apply Benjamini-Hochberg FDR control at this level (0-1 exclusive). Returns only entities with `q_value <= alpha`. Each retained entity carries a `q_value` field. `null` = no FDR filtering (legacy behavior). |
+| `fdr_method` | string | `"bh"` | FDR method. Only `"bh"` (Benjamini-Hochberg) supported. |
+| `select` | string | `"top_norm"` | `"top_norm"` ranks by score descending. `"diverse"` applies submodular facility location to pick the K most geometrically diverse representatives — each result includes a `representativeness` count. |
 
 **Returns:** `polygons[]`, `total_found` (total above threshold), `capped_warning` when top_n was reduced.
 
@@ -747,6 +750,9 @@ Finds entities nearest to a geometric cutting plane defined on an alias (π6).
 | `pattern_id` | string | required | Pattern |
 | `direction` | string | `"both"` | `"in"` = inside segment, `"out"` = outside, `"both"` = both sides |
 | `top_n` | int | `10` | Number of results |
+| `fdr_alpha` | float | `null` | Apply Benjamini-Hochberg FDR control at this level (0-1 exclusive). Returns only entities with `q_value <= alpha`. Each retained entity carries a `q_value` field. `null` = no FDR filtering (legacy behavior). |
+| `fdr_method` | string | `"bh"` | FDR method. Only `"bh"` (Benjamini-Hochberg) supported. |
+| `select` | string | `"top_norm"` | `"top_norm"` ranks by boundary distance ascending. `"diverse"` applies submodular facility location to pick the K most geometrically diverse representatives — each result includes a `representativeness` count. |
 
 **Returns per entity:** `primary_key`, `signed_distance` (>0 = inside, <0 = outside, ≈0 = at boundary), `is_in_segment`, `delta_norm`, `is_anomaly`.
 
@@ -765,6 +771,9 @@ Ranks entities by geometric connectivity — shape-vector footprint (π7).
 | `pattern_id` | string | required | Pattern |
 | `top_n` | int | `10` | Max results (hard cap: 25). `capped_warning` when reduced. |
 | `line_id_filter` | string | `null` | Restrict hub score to edges of one line. When set, `score_stats` reflects the filtered distribution. |
+| `fdr_alpha` | float | `null` | Apply Benjamini-Hochberg FDR control at this level (0-1 exclusive). Returns only entities with `q_value <= alpha`. Each retained entity carries a `q_value` field. `null` = no FDR filtering (legacy behavior). |
+| `fdr_method` | string | `"bh"` | FDR method. Only `"bh"` (Benjamini-Hochberg) supported. |
+| `select` | string | `"top_norm"` | `"top_norm"` ranks by hub score descending. `"diverse"` applies submodular facility location to pick the K most geometrically diverse representatives — each result includes a `representativeness` count. |
 
 **Returns per entity:** `key`, `properties`, `alive_edges`, `hub_score`, `hub_score_pct`.
 
@@ -1102,6 +1111,9 @@ Finds entities with the highest temporal drift — geometric velocity over recor
 | `sample_size` | int | `null` | Subsample N entities before scanning. Recommended for large populations. |
 | `forecast_horizon` | int | `null` | When set, each result includes `drift_forecast` with predicted displacement and anomaly status at `t + horizon`. Requires ≥3 slices. |
 | `rank_by_dimension` | string | `null` | When set, re-rank by the absolute change on this specific dimension name instead of overall displacement. Use dimension display names or line IDs from the pattern relations. |
+| `fdr_alpha` | float | `null` | Apply Benjamini-Hochberg FDR control at this level (0-1 exclusive). Returns only entities with `q_value <= alpha`. Each retained entity carries a `q_value` field. `null` = no FDR filtering (legacy behavior). |
+| `fdr_method` | string | `"bh"` | FDR method. Only `"bh"` (Benjamini-Hochberg) supported. |
+| `select` | string | `"top_norm"` | `"top_norm"` ranks by displacement descending. `"diverse"` applies submodular facility location to pick the K most geometrically diverse representatives — each result includes a `representativeness` count. |
 
 **Returns per entity:**
 

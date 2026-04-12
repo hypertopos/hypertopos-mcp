@@ -846,10 +846,16 @@ def find_hubs(
     pattern_id: str,
     top_n: int = 10,
     line_id_filter: str | None = None,
+    fdr_alpha: float | None = None,
+    fdr_method: str = "bh",
+    select: str = "top_norm",
 ) -> str:
     """Find entities with highest geometric connectivity (hub score).
 
     line_id_filter: rank by a single relation line instead of all.
+    fdr_alpha: apply Benjamini-Hochberg FDR control at this level. Returns only entities with q_value <= alpha. Default None = legacy behavior.
+    fdr_method: "bh" only in this version. "storey" reserved for future.
+    select: "top_norm" (default, rank by score) or "diverse" (submodular facility location — K most diverse representatives with representativeness counts).
     Returns: top_n entities by hub_score desc, mode (continuous/binary), score_stats. Hard cap 25.
     """
     _require_navigator()
@@ -866,6 +872,9 @@ def find_hubs(
         pattern_id,
         top_n=top_n,
         line_id_filter=line_id_filter,
+        fdr_alpha=fdr_alpha,
+        fdr_method=fdr_method,
+        select=select,
     )
 
     # Enrich with entity properties
@@ -1131,6 +1140,9 @@ def find_drifting_entities(
     filters: dict | None = None,
     forecast_horizon: int | None = None,
     rank_by_dimension: str | None = None,
+    fdr_alpha: float | None = None,
+    fdr_method: str = "bh",
+    select: str = "top_norm",
 ) -> str:
     """Find entities with highest geometric drift over time (anchor patterns only).
 
@@ -1138,6 +1150,9 @@ def find_drifting_entities(
     forecast_horizon: add drift_forecast per entity (requires >=3 slices).
     rank_by_dimension: rank by drift on a specific dimension instead of total displacement.
     sample_size: recommended for >100K entities to bound latency. Hard cap 50.
+    fdr_alpha: apply Benjamini-Hochberg FDR control at this level. Returns only entities with q_value <= alpha. Default None = legacy behavior.
+    fdr_method: "bh" only in this version. "storey" reserved for future.
+    select: "top_norm" (default, rank by score) or "diverse" (submodular facility location — K most diverse representatives with representativeness counts).
     Returns: per-entity displacement, path_length, ratio, dimension_diffs, tac, reputation.
     """
     _require_navigator()
@@ -1158,6 +1173,9 @@ def find_drifting_entities(
         filters=filters,
         forecast_horizon=forecast_horizon,
         rank_by_dimension=rank_by_dimension,
+        fdr_alpha=fdr_alpha,
+        fdr_method=fdr_method,
+        select=select,
     )
 
     # Enrich with entity properties

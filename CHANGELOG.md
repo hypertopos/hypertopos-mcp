@@ -4,6 +4,12 @@ All notable changes to `hypertopos-mcp` will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.1] — 2026-04-12
+
+### Added
+
+- `fdr_alpha`, `fdr_method`, and `select` parameters on `find_anomalies`, `attract_boundary`, `find_hubs`, and `find_drifting_entities`. Thin passthrough to the navigator — all FDR correction and submodular selection logic lives in the core library. Default behavior preserved when parameters are omitted.
+
 ## [0.3.0] — 2026-04-12
 
 > **Theme:** downstream effect of the hypertopos 0.3.0 Lance perf upgrade. No new MCP tool surface, no signature changes, no breaking parameter renames. Every tool that calls `aggregate`, `find_anomalies`, `passive_scan`, or `composite_risk` benefits from the new Lance SQL aggregate engine and the precomputed contagion stats fast path under the hood.

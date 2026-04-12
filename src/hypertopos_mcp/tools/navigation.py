@@ -218,6 +218,9 @@ def find_anomalies(
     missing_edge_to: str | None = None,
     rank_by_property: str | None = None,
     property_filters: dict | None = None,
+    fdr_alpha: float | None = None,
+    fdr_method: str = "bh",
+    select: str = "top_norm",
 ) -> str:
     """Find the most anomalous polygons in a pattern, ranked by delta_norm.
 
@@ -226,6 +229,9 @@ def find_anomalies(
     missing_edge_to: keep only anomalous entities with NO edge to this line.
     rank_by_property: re-rank by a raw entity property instead of delta_norm.
     property_filters: filter by entity properties before ranking ({"col": {"gt": X}}).
+    fdr_alpha: apply Benjamini-Hochberg FDR control at this level. Returns only entities with q_value <= alpha. Default None = legacy behavior.
+    fdr_method: "bh" only in this version. "storey" reserved for future.
+    select: "top_norm" (default, rank by score) or "diverse" (submodular facility location — K most diverse representatives with representativeness counts).
     Returns: anomalous polygons with anomaly_dimensions, clusters, total_found.
     """
     _require_navigator()
@@ -268,6 +274,9 @@ def find_anomalies(
         include_emerging=include_emerging,
         rank_by_property=rank_by_property,
         property_filters=property_filters,
+        fdr_alpha=fdr_alpha,
+        fdr_method=fdr_method,
+        select=select,
     )
 
     serialized = [_serialize_polygon(p) for p in polygons]
@@ -388,16 +397,25 @@ def attract_boundary(
     pattern_id: str,
     direction: str = "both",
     top_n: int = 10,
+    fdr_alpha: float | None = None,
+    fdr_method: str = "bh",
+    select: str = "top_norm",
 ) -> str:
     """Find entities closest to an alias segment boundary (requires cutting_plane).
 
     direction: "in" (at risk of leaving), "out" (about to enter), or "both".
+    fdr_alpha: apply Benjamini-Hochberg FDR control at this level. Returns only entities with q_value <= alpha. Default None = legacy behavior.
+    fdr_method: "bh" only in this version. "storey" reserved for future.
+    select: "top_norm" (default, rank by score) or "diverse" (submodular facility location — K most diverse representatives with representativeness counts).
     Returns: entities sorted by |signed_distance| ascending. Positive = inside segment.
     """
     _require_navigator()
     nav = _state["navigator"]
     attract = nav.π6_attract_boundary
-    pairs = attract(alias_id, pattern_id, direction=direction, top_n=top_n)
+    pairs = attract(
+        alias_id, pattern_id, direction=direction, top_n=top_n,
+        fdr_alpha=fdr_alpha, fdr_method=fdr_method, select=select,
+    )
 
     results = []
     for polygon, signed_dist in pairs:
@@ -411,6 +429,12 @@ def attract_boundary(
             else None,  # noqa: E501
             "is_anomaly": polygon.is_anomaly,
         }
+        q_value = getattr(polygon, "q_value", None)
+        if q_value is not None:
+            entry["q_value"] = round(float(q_value), 6)
+        representativeness = getattr(polygon, "representativeness", None)
+        if representativeness is not None:
+            entry["representativeness"] = int(representativeness)
         results.append(entry)
 
     return json.dumps(

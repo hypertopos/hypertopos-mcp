@@ -36,7 +36,7 @@ def _serialize_edge(e: Any) -> dict:
 
 def _serialize_polygon(poly: Any) -> dict:
     alive = poly.alive_edges()
-    return {
+    result = {
         "type": "Polygon",
         "primary_key": poly.primary_key,
         "pattern_id": poly.pattern_id,
@@ -52,6 +52,15 @@ def _serialize_polygon(poly: Any) -> dict:
         "alive_edges": len(alive),
         "edges": [_serialize_edge(e) for e in alive],
     }
+    # FDR q-value (set by navigator when fdr_alpha is used)
+    q_value = getattr(poly, "q_value", None)
+    if q_value is not None:
+        result["q_value"] = round(float(q_value), 6)
+    # Representativeness count (set by navigator when select="diverse")
+    representativeness = getattr(poly, "representativeness", None)
+    if representativeness is not None:
+        result["representativeness"] = int(representativeness)
+    return result
 
 
 def _serialize_slice(sl: Any, pattern: Any | None = None) -> dict:
