@@ -221,8 +221,11 @@ def find_anomalies(
     fdr_alpha: float | None = None,
     fdr_method: str = "bh",
     select: str = "top_norm",
+    metric: str = "L2",
 ) -> str:
     """Find the most anomalous polygons in a pattern, ranked by delta_norm.
+
+    metric: "L2" (default, pre-computed delta_norm) or "Linf" (max single-dimension |delta|, runtime scan).
 
     radius: multiplier on theta_norm threshold (default 1). Higher = looser boundary.
     include_emerging: append entities trending toward anomaly (requires temporal data).
@@ -277,6 +280,7 @@ def find_anomalies(
         fdr_alpha=fdr_alpha,
         fdr_method=fdr_method,
         select=select,
+        metric=metric,
     )
 
     serialized = [_serialize_polygon(p) for p in polygons]

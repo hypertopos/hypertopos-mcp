@@ -456,6 +456,7 @@ Finds the most anomalous polygons in a pattern, ranked by `delta_norm` descendin
 | `fdr_alpha` | float | `null` | Apply Benjamini-Hochberg FDR control at this level (0-1 exclusive). Returns only entities with `q_value <= alpha`. Each retained entity carries a `q_value` field. `null` = no FDR filtering (legacy behavior). |
 | `fdr_method` | string | `"bh"` | FDR method. Only `"bh"` (Benjamini-Hochberg) supported. |
 | `select` | string | `"top_norm"` | `"top_norm"` ranks by score descending. `"diverse"` applies submodular facility location to pick the K most geometrically diverse representatives — each result includes a `representativeness` count. |
+| `metric` | string | `"L2"` | `"L2"` (pre-computed delta_norm, fast) or `"Linf"` (max single-dimension \|delta\|, runtime scan). Linf catches single-dimension spikes that L2 dilutes. Note: the anomaly threshold (`theta_norm`) is always L2-based — Linf values are ≤ L2 norm, so fewer entities pass the threshold (conservative). Use `radius < 1` for higher Linf sensitivity. |
 
 **Returns:** `polygons[]`, `total_found` (total above threshold), `capped_warning` when top_n was reduced.
 
@@ -535,7 +536,7 @@ Checks anomaly status for a batch of entity keys.
 
 ### `find_similar_entities`
 
-Finds the top-N entities nearest to a given entity by Euclidean delta distance (vectorized brute-force).
+Finds the top-N entities nearest to a given entity by geometric distance.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -543,7 +544,9 @@ Finds the top-N entities nearest to a given entity by Euclidean delta distance (
 | `pattern_id` | string | required | Pattern |
 | `top_n` | int | `5` | Number of results (silent hard cap: 50) |
 | `filter_expr` | string | `null` | Lance SQL predicate to pre-filter candidates |
-| `missing_edge_to` | string | `null` | Keep only similar entities with NO edge to this line. Over-fetches 5× from ANN to compensate for post-filter attrition. Response includes `missing_edge_to_note` clarifying that the filter applies to geometric edges, not property values. |
+| `missing_edge_to` | string | `null` | Keep only similar entities with NO edge to this line |
+| `dim_mask` | list[string] | `null` | Compute distance only on named dimensions (from `pattern.dim_labels`). Focuses similarity on specific aspects of geometry. |
+| `metric` | string | `"L2"` | `"L2"` (Euclidean, default) or `"cosine"` (1 - cos_sim — shape similarity ignoring magnitude) |
 
 **Returns:** `results[]` with `primary_key`, `distance`, `delta_norm`, `is_anomaly`. When >50% of results have `distance=0` (inactive entities), response includes `degenerate_warning` and `population_diversity_note` — ANN search is unreliable on patterns with high `inactive_ratio`.
 

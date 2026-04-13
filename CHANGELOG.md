@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.3] — 2026-04-13
+
+### Added
+
+- `dim_mask` and `metric` parameters on `find_similar_entities` tool — dimension-selective similarity and cosine distance.
+- `metric` parameter on `find_anomalies` tool — `"Linf"` for single-dimension spike detection.
+
 ## [0.3.2] — 2026-04-13
 
 ### Added

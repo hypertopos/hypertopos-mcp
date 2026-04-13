@@ -102,11 +102,15 @@ def find_similar_entities(
     top_n: int = 5,
     filter_expr: str | None = None,
     missing_edge_to: str | None = None,
+    dim_mask: list[str] | None = None,
+    metric: str = "L2",
 ) -> str:
-    """Find top-N entities geometrically most similar to the given entity (Euclidean distance).
+    """Find top-N entities geometrically most similar to the given entity.
 
     filter_expr: Lance SQL predicate (e.g. "is_anomaly = true", "delta_rank_pct > 95").
     missing_edge_to: keep only similar entities with NO edge to this line.
+    dim_mask: compute distance only on named dimensions (e.g. ["_d_amount_out_std", "_d_sum_in"]).
+    metric: "L2" (Euclidean, default) or "cosine" (shape similarity ignoring magnitude).
     Returns: reference entity metadata + similar entities with distance. Hard cap 50.
     """
     _require_navigator()
@@ -134,6 +138,8 @@ def find_similar_entities(
         top_n=top_n,
         filter_expr=filter_expr,
         missing_edge_to=missing_edge_to,
+        dim_mask=dim_mask,
+        metric=metric,
     )
 
     # Reference metadata from stored geometry (not recomputed — correct for continuous mode)
