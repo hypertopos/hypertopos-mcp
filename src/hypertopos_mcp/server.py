@@ -274,6 +274,7 @@ _TOOL_TIERS: dict[str, str] = {
     "cluster_bridges": "edge",
     "anomalous_edges": "edge",
     "find_witness_cohort": "edge",
+    "find_novel_entities": "edge",
     # temporal — visible after sphere_overview IF sphere has temporal data
     "dive_solid": "temporal",
     "get_solid": "temporal",

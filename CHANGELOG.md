@@ -4,6 +4,14 @@ All notable changes to `hypertopos-mcp` will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+## [0.3.2] — 2026-04-13
+
+### Added
+
+- `find_novel_entities` tool — geometric heredity scoring. Ranks entities by deviation from neighbor-expected geometric position. Requires pattern with edge table. Parameters: `pattern_id` (required), `top_n` (default 10), `sample_size` (default 5000).
+
 ## [0.3.1] — 2026-04-12
 
 ### Added

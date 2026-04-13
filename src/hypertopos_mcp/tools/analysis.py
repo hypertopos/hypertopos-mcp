@@ -801,6 +801,28 @@ def edge_stats(
 
 @mcp.tool(annotations={"readOnlyHint": True})
 @timed
+def find_novel_entities(
+    pattern_id: str,
+    top_n: int = 10,
+    sample_size: int = 5000,
+) -> str:
+    """Find entities whose geometry deviates most from their neighbors' expected position.
+
+    High novelty = entity doesn't behave like its neighborhood.
+    Requires a pattern with an edge table.
+    Returns: list of {primary_key, novelty_score, n_neighbors} sorted by novelty_score descending.
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    try:
+        result = nav.find_novel_entities(pattern_id, top_n=top_n, sample_size=sample_size)
+    except GDSNavigationError as exc:
+        return json.dumps({"error": str(exc), "pattern_id": pattern_id})
+    return json.dumps(result, indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
 def contrast_populations(
     pattern_id: str,
     group_a: dict,

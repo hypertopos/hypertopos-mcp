@@ -1079,6 +1079,20 @@ Excludes entities already connected via the resolved event pattern's edge table 
 
 ---
 
+### `find_novel_entities`
+
+Find entities whose geometry deviates most from their neighbors' expected position. High novelty = entity doesn't behave like its neighborhood. Requires a pattern with an edge table.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `pattern_id` | string | required | Event pattern with edge table |
+| `top_n` | int | `10` | Number of results |
+| `sample_size` | int | `5000` | Population sampling for large spheres |
+
+**Returns:** `results[]` sorted by `novelty_score` descending, each with `primary_key`, `novelty_score`, `n_neighbors`.
+
+---
+
 ## Temporal Analysis
 
 ### `dive_solid`

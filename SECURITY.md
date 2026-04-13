@@ -1,6 +1,6 @@
 # Security
 
-## Current version: 0.3.0
+## Current version: 0.3.2
 
 `hypertopos-mcp` runs locally as a stdio MCP server. No network services, no auth layer, no multi-tenancy.
 
