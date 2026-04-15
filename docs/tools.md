@@ -120,6 +120,7 @@ Population summary for all patterns (or one pattern). Returns anomaly rates, cal
 | `temporal_quality` | (`detail="full"` only) `{signal_quality: "persistent"/"volatile"/"mixed"}` — persistence of anomaly signals across time slices |
 | `event_rate_divergence_alerts[]` | (`detail="full"`, anchor patterns only) Entities with high event anomaly rate (>15%) but below-theta static delta_norm — invisible to `find_anomalies`. Each entry: `{pattern_id, event_pattern_id, entity_key, event_anomaly_rate, delta_norm, theta_norm, alert}`. Top 20 by rate. Absent = no divergence detected. |
 | `suggested_next_step` | (`detail="full"`, only when `event_rate_divergence_alerts` present) Actionable hint to run windowed `aggregate(time_from, time_to)` to confirm when the event burst happened. |
+| `dimension_kinds` | Compact summary of per-dimension distribution families, e.g. `"bernoulli x4, poisson x2, gaussian x8"`. Absent on pre-2.3 spheres. |
 
 **Geometry mode meanings:**
 
@@ -381,6 +382,8 @@ Reads the polygon (current geometric shape) for the entity at the current naviga
 | `repair` | Minimal subset of dimensions to fix to become non-anomalous: `{repair_size, repair_dims[], residual_norm}` |
 | `conformal_p` | (precision stack) Calibrated p-value — lower = more anomalous |
 | `n_anomalous_dims` | (precision stack) Count of dimensions above p99 threshold |
+| `bregman_divergence` | Distribution-aware anomaly distance (sum of per-dimension Bregman terms). `null` on pre-2.3 spheres. |
+| `anomaly_confidence` | Bootstrap stability score (0–1). `null` when bootstrap was skipped (N > 50K, `group_by_property`, `use_mahalanobis`). |
 
 ---
 
@@ -456,9 +459,17 @@ Finds the most anomalous polygons in a pattern, ranked by `delta_norm` descendin
 | `fdr_alpha` | float | `null` | Apply Benjamini-Hochberg FDR control at this level (0-1 exclusive). Returns only entities with `q_value <= alpha`. Each retained entity carries a `q_value` field. `null` = no FDR filtering (legacy behavior). |
 | `fdr_method` | string | `"bh"` | FDR method. Only `"bh"` (Benjamini-Hochberg) supported. |
 | `select` | string | `"top_norm"` | `"top_norm"` ranks by score descending. `"diverse"` applies submodular facility location to pick the K most geometrically diverse representatives — each result includes a `representativeness` count. |
-| `metric` | string | `"L2"` | `"L2"` (pre-computed delta_norm, fast) or `"Linf"` (max single-dimension \|delta\|, runtime scan). Linf catches single-dimension spikes that L2 dilutes. Note: the anomaly threshold (`theta_norm`) is always L2-based — Linf values are ≤ L2 norm, so fewer entities pass the threshold (conservative). Use `radius < 1` for higher Linf sensitivity. |
+| `metric` | string | `"L2"` | `"L2"` (pre-computed delta_norm, fast), `"Linf"` (max single-dimension \|delta\|, runtime scan), or `"bregman"` (distribution-aware Bregman divergence, runtime scan). Linf catches single-dimension spikes that L2 dilutes. Bregman uses per-dimension kind-aware scoring (poisson KL for counts, bernoulli KL for binary, gaussian for continuous) — can improve ranking on mixed-type patterns. |
+| `min_confidence` | float | `0.0` | Keep only entities with `anomaly_confidence >= min_confidence` (0–1). `0.0` = no filter. Has no effect when `anomaly_confidence` is `None` (bootstrap was skipped). |
 
 **Returns:** `polygons[]`, `total_found` (total above threshold), `capped_warning` when top_n was reduced.
+
+Each polygon in `polygons[]` includes:
+
+| Field | Description |
+|-------|-------------|
+| `bregman_divergence` | Distribution-aware anomaly distance (sum of per-dimension Bregman terms). `null` on pre-2.3 spheres. |
+| `anomaly_confidence` | Bootstrap stability score (0–1): fraction of bootstrap resamples in which the entity is classified as anomalous. `null` when bootstrap was skipped (N > 50K, `group_by_property`, `use_mahalanobis`). |
 
 **Hard cap:** Adaptive — edge-count-based, typically 15–51. Use `offset` to paginate, `anomaly_summary` for counts, or `aggregate_anomalies` for distribution analysis.
 
@@ -514,7 +525,9 @@ Full structured explanation combining severity, witness, repair, top dimensions,
 | `primary_key` | string | required | Entity key |
 | `pattern_id` | string | required | Pattern |
 
-**Returns:** `severity` (`"normal"` / `"low"` 1.0–1.1× / `"medium"` 1.1–1.5× / `"high"` 1.5–2.5× / `"extreme"` >2.5× theta), `ratio`, `witness`, `repair`, `top_dimensions[]`, `conformal_p`, `reputation` (`{value, anomaly_tenure}`), `composite_risk`.
+**Returns:** `severity` (`"normal"` / `"low"` 1.0–1.1× / `"medium"` 1.1–1.5× / `"high"` 1.5–2.5× / `"extreme"` >2.5× theta), `ratio`, `witness`, `repair`, `conformal_p`, `reputation` (`{value, anomaly_tenure}`), `composite_risk`, `top_dimensions[]`.
+
+Each entry in `top_dimensions[]` has `dim` (dimension index), `label` (dimension name), `kind` (`"gaussian"`, `"poisson"`, or `"bernoulli"`, present when sphere has dimension kinds), `bregman` (raw per-dimension Bregman value), and `pct_of_total` (% of total `bregman_divergence` from this dimension). Absent on pre-2.3 spheres.
 
 ---
 
@@ -888,7 +901,7 @@ Find paths between two entities scored by geometric coherence. Uses beam search 
 | `to_key` | string | required | Target entity key |
 | `pattern_id` | string | required | Pattern with edge table |
 | `max_depth` | int | `5` | Maximum path length (hops) |
-| `beam_width` | int | `10` | Beam search width — higher = more paths explored |
+| `beam_width` | int | `50` | Beam search width — higher = more paths explored. Auto-scales for `max_depth > 5`. |
 | `scoring` | string | `"geometric"` | Scoring function: `"geometric"` (delta coherence), `"amount"` (geometric score modulated by log(transaction amount)), `"anomaly"` (anomaly density), `"shortest"` (fewest hops) |
 
 **Returns:** `paths[]` — each with `keys[]`, `hop_count`, `geometric_score`. Higher `geometric_score` = more coherent path.

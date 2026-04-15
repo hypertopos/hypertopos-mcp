@@ -1268,6 +1268,19 @@ def _fallback_plan(
         "explain_anomaly_chain", "detect_composite_subgroup_inflation",
         "hub_history",
     }
+    # Steps that only work on event patterns (temporal event streams)
+    _REQUIRES_EVENT_PATTERN = {
+        "detect_temporal_burst", "detect_event_rate_anomaly",
+        "aggregate_anomalies", "aggregate",
+    }
+    # Steps that only work on anchor patterns (entity geometry + temporal)
+    _REQUIRES_ANCHOR_PATTERN = {
+        "detect_trajectory_anomaly", "find_drifting_entities",
+        "find_regime_changes", "detect_segment_shift",
+        "detect_neighbor_contamination", "detect_collective_drift",
+        "find_similar_entities", "find_clusters", "find_hubs",
+        "contrast_populations", "compare_time_windows",
+    }
     for keywords, step_name in _kw.items():
         if step_name not in available:
             continue
@@ -1301,6 +1314,11 @@ def _fallback_plan(
         else:
             # Run on all matched patterns (multi-pattern scan)
             for pid in matched:
+                ptype = patterns_info.get(pid, {}).get("type", "")
+                if step_name in _REQUIRES_EVENT_PATTERN and ptype != "event":
+                    continue
+                if step_name in _REQUIRES_ANCHOR_PATTERN and ptype != "anchor":
+                    continue
                 params: dict[str, Any] = {"pattern_id": pid}
                 # Dimension-aware: if query matches a dimension, rank by it
                 if matched_dim and matched_dim["pattern_id"] == pid:
@@ -1323,8 +1341,13 @@ def _fallback_plan(
             })
         else:
             hint_added = False
+            dp_type = patterns_info.get(default_pattern, {}).get("type", "")
             for hs in hint_steps:
                 if hs not in available:
+                    continue
+                if hs in _REQUIRES_EVENT_PATTERN and dp_type != "event":
+                    continue
+                if hs in _REQUIRES_ANCHOR_PATTERN and dp_type != "anchor":
                     continue
                 if hs == "detect_cross_pattern_discrepancy":
                     el = patterns_info.get(default_pattern, {}).get(

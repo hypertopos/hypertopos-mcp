@@ -292,7 +292,7 @@ def search_entities(line_id: str, property_name: str, value: str, limit: int = 2
         "value": value,
         **core_result,
     }
-    return json.dumps(result, indent=2)
+    return json.dumps(result, indent=2, default=str)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})

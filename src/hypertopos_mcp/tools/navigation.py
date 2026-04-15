@@ -222,10 +222,11 @@ def find_anomalies(
     fdr_method: str = "bh",
     select: str = "top_norm",
     metric: str = "L2",
+    min_confidence: float = 0.0,
 ) -> str:
     """Find the most anomalous polygons in a pattern, ranked by delta_norm.
 
-    metric: "L2" (default, pre-computed delta_norm) or "Linf" (max single-dimension |delta|, runtime scan).
+    metric: "L2" (default, pre-computed delta_norm), "Linf" (max single-dimension |delta|), or "bregman" (distribution-aware Bregman divergence).
 
     radius: multiplier on theta_norm threshold (default 1). Higher = looser boundary.
     include_emerging: append entities trending toward anomaly (requires temporal data).
@@ -235,6 +236,7 @@ def find_anomalies(
     fdr_alpha: apply Benjamini-Hochberg FDR control at this level. Returns only entities with q_value <= alpha. Default None = legacy behavior.
     fdr_method: "bh" only in this version. "storey" reserved for future.
     select: "top_norm" (default, rank by score) or "diverse" (submodular facility location — K most diverse representatives with representativeness counts).
+    min_confidence: filter by bootstrap confidence threshold (0.0 = no filter). Requires bregman_calibration=True on the sphere.
     Returns: anomalous polygons with anomaly_dimensions, clusters, total_found.
     """
     _require_navigator()
@@ -281,6 +283,7 @@ def find_anomalies(
         fdr_method=fdr_method,
         select=select,
         metric=metric,
+        min_confidence=min_confidence,
     )
 
     serialized = [_serialize_polygon(p) for p in polygons]

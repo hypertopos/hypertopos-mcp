@@ -708,7 +708,7 @@ def find_geometric_path(
     to_key: str,
     pattern_id: str,
     max_depth: int = 5,
-    beam_width: int = 10,
+    beam_width: int = 50,
     scoring: str = "geometric",
 ) -> str:
     """Find paths between two entities scored by geometric coherence.

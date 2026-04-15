@@ -48,6 +48,10 @@ def _serialize_polygon(poly: Any) -> dict:
             else {}
         ),
         "is_anomaly": bool(poly.is_anomaly),
+        **({"bregman_divergence": round(float(poly.bregman_divergence), 4)}
+           if getattr(poly, "bregman_divergence", None) is not None else {}),
+        **({"anomaly_confidence": round(float(poly.anomaly_confidence), 4)}
+           if getattr(poly, "anomaly_confidence", None) is not None else {}),
         "total_edges": len(poly.edges),
         "alive_edges": len(alive),
         "edges": [_serialize_edge(e) for e in alive],

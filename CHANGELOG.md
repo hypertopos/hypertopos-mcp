@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-04-15
+
+### Added
+- `anomaly_confidence` and `bregman_divergence` fields in `find_anomalies`, `get_polygon`, `passive_scan` responses.
+- `min_confidence` parameter on `find_anomalies` — filter by bootstrap confidence threshold.
+- `dimension_kinds` summary in `sphere_overview` per pattern.
+
+### Fixed
+- `open_sphere` resets `explored_steps` state — `detect_pattern` coverage no longer leaks between spheres.
+- `detect_pattern` fallback planner filters steps by pattern type.
+- `find_geometric_path` default `beam_width` updated from 10 to 50.
+- `search_entities` no longer crashes on lines with datetime columns.
+
 ## [0.3.3] — 2026-04-13
 
 ### Added

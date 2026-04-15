@@ -206,6 +206,8 @@ def _do_open_sphere(path: str) -> None:
     _state["engine"] = session._engine
     _state["manifest"] = session._manifest
     _state["path"] = path
+    _state.pop("explored_steps", None)
+    _state["manual_mode"] = False
     _reset_call_stats()
 
 
