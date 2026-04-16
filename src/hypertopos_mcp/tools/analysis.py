@@ -713,8 +713,9 @@ def find_geometric_path(
 ) -> str:
     """Find paths between two entities scored by geometric coherence.
 
-    Uses edge table for traversal, delta vectors for scoring.
-    Beam search: at each depth, keep top beam_width candidates.
+    Uses bidirectional BFS on the edge table, then scores discovered
+    paths by delta-vector coherence. beam_width controls how many
+    top-scored paths are returned.
 
     Scoring modes:
     - geometric: witness overlap + delta alignment + anomaly preservation

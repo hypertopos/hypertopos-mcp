@@ -893,7 +893,7 @@ Finds which chains involve a specific entity — reverse lookup via chain keys.
 
 ### `find_geometric_path`
 
-Find paths between two entities scored by geometric coherence. Uses beam search over polygon edges, ranking candidate paths by a configurable scoring function.
+Find paths between two entities scored by geometric coherence. Uses bidirectional BFS on polygon edges, then ranks discovered paths by a configurable scoring function.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -901,7 +901,7 @@ Find paths between two entities scored by geometric coherence. Uses beam search 
 | `to_key` | string | required | Target entity key |
 | `pattern_id` | string | required | Pattern with edge table |
 | `max_depth` | int | `5` | Maximum path length (hops) |
-| `beam_width` | int | `50` | Beam search width — higher = more paths explored. Auto-scales for `max_depth > 5`. |
+| `beam_width` | int | `50` | Maximum paths returned (top-K by score). |
 | `scoring` | string | `"geometric"` | Scoring function: `"geometric"` (delta coherence), `"amount"` (geometric score modulated by log(transaction amount)), `"anomaly"` (anomaly density), `"shortest"` (fewest hops) |
 
 **Returns:** `paths[]` — each with `keys[]`, `hop_count`, `geometric_score`. Higher `geometric_score` = more coherent path.

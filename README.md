@@ -5,7 +5,7 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-compatible-green.svg)](https://modelcontextprotocol.io)
-[![Version](https://img.shields.io/badge/version-0.4.0-%235500FF.svg)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-0.4.1-%235500FF.svg)](pyproject.toml)
 
 hypertopos-mcp gives AI agents a way to explore data built with [hypertopos](https://github.com/hypertopos/hypertopos-py). Instead of writing queries, agents navigate a geometric space — finding anomalies, tracing relationships, comparing populations, and tracking change over time.
 

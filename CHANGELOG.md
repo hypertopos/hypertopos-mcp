@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-04-16
+
+### Fixed
+- `find_geometric_path` docstring corrected: beam search → bidirectional BFS to match actual algorithm.
+
 ## [0.4.0] — 2026-04-15
 
 ### Added
