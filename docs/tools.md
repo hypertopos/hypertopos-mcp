@@ -457,7 +457,8 @@ Finds the most anomalous polygons in a pattern, ranked by `delta_norm` descendin
 | `missing_edge_to` | string | `null` | Keep only anomalies with NO edge to this line (orphan detection) |
 | `include_emerging` | bool | `false` | Append `emerging[]`: non-anomalous entities whose forecast crosses the threshold. Scans up to 100 entities. Only evaluated when `offset=0`. |
 | `fdr_alpha` | float | `null` | Apply Benjamini-Hochberg FDR control at this level (0-1 exclusive). Returns only entities with `q_value <= alpha`. Each retained entity carries a `q_value` field. `null` = no FDR filtering (legacy behavior). |
-| `fdr_method` | string | `"bh"` | FDR method. Only `"bh"` (Benjamini-Hochberg) supported. |
+| `fdr_method` | string | `"bh"` | FDR method. `"bh"` (Benjamini-Hochberg, assumes pi0=1) or `"storey"` (Storey LSL estimator of the true null proportion; shrinks q-values by pi0 and typically recovers 10–15% more discoveries when combined with `p_value_method="chi2"` on spheres that have a genuine null mass). With the default `p_value_method="rank"`, `"storey"` collapses to `"bh"` — rank p-values are uniform by construction and carry no null signal. |
+| `p_value_method` | string | `"rank"` | p-value construction. `"rank"` (default, empirical from `delta_rank_pct` — uniform by construction) or `"chi2"` (upper-tail χ²(df) survival on `||delta||²`, the parametric null assuming `delta_i ~ N(0, 1)`). Pair with `fdr_method="storey"` for power recovery on moderate-super-anomaly patterns; on over-compressed or extreme patterns the uplift collapses to zero. |
 | `select` | string | `"top_norm"` | `"top_norm"` ranks by score descending. `"diverse"` applies submodular facility location to pick the K most geometrically diverse representatives — each result includes a `representativeness` count. |
 | `metric` | string | `"L2"` | `"L2"` (pre-computed delta_norm, fast), `"Linf"` (max single-dimension \|delta\|, runtime scan), or `"bregman"` (distribution-aware Bregman divergence, runtime scan). Linf catches single-dimension spikes that L2 dilutes. Bregman uses per-dimension kind-aware scoring (poisson KL for counts, bernoulli KL for binary, gaussian for continuous) — can improve ranking on mixed-type patterns. |
 | `min_confidence` | float | `0.0` | Keep only entities with `anomaly_confidence >= min_confidence` (0–1). `0.0` = no filter. Has no effect when `anomaly_confidence` is `None` (bootstrap was skipped). |
@@ -528,6 +529,43 @@ Full structured explanation combining severity, witness, repair, top dimensions,
 **Returns:** `severity` (`"normal"` / `"low"` 1.0–1.1× / `"medium"` 1.1–1.5× / `"high"` 1.5–2.5× / `"extreme"` >2.5× theta), `ratio`, `witness`, `repair`, `conformal_p`, `reputation` (`{value, anomaly_tenure}`), `composite_risk`, `top_dimensions[]`.
 
 Each entry in `top_dimensions[]` has `dim` (dimension index), `label` (dimension name), `kind` (`"gaussian"`, `"poisson"`, or `"bernoulli"`, present when sphere has dimension kinds), `bregman` (raw per-dimension Bregman value), and `pct_of_total` (% of total `bregman_divergence` from this dimension). Absent on pre-2.3 spheres.
+
+---
+
+### `trace_root_cause`
+
+Multi-hop root-cause DAG for an anomalous entity. Composes `explain_anomaly` (top witness dimensions) with `find_counterparties` (edge-derived witness follow, **sorted by anomaly — not transaction volume**), `contagion_score` (neighbour anomaly share with explicit anomalous counterparty keys), and `π7_attract_hub` (hub concentration) into one bounded tree. Candidate branches are scored on a unified severity scale and the top `max_branches` are kept — tree is priority-ordered, not FIFO. Replaces the prior `explain_anomaly_chain` (linear same-similar walk).
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `primary_key` | string | required | Anomalous entity to trace |
+| `pattern_id` | string | required | Pattern the entity lives in |
+| `max_depth` | int | `2` | Max hops away from root (0 = root only) |
+| `max_branches` | int | `3` | Max children kept per node after priority sort |
+| `hub_pop_limit` | int | `50_000` | Skip hub branch when the pattern has more than this many entities (π7 is O(n) — not worth it on 500k+ populations) |
+| `contagion_min_threshold` | float | `0.10` | Below this score, the contagion branch is not attached. Set to `0.0` to always attach when the entity has counterparties, or above `0.5` to keep only high-signal contagion |
+| `max_total_nodes` | int | `50` | Hard cap on total nodes expanded across the whole DAG; guards against recursion blowups on `max_depth` × `max_branches` combos |
+| `edge_counterparty_top_n` | int | `1` | How many of the most-anomalous counterparties to expand as edge_counterparty branches. Raise to 2–3 when you want multiple distinct counterparty chains traced; each adds one candidate competing for `max_branches` slots |
+
+**Returns:**
+
+| Field | Description |
+|-------|-------------|
+| `root` | Nested tree dict: `{entity_key, role, severity, evidence, children}` |
+| `summary` | One-line natural-language summary of the trace |
+| `hop_count` | Number of nodes expanded |
+| `branches_explored` | Total branches that yielded evidence |
+| `truncated` | `true` iff at least one candidate was dropped because of `max_branches` OR the `max_total_nodes` cap was hit |
+
+**Severity scale (unified across all nodes):** `"normal"` < `"low"` < `"moderate"` < `"high"` < `"critical"` < `"extreme"`.
+
+**Contagion grading:** score < `contagion_min_threshold` → no branch, else `"low"` (≥ threshold), `"moderate"` (≥ 0.25), `"high"` (≥ 0.50), `"critical"` (≥ 0.75).
+
+**Role values:** `"root"`, `"edge_counterparty"`, `"hub"`, `"neighbor_contamination"`.
+
+**Contagion branch evidence includes:** `contagion_score`, `total_counterparties`, `anomalous_counterparties` (count), and `anomalous_cp_keys` (list of up to 10 anomalous counterparty primary keys — saves a follow-up `find_counterparties` call).
+
+**Notes:** Returns a single-node tree with `severity="normal"` when the entity is not anomalous. Cycles are broken by a visited-set with a `cycle: true` evidence marker on the repeat node. The hub cache is version-keyed — a pattern rebuild automatically invalidates cached hubs.
 
 ---
 
@@ -767,7 +805,8 @@ Finds entities nearest to a geometric cutting plane defined on an alias (π6).
 | `direction` | string | `"both"` | `"in"` = inside segment, `"out"` = outside, `"both"` = both sides |
 | `top_n` | int | `10` | Number of results |
 | `fdr_alpha` | float | `null` | Apply Benjamini-Hochberg FDR control at this level (0-1 exclusive). Returns only entities with `q_value <= alpha`. Each retained entity carries a `q_value` field. `null` = no FDR filtering (legacy behavior). |
-| `fdr_method` | string | `"bh"` | FDR method. Only `"bh"` (Benjamini-Hochberg) supported. |
+| `fdr_method` | string | `"bh"` | FDR method. `"bh"` (Benjamini-Hochberg, assumes pi0=1) or `"storey"` (Storey LSL estimator of the true null proportion; shrinks q-values by pi0 and typically recovers 10–15% more discoveries when combined with `p_value_method="chi2"` on spheres that have a genuine null mass). With the default `p_value_method="rank"`, `"storey"` collapses to `"bh"` — rank p-values are uniform by construction and carry no null signal. |
+| `p_value_method` | string | `"rank"` | p-value construction. `"rank"` (default, empirical from `delta_rank_pct` — uniform by construction) or `"chi2"` (upper-tail χ²(df) survival on `||delta||²`, the parametric null assuming `delta_i ~ N(0, 1)`). Pair with `fdr_method="storey"` for power recovery on moderate-super-anomaly patterns; on over-compressed or extreme patterns the uplift collapses to zero. |
 | `select` | string | `"top_norm"` | `"top_norm"` ranks by boundary distance ascending. `"diverse"` applies submodular facility location to pick the K most geometrically diverse representatives — each result includes a `representativeness` count. |
 
 **Returns per entity:** `primary_key`, `signed_distance` (>0 = inside, <0 = outside, ≈0 = at boundary), `is_in_segment`, `delta_norm`, `is_anomaly`.
@@ -788,7 +827,8 @@ Ranks entities by geometric connectivity — shape-vector footprint (π7).
 | `top_n` | int | `10` | Max results (hard cap: 25). `capped_warning` when reduced. |
 | `line_id_filter` | string | `null` | Restrict hub score to edges of one line. When set, `score_stats` reflects the filtered distribution. |
 | `fdr_alpha` | float | `null` | Apply Benjamini-Hochberg FDR control at this level (0-1 exclusive). Returns only entities with `q_value <= alpha`. Each retained entity carries a `q_value` field. `null` = no FDR filtering (legacy behavior). |
-| `fdr_method` | string | `"bh"` | FDR method. Only `"bh"` (Benjamini-Hochberg) supported. |
+| `fdr_method` | string | `"bh"` | FDR method. `"bh"` (Benjamini-Hochberg, assumes pi0=1) or `"storey"` (Storey LSL estimator of the true null proportion; shrinks q-values by pi0 and typically recovers 10–15% more discoveries when combined with `p_value_method="chi2"` on spheres that have a genuine null mass). With the default `p_value_method="rank"`, `"storey"` collapses to `"bh"` — rank p-values are uniform by construction and carry no null signal. |
+| `p_value_method` | string | `"rank"` | p-value construction. `"rank"` (default, empirical from `delta_rank_pct` — uniform by construction) or `"chi2"` (upper-tail χ²(df) survival on `||delta||²`, the parametric null assuming `delta_i ~ N(0, 1)`). Pair with `fdr_method="storey"` for power recovery on moderate-super-anomaly patterns; on over-compressed or extreme patterns the uplift collapses to zero. |
 | `select` | string | `"top_norm"` | `"top_norm"` ranks by hub score descending. `"diverse"` applies submodular facility location to pick the K most geometrically diverse representatives — each result includes a `representativeness` count. |
 
 **Returns per entity:** `key`, `properties`, `alive_edges`, `hub_score`, `hub_score_pct`.
@@ -1061,6 +1101,80 @@ Find edges between two entities enriched with event-level anomaly scores. Unlike
 
 ---
 
+### `score_edge`
+
+Geometric anomaly score for a single edge. Formula: `||δ_from − δ_to|| × (1 / min(pair_tx_count, 1000))`. Complementary to entity-level `delta_norm`.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `from_key` | string | required | Source entity primary key |
+| `to_key` | string | required | Destination entity primary key |
+| `pattern_id` | string | required | Anchor pattern whose geometry provides delta vectors |
+
+**Returns:** `{score, delta_distance, pair_tx_count, effective_weight, interpretation}`. High score = distant endpoints + rare pair (classic AML layering signature).
+
+---
+
+### `find_high_potential_edges`
+
+Rank all edges in the pattern's companion event table by geometric edge potential, highest first.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `pattern_id` | string | required | Anchor pattern |
+| `top_n` | int | `10` | Max results (hard cap 100) |
+| `from_key` | string | `null` | Scope to edges starting at this entity |
+| `to_key` | string | `null` | Scope to edges ending at this entity |
+| `min_pair_count` | int | `1` | Filter out pairs appearing fewer times than this |
+
+**Returns:** list of `{from_key, to_key, score, delta_distance, pair_tx_count}`.
+
+---
+
+### `score_motif`
+
+Score the best structural motif seeded at `entity_key`. Composes `edge_potential` across the k edges of the motif via product — a motif of rare edges is rare. Closed vocabulary of four motif types covering the structural atoms of 25 documented AML typologies.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `entity_key` | string | required | Seed entity primary key |
+| `motif_type` | string | required | One of `fan_out`, `cycle_2`, `cycle_3`, `structuring` |
+| `pattern_id` | string | required | Pattern whose geometry provides delta vectors |
+| `time_window_hours` | int | `null` | Override default: fan_out=168h, cycle_2=24h, cycle_3=72h, structuring=1h |
+| `amt1_min` | float | `10000.0` | **structuring only** — minimum amount on hop 1 (A→B) |
+| `amt2_max` | float | `10000.0` | **structuring only** — maximum amount on hops 2 and 3 (B→C, C→D) |
+
+**Motif types:**
+- **`fan_out`** — hub → k distinct targets in the window (min k=3). Typology atoms: T6 Offshore Hub, T13 Concentrator.
+- **`cycle_2`** — A↔B bidirectional pair within the window. Typology atoms: T2 Flash-Burst Round-Trip, T4 Bidirectional Burst.
+- **`cycle_3`** — A→B→C→A triad with strict temporal ordering `ts1 < ts2 < ts3`, total span ≤ window. Typology atoms: T3 Round-Tripping 3-Party, T5 Long-Cycle, T11 Multi-Round-Tripping.
+- **`structuring`** — open A→B→C→D linear chain with hop1 amount ≥ `amt1_min`, hops 2 and 3 amount ≤ `amt2_max`, strict temporal ordering within `time_window_hours` (default 1h — flash). Typology atoms: structuring / smurfing (cash-deposit-split-and-wire for reporting-threshold evasion). Defaults 10000 assume the pattern's amount column is in USD; override per jurisdiction (GBP, EUR, crypto unit) via `amt1_min`/`amt2_max`. **Assumes the edge table's `amount` column is non-negative (positive money flow); NULL or ≤ 0 amounts on any hop are silently skipped rather than surfaced as structuring matches.** Producers emitting signed amounts (credit-positive / debit-negative convention) will see zero structuring results — pre-process to magnitude before building the sphere if that's the semantics.
+
+**Returns:** `{found, score, motif_type, breakdown}` on success, or `{found: false, reason}` when no motif matches. `breakdown` lists per-edge `edge_potential`, `delta_distance`, `pair_tx_count` so the agent can see which edge contributed most. `cycle_2` adds `counterparty`; `cycle_3` adds `ring` (list of 3 keys); `fan_out` adds `k` (distinct targets); `structuring` adds `path` (list of 4 keys), `timestamps` (per-hop unix seconds), `amounts` (per-hop amount).
+
+---
+
+### `find_high_potential_motifs`
+
+Rank all motifs of a given type across the pattern's companion event table, highest score first.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `pattern_id` | string | required | Pattern with companion event edge table |
+| `motif_type` | string | required | One of `fan_out`, `cycle_2`, `cycle_3`, `structuring` |
+| `top_n` | int | `10` | Max results (hard cap 100) |
+| `time_window_hours` | int | `null` | Override motif default |
+| `seeds` | list[string] | `null` | Restrict ranking to these entities (post-cache filter) |
+| `min_k` | int | `null` | For `fan_out` only: minimum distinct-target threshold |
+| `amt1_min` | float | `10000.0` | **structuring only** — minimum amount on hop 1 (A→B). Part of the cache key, so changing it triggers recompute. |
+| `amt2_max` | float | `10000.0` | **structuring only** — maximum amount on hops 2 and 3 (B→C, C→D). Part of the cache key. |
+
+**Latency note:** first call per `(pattern, motif_type, window, amt1_min, amt2_max)` is cold — enumerates motifs across all seeds in the pattern. Cold call can take 30–90s on patterns with >500k entities. Subsequent calls hit an LRU cache (cap 8). `cycle_3` is deduplicated by canonical ring (sorted primary keys) so each physical cycle appears once regardless of which of 3 seeds surfaces it. `structuring` is deduplicated by canonical path (tuple of 4 primary keys) so repeated edge rows producing the same A→B→C→D appear once.
+
+**Returns:** list of motif instances with `score`, `score_rank_pct`, `is_high_potential` (p95 threshold within motif_type), motif-specific fields (see `score_motif` above for the per-type field list).
+
+---
+
 ### `find_witness_cohort`
 
 Rank entities that share an anchor entity's witness signature. **Investigative peer ranking — NOT a forecast of future edges.** Surfaces existing peers sharing the target's anomaly signature, not future connections.
@@ -1142,7 +1256,8 @@ Finds entities with the highest temporal drift — geometric velocity over recor
 | `forecast_horizon` | int | `null` | When set, each result includes `drift_forecast` with predicted displacement and anomaly status at `t + horizon`. Requires ≥3 slices. |
 | `rank_by_dimension` | string | `null` | When set, re-rank by the absolute change on this specific dimension name instead of overall displacement. Use dimension display names or line IDs from the pattern relations. |
 | `fdr_alpha` | float | `null` | Apply Benjamini-Hochberg FDR control at this level (0-1 exclusive). Returns only entities with `q_value <= alpha`. Each retained entity carries a `q_value` field. `null` = no FDR filtering (legacy behavior). |
-| `fdr_method` | string | `"bh"` | FDR method. Only `"bh"` (Benjamini-Hochberg) supported. |
+| `fdr_method` | string | `"bh"` | FDR method. `"bh"` (Benjamini-Hochberg, assumes pi0=1) or `"storey"` (Storey LSL estimator of the true null proportion; shrinks q-values by pi0 and typically recovers 10–15% more discoveries when combined with `p_value_method="chi2"` on spheres that have a genuine null mass). With the default `p_value_method="rank"`, `"storey"` collapses to `"bh"` — rank p-values are uniform by construction and carry no null signal. |
+| `p_value_method` | string | `"rank"` | p-value construction. `"rank"` (default, empirical from `delta_rank_pct` — uniform by construction) or `"chi2"` (upper-tail χ²(df) survival on `||delta||²`, the parametric null assuming `delta_i ~ N(0, 1)`). Pair with `fdr_method="storey"` for power recovery on moderate-super-anomaly patterns; on over-compressed or extreme patterns the uplift collapses to zero. |
 | `select` | string | `"top_norm"` | `"top_norm"` ranks by displacement descending. `"diverse"` applies submodular facility location to pick the K most geometrically diverse representatives — each result includes a `representativeness` count. |
 
 **Returns per entity:**
@@ -1153,6 +1268,8 @@ Finds entities with the highest temporal drift — geometric velocity over recor
 | `displacement_current` | `‖base_polygon.delta − delta_first‖` — distinguishes "drifted and stayed" from "drifted and recovered" |
 | `path_length` | Total distance traveled: `Σ ‖delta[i+1] − delta[i]‖` |
 | `ratio` | `displacement / path_length` — 1.0 = straight drift, ~0 = oscillation |
+| `gradient_alignment` | float in `[-1, 1]` — radially-inward component of the drift vector. `+1` = entity moving toward the null centre (normalising), `-1` = moving away (deteriorating), `0` = tangential (constant radius). Computed over structural dimensions only. |
+| `drift_direction` | `"normalizing"` (gradient_alignment > +0.3) / `"deteriorating"` (< -0.3) / `"neutral"` (otherwise). |
 | `dimension_diffs` | Per-dimension breakdown of `displacement` |
 | `dimension_diffs_current` | Per-dimension breakdown of `displacement_current` |
 | `num_slices` | Number of temporal slices used (min 2) |
@@ -1418,14 +1535,14 @@ See [mcp-spec.md](mcp-spec.md) for the full handler table. Categories:
 | Category | Count | Examples |
 |----------|-------|---------|
 | Detection | 6 | find_anomalies, detect_trajectory_anomaly, detect_segment_shift, detect_neighbor_contamination, detect_cross_pattern_discrepancy, find_regime_changes |
-| Analysis | 9 | find_hubs, find_clusters, find_drifting_entities, find_similar_entities, contrast_populations, explain_anomaly |
+| Analysis | 10 | find_hubs, find_clusters, find_drifting_entities, find_similar_entities, contrast_populations, explain_anomaly, trace_root_cause |
 | Composite Risk | 2 | composite_risk, composite_risk_batch |
 | Aggregation | 1 | aggregate |
 | Observability | 5 | sphere_overview, check_alerts, detect_data_quality, anomaly_summary, aggregate_anomalies |
 | Temporal | 3 | compare_time_windows, find_drifting_similar, hub_history |
 | Network/Graph | 7 | find_counterparties, extract_chains, find_chains_for_entity, find_common_relations, find_geometric_path, discover_chains, edge_stats |
 | Population | 2 | get_centroid_map, attract_boundary |
-| Smart-mode exclusive | 7 | assess_false_positive, detect_event_rate_anomaly, explain_anomaly_chain, detect_hub_anomaly_concentration, detect_composite_subgroup_inflation, detect_collective_drift, detect_temporal_burst |
+| Smart-mode exclusive | 6 | assess_false_positive, detect_event_rate_anomaly, detect_hub_anomaly_concentration, detect_composite_subgroup_inflation, detect_collective_drift, detect_temporal_burst |
 
 **Returns:** `query`, `capabilities`, `plan` (steps + rationale), `results` (per step),
 `interpretation` (optional LLM summary), `elapsed_ms`.

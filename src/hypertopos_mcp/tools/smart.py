@@ -461,15 +461,15 @@ def _step_detect_event_rate_anomaly(params: dict) -> dict:
     return {"total": len(results), "results": results[:10]}
 
 
-def _step_explain_anomaly_chain(params: dict) -> dict:
-    """Trace multi-hop anomaly root cause chain."""
+def _step_trace_root_cause(params: dict) -> dict:
+    """Multi-hop root-cause DAG — one-call investigation workflow."""
     nav = _state["navigator"]
-    chain = nav.explain_anomaly_chain(
+    return nav.trace_root_cause(
         params.get("primary_key", ""),
         params.get("pattern_id", ""),
-        max_hops=params.get("max_hops", 3),
+        max_depth=params.get("max_depth", 2),
+        max_branches=params.get("max_branches", 3),
     )
-    return {"total": len(chain), "results": chain}
 
 
 def _step_detect_hub_anomaly_concentration(params: dict) -> dict:
@@ -517,6 +517,39 @@ def _step_detect_temporal_burst(params: dict) -> dict:
     return {"total": len(results), "results": results[:10]}
 
 
+def _step_find_high_potential_edges(params: dict) -> dict:
+    """Rank edges by geometric edge potential."""
+    nav = _state["navigator"]
+    results = nav.attract_edge_potential(
+        params.get("pattern_id", ""),
+        top_n=params.get("top_n", 10),
+        from_key=params.get("from_key"),
+        to_key=params.get("to_key"),
+        min_pair_count=params.get("min_pair_count", 1),
+    )
+    return {"total": len(results), "results": results[:10]}
+
+
+def _step_find_high_potential_motifs(params: dict) -> dict:
+    """Rank motifs of a given type across the pattern."""
+    nav = _state["navigator"]
+    results = nav.find_high_potential_motifs(
+        params.get("pattern_id", ""),
+        motif_type=params.get("motif_type", "cycle_2"),
+        top_n=params.get("top_n", 10),
+        time_window_hours=params.get("time_window_hours"),
+        seeds=params.get("seeds"),
+        min_k=params.get("min_k"),
+        amt1_min=params.get("amt1_min", 10000.0),
+        amt2_max=params.get("amt2_max", 10000.0),
+    )
+    return {
+        "total": len(results),
+        "motif_type": params.get("motif_type", "cycle_2"),
+        "results": results[:10],
+    }
+
+
 _STEP_HANDLERS: dict[str, Any] = {
     "find_anomalies": _step_find_anomalies,
     "detect_trajectory_anomaly": _step_detect_trajectory,
@@ -558,11 +591,13 @@ _STEP_HANDLERS: dict[str, Any] = {
     # Smart-exclusive: New detection algorithms (smart-mode exclusive)
     "assess_false_positive": _step_assess_false_positive,
     "detect_event_rate_anomaly": _step_detect_event_rate_anomaly,
-    "explain_anomaly_chain": _step_explain_anomaly_chain,
+    "trace_root_cause": _step_trace_root_cause,
     "detect_hub_anomaly_concentration": _step_detect_hub_anomaly_concentration,
     "detect_composite_subgroup_inflation": _step_detect_composite_subgroup_inflation,
     "detect_collective_drift": _step_detect_collective_drift,
     "detect_temporal_burst": _step_detect_temporal_burst,
+    "find_high_potential_edges": _step_find_high_potential_edges,
+    "find_high_potential_motifs": _step_find_high_potential_motifs,
 }
 
 # Step capability requirements
@@ -609,11 +644,13 @@ _STEP_CAPABILITIES: dict[str, str | None] = {
     # Smart-exclusive: New detection algorithms (smart-mode exclusive)
     "assess_false_positive": None,
     "detect_event_rate_anomaly": None,
-    "explain_anomaly_chain": None,
+    "trace_root_cause": None,
     "detect_hub_anomaly_concentration": None,
     "detect_composite_subgroup_inflation": "multi_pattern",
     "detect_collective_drift": "has_temporal",
     "detect_temporal_burst": None,
+    "find_high_potential_edges": None,
+    "find_high_potential_motifs": None,
 }
 
 
@@ -1249,11 +1286,17 @@ def _fallback_plan(
         # Smart-exclusive: New detection algorithms
         ("false positive", "borderline", "stability"): "assess_false_positive",
         ("event rate", "event anomaly", "high rate normal"): "detect_event_rate_anomaly",
-        ("anomaly chain", "root cause chain", "multi-hop"): "explain_anomaly_chain",
+        ("root cause", "why anomalous", "trace anomaly", "anomaly chain", "multi-hop"): "trace_root_cause",
         ("hub anomal", "hub concentrat", "neighbors anomalous"): "detect_hub_anomaly_concentration",
         ("subgroup inflat", "composite subgroup"): "detect_composite_subgroup_inflation",
         ("collective drift", "coordinated", "drifted together"): "detect_collective_drift",
         ("burst", "frequency spike", "event spike"): "detect_temporal_burst",
+        ("suspicious edge", "rare pair", "edge anomaly", "geometric edge"): "find_high_potential_edges",
+        ("fan out", "fan-out", "hub fan", "concentrator", "star pattern"): "find_high_potential_motifs",
+        ("round trip", "round-trip", "bidirectional burst", "flash burst"): "find_high_potential_motifs",
+        ("triad", "three-party cycle", "round-tripping 3", "laundering ring", "closed loop"): "find_high_potential_motifs",
+        ("motif", "structural pattern", "subgraph pattern"): "find_high_potential_motifs",
+        ("structuring", "smurfing", "split transfer", "deposit split", "reporting threshold"): "find_high_potential_motifs",
     }
     # Tools that require entity-specific params (primary_key, from_col, etc.)
     # that keyword fallback cannot provide — skip them to avoid crashes with
@@ -1265,7 +1308,7 @@ def _fallback_plan(
     _NEEDS_ENTITY_CONTEXT = {
         "find_counterparties", "extract_chains", "find_common_relations",
         "get_centroid_map", "assess_false_positive",
-        "explain_anomaly_chain", "detect_composite_subgroup_inflation",
+        "trace_root_cause", "detect_composite_subgroup_inflation",
         "hub_history",
     }
     # Steps that only work on event patterns (temporal event streams)
@@ -1325,6 +1368,14 @@ def _fallback_plan(
                     dim_id = matched_dim["dimension_id"]
                     if step_name == "find_anomalies":
                         params["rank_by_property"] = dim_id
+                # Motif-type routing: structuring keywords map to the
+                # structuring motif — without this the generic motif
+                # keyword handler defaults motif_type to cycle_2.
+                if (
+                    step_name == "find_high_potential_motifs"
+                    and "structuring" in keywords
+                ):
+                    params["motif_type"] = "structuring"
                 steps.append({"name": step_name, "params": params})
 
     # Default: dimension-aware scan → hints → blind anomaly scan

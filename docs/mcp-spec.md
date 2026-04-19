@@ -116,9 +116,9 @@ Single meta-tool that automatically plans and executes detection workflows.
 | **Temporal** (3) | compare_time_windows, find_drifting_similar, hub_history | temporal / trajectory_index |
 | **Network/Fraud** (4) | find_counterparties, extract_chains, find_chains_for_entity, find_common_relations | base |
 | **Population** (2) | get_centroid_map, attract_boundary | base |
-| **Smart-mode exclusive** (7) | assess_false_positive, detect_event_rate_anomaly, explain_anomaly_chain, detect_hub_anomaly_concentration, detect_composite_subgroup_inflation, detect_collective_drift, detect_temporal_burst | base / multi_pattern / temporal |
+| **Smart-mode exclusive** (6) | assess_false_positive, detect_event_rate_anomaly, detect_hub_anomaly_concentration, detect_composite_subgroup_inflation, detect_collective_drift, detect_temporal_burst | base / multi_pattern / temporal |
 
-The 7 smart-mode exclusive algorithms are NOT available as MCP tools — only reachable
+The 6 smart-mode exclusive algorithms are NOT available as MCP tools — only reachable
 via `detect_pattern`. They provide capabilities impossible in manual mode:
 
 ### Multi-step investigation chaining

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from hypertopos.navigation.navigator import GDSNavigationError
 
@@ -877,13 +878,15 @@ def find_hubs(
     line_id_filter: str | None = None,
     fdr_alpha: float | None = None,
     fdr_method: str = "bh",
+    p_value_method: str = "rank",
     select: str = "top_norm",
 ) -> str:
     """Find entities with highest geometric connectivity (hub score).
 
     line_id_filter: rank by a single relation line instead of all.
     fdr_alpha: apply Benjamini-Hochberg FDR control at this level. Returns only entities with q_value <= alpha. Default None = legacy behavior.
-    fdr_method: "bh" only in this version. "storey" reserved for future.
+    fdr_method: "bh" (default) or "storey" (LSL null-proportion estimator; recovers 10-15% more discoveries when combined with p_value_method="chi2" on spheres with genuine null mass).
+    p_value_method: "rank" (default) or "chi2" (required for Storey to shrink q-values).
     select: "top_norm" (default, rank by score) or "diverse" (submodular facility location — K most diverse representatives with representativeness counts).
     Returns: top_n entities by hub_score desc, mode (continuous/binary), score_stats. Hard cap 25.
     """
@@ -903,6 +906,7 @@ def find_hubs(
         line_id_filter=line_id_filter,
         fdr_alpha=fdr_alpha,
         fdr_method=fdr_method,
+        p_value_method=p_value_method,
         select=select,
     )
 
@@ -1171,6 +1175,7 @@ def find_drifting_entities(
     rank_by_dimension: str | None = None,
     fdr_alpha: float | None = None,
     fdr_method: str = "bh",
+    p_value_method: str = "rank",
     select: str = "top_norm",
 ) -> str:
     """Find entities with highest geometric drift over time (anchor patterns only).
@@ -1180,9 +1185,10 @@ def find_drifting_entities(
     rank_by_dimension: rank by drift on a specific dimension instead of total displacement.
     sample_size: recommended for >100K entities to bound latency. Hard cap 50.
     fdr_alpha: apply Benjamini-Hochberg FDR control at this level. Returns only entities with q_value <= alpha. Default None = legacy behavior.
-    fdr_method: "bh" only in this version. "storey" reserved for future.
+    fdr_method: "bh" (default) or "storey" (LSL null-proportion estimator; recovers 10-15% more discoveries when combined with p_value_method="chi2" on spheres with genuine null mass).
+    p_value_method: "rank" (default) or "chi2" (required for Storey to shrink q-values).
     select: "top_norm" (default, rank by score) or "diverse" (submodular facility location — K most diverse representatives with representativeness counts).
-    Returns: per-entity displacement, path_length, ratio, dimension_diffs, tac, reputation.
+    Returns: per-entity displacement, path_length, ratio, dimension_diffs, tac, reputation, gradient_alignment (radially-inward component of the drift vector in [-1, 1]), drift_direction ("normalizing" | "deteriorating" | "neutral" per ±0.3 cutoff).
     """
     _require_navigator()
     capped_warning: str | None = None
@@ -1204,6 +1210,7 @@ def find_drifting_entities(
         rank_by_dimension=rank_by_dimension,
         fdr_alpha=fdr_alpha,
         fdr_method=fdr_method,
+        p_value_method=p_value_method,
         select=select,
     )
 
@@ -1761,3 +1768,221 @@ def explain_anomaly(
     nav = _state["navigator"]
     result = nav.explain_anomaly(primary_key, pattern_id)
     return json.dumps(result, indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def trace_root_cause(
+    primary_key: str,
+    pattern_id: str,
+    max_depth: int = 2,
+    max_branches: int = 3,
+    hub_pop_limit: int = 50_000,
+    contagion_min_threshold: float = 0.10,
+    contagion_min_counterparties: int = 3,
+    max_total_nodes: int = 50,
+    edge_counterparty_top_n: int = 1,
+    branches_enabled: list[str] | None = None,
+) -> str:
+    """Multi-hop root-cause DAG for an anomalous entity.
+
+    Composes explain_anomaly + find_counterparties + contagion_score + π7 hub check
+    into one bounded tree of evidence. Counterparty selection is sorted by anomaly
+    (not transaction volume). Candidate branches are scored by unified severity
+    ("normal" < "low" < "moderate" < "high" < "critical" < "extreme") and the top
+    max_branches are kept — tree is priority-ordered, not FIFO.
+
+    hub_pop_limit: skip hub branch when the pattern has more than this many entities
+      (π7 is O(n)). Default 50_000.
+    contagion_min_threshold: below this score, the contagion branch is not attached.
+      Default 0.10. Set 0.0 to always attach when the entity has counterparties.
+    max_total_nodes: hard cap on nodes expanded across the whole DAG. Default 50.
+
+    Returns: {root, summary, hop_count, branches_explored, truncated}.
+      - root.evidence.anomalous_cp_keys: list of anomalous counterparty primary keys
+        when the contagion branch fires (up to 10 keys). Saves a follow-up call.
+      - truncated=True iff at least one candidate was dropped because of max_branches
+        OR max_total_nodes.
+    Node roles: "root" | "edge_counterparty" | "hub" | "neighbor_contamination".
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    result = nav.trace_root_cause(
+        primary_key,
+        pattern_id,
+        max_depth=max_depth,
+        max_branches=max_branches,
+        hub_pop_limit=hub_pop_limit,
+        contagion_min_threshold=contagion_min_threshold,
+        contagion_min_counterparties=contagion_min_counterparties,
+        max_total_nodes=max_total_nodes,
+        edge_counterparty_top_n=edge_counterparty_top_n,
+        branches_enabled=branches_enabled,
+    )
+    return json.dumps(result, indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def score_edge(
+    from_key: str,
+    to_key: str,
+    pattern_id: str,
+) -> str:
+    """Geometric anomaly score for a single edge (from_key → to_key).
+
+    Formula: ||δ_from − δ_to||₂ × (1 / min(pair_tx_count, 1000)). High score
+    means endpoints are structurally distant AND the pair is rare — classic
+    AML layering signature. Complementary to entity-level delta_norm.
+
+    Returns: {score, delta_distance, pair_tx_count, effective_weight, interpretation}.
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    result = nav.edge_potential(from_key, to_key, pattern_id)
+    return json.dumps(result, indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def find_high_potential_edges(
+    pattern_id: str,
+    top_n: int = 10,
+    from_key: str | None = None,
+    to_key: str | None = None,
+    min_pair_count: int = 1,
+) -> str:
+    """Rank edges by geometric edge potential, highest first.
+
+    top_n capped internally at 100 to avoid token overflow.
+    from_key / to_key scope the ranking to edges touching one specific entity.
+    min_pair_count filters out very rare one-off pairs — raise to 3+ on large
+    edge tables where one-off pairs dominate by count.
+
+    Returns: list of {from_key, to_key, score, delta_distance, pair_tx_count}.
+    """
+    _require_navigator()
+    navigator = _state["navigator"]
+    capped_warning: str | None = None
+    if top_n > 100:
+        capped_warning = f"top_n={top_n} exceeds hard cap 100 — truncated."
+        top_n = 100
+    results = navigator.attract_edge_potential(
+        pattern_id,
+        top_n=top_n,
+        from_key=from_key,
+        to_key=to_key,
+        min_pair_count=min_pair_count,
+    )
+    output: dict[str, Any] = {
+        "pattern_id": pattern_id,
+        "count": len(results),
+        "results": results,
+    }
+    if capped_warning:
+        output["capped_warning"] = capped_warning
+    return json.dumps(output, indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def score_motif(
+    entity_key: str,
+    motif_type: str,
+    pattern_id: str,
+    time_window_hours: int | None = None,
+    amt1_min: float = 10000.0,
+    amt2_max: float = 10000.0,
+) -> str:
+    """Score the best structural motif seeded at entity_key.
+
+    motif_type ∈ {fan_out, cycle_2, cycle_3, structuring}. Composes
+    edge_potential across the k edges of the motif via product — a motif of
+    rare edges is rare.
+
+    Defaults when time_window_hours is None: fan_out=168h, cycle_2=24h,
+    cycle_3=72h, structuring=1h.
+
+    fan_out: hub → k distinct targets in the window (min k=3). Typology atoms:
+      T6 Offshore Hub, T13 Concentrator.
+    cycle_2: A↔B bidirectional pair within the window. Typology atoms:
+      T2 Flash-Burst Round-Trip, T4 Bidirectional Burst.
+    cycle_3: A→B→C→A with strict temporal ordering ts1<ts2<ts3, span ≤ window.
+      Typology atoms: T3 Round-Tripping 3-Party, T5 Long-Cycle, T11 Multi-Round-Tripping.
+    structuring: open A→B→C→D linear chain with hop1 amount ≥ amt1_min, hop2
+      and hop3 amount ≤ amt2_max, strict temporal ordering within window.
+      amt1_min/amt2_max default 10000 (USD reporting threshold); override per
+      jurisdiction (GBP, EUR, crypto unit). Typology atoms: structuring /
+      smurfing (cash-deposit-split-and-wire for reporting-threshold evasion).
+
+    Returns: {found, score, motif_type, breakdown (per-edge edge_potentials),
+    motif-specific fields (ring/counterparty/k/path/amounts), reason when not found}.
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    result = nav.score_motif(
+        entity_key,
+        motif_type=motif_type,
+        pattern_id=pattern_id,
+        time_window_hours=time_window_hours,
+        amt1_min=amt1_min,
+        amt2_max=amt2_max,
+    )
+    return json.dumps(result, indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def find_high_potential_motifs(
+    pattern_id: str,
+    motif_type: str,
+    top_n: int = 10,
+    time_window_hours: int | None = None,
+    seeds: list[str] | None = None,
+    min_k: int | None = None,
+    amt1_min: float = 10000.0,
+    amt2_max: float = 10000.0,
+) -> str:
+    """Rank motifs of a given type across the pattern, highest score first.
+
+    motif_type ∈ {fan_out, cycle_2, cycle_3, structuring}. First call per
+    (pattern, motif_type, window, amt1_min, amt2_max) is cold — enumerates
+    motifs across all seeds. Subsequent calls hit an LRU cache (cap 8). On
+    large patterns (>500k entities) the cold call can take 30–90s — plan
+    accordingly.
+
+    top_n capped internally at 100. seeds filter restricts to specific entities
+    after the base ranking is cached.
+
+    amt1_min, amt2_max gate the three hops of a structuring motif (hop1 amount
+    ≥ amt1_min, hop2 and hop3 amount ≤ amt2_max); ignored for other motif
+    types. Defaults 10000 (USD reporting threshold); override per jurisdiction.
+
+    Returns: list of motif instances with score_rank_pct + is_high_potential
+    (p95 threshold within motif_type).
+    """
+    _require_navigator()
+    navigator = _state["navigator"]
+    capped_warning: str | None = None
+    if top_n > 100:
+        capped_warning = f"top_n={top_n} exceeds hard cap 100 — truncated."
+        top_n = 100
+    results = navigator.find_high_potential_motifs(
+        pattern_id,
+        motif_type=motif_type,
+        top_n=top_n,
+        time_window_hours=time_window_hours,
+        seeds=seeds,
+        min_k=min_k,
+        amt1_min=amt1_min,
+        amt2_max=amt2_max,
+    )
+    output: dict[str, Any] = {
+        "pattern_id": pattern_id,
+        "motif_type": motif_type,
+        "count": len(results),
+        "results": results,
+    }
+    if capped_warning:
+        output["capped_warning"] = capped_warning
+    return json.dumps(output, indent=2, default=str)

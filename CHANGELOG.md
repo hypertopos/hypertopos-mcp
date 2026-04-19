@@ -4,7 +4,20 @@ All notable changes to `hypertopos-mcp` will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.5.0] — 2026-04-19
+
+### Added
+- `find_anomalies` (and `pi5_attract_anomaly`) gain `fdr_method="storey"` — routes through the new Storey LSL estimator in `hypertopos` core. Default remains `"bh"`.
+- `p_value_method` parameter on the same tools (`"rank"` default, `"chi2"` opt-in). `"chi2"` is required for `fdr_method="storey"` to actually shrink q-values — rank p-values are uniform by construction and defeat the Storey estimator. Power recovery is regime-dependent: moderate super-anomaly patterns (e.g. NYC Taxi trips) gain 10–15% discoveries; over-compressed or extreme patterns get zero uplift.
+- `find_drifting_entities` returns include `gradient_alignment` and `drift_direction` (source: hypertopos core). No parameter changes.
+- `trace_root_cause` MCP tool (top-level + smart-mode step) surfaces the new `GDSNavigator.trace_root_cause` DAG — one call replaces the manual `explain_anomaly → find_counterparties → contagion_score → π7 hub` investigation chain. Smart dispatcher keywords: `"root cause"`, `"why anomalous"`, `"trace anomaly"`, `"anomaly chain"`, `"multi-hop"`. Tool exposes `hub_pop_limit`, `contagion_min_threshold`, `max_total_nodes` knobs for tuning the branch-selection behaviour per sphere.
+- `score_edge(from_key, to_key, pattern_id)` — per-edge geometric anomaly score.
+- `find_high_potential_edges(pattern_id, top_n, from_key, to_key, min_pair_count)` — rank edges by geometric edge potential. Hard cap top_n=100. Smart-mode keyword triggers: `"suspicious edge"`, `"rare pair"`, `"edge anomaly"`, `"geometric edge"`.
+- `score_motif(entity_key, motif_type, pattern_id, time_window_hours=None, amt1_min=10000.0, amt2_max=10000.0)` — score the best structural motif seeded at an entity. Valid `motif_type` values: `fan_out` (hub → k targets), `cycle_2` (A↔B round-trip), `cycle_3` (A→B→C→A triad with strict temporal ordering), `structuring` (open A→B→C→D chain with hop1 ≥ amt1_min and hops 2,3 ≤ amt2_max, default 10000 USD reporting threshold — overridable per jurisdiction). Scoring is product-of-edge_potential across motif edges.
+- `find_high_potential_motifs(pattern_id, motif_type, top_n, time_window_hours, seeds, min_k, amt1_min, amt2_max)` — rank motifs of a given type across the pattern. `motif_type` includes the new `structuring` (open A→B→C→D chain with amount gating, default 1h window) alongside `fan_out`, `cycle_2`, `cycle_3`. Hard cap top_n=100. First call per (pattern, motif_type, window, amt1_min, amt2_max) is cold (30–90s on patterns with >500k entities); subsequent calls hit an LRU cache capped at 8 (structuring amount thresholds are part of the cache key so changing them triggers recompute). Motif ranking enumerates off the shared `AdjacencyIndex` cache used by every other graph primitive (`find_counterparties`, `entity_flow`, `contagion_score`, `discover_chains`, `anomalous_edges`, `find_geometric_path`, `detect_network_novelty`, `score_edge`, `find_high_potential_edges`) — the adjacency build cost is paid once per pattern per session and reused across all of them, so a typical `find_anomalies` → `find_counterparties` → `find_high_potential_motifs` flow only pays it on the first step. Smart-mode keyword triggers: `"fan out"`, `"fan-out"`, `"concentrator"`, `"round trip"`, `"round-trip"`, `"bidirectional burst"`, `"flash burst"`, `"triad"`, `"three-party cycle"`, `"round-tripping 3"`, `"laundering ring"`, `"closed loop"`, `"motif"`, `"structural pattern"`, `"subgraph pattern"`, `"structuring"`, `"smurfing"`, `"split transfer"`, `"deposit split"`, `"reporting threshold"`.
+
+### Removed
+- `explain_anomaly_chain` smart-mode step — superseded by `trace_root_cause`.
 
 ## [0.4.1] — 2026-04-16
 

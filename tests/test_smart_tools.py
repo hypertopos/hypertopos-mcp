@@ -60,13 +60,13 @@ class TestFallbackPlan:
         entity_tools = {
             "find_counterparties", "extract_chains", "find_common_relations",
             "get_centroid_map", "assess_false_positive",
-            "explain_anomaly_chain", "detect_composite_subgroup_inflation",
+            "trace_root_cause", "detect_composite_subgroup_inflation",
             "hub_history",
         }
         # query triggers every keyword bucket; all entity tools marked available
         query = (
             "counterpart chain common relation centroid "
-            "false positive anomaly chain subgroup inflat hub history"
+            "false positive root cause subgroup inflat hub history"
         )
         plan = _fallback_plan(
             query,
