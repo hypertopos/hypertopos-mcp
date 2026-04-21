@@ -16,11 +16,30 @@ class TestDetectCrossPatternDiscrepancy:
     def setup_method(self):
         self.nav = MagicMock()
         _state["navigator"] = self.nav
+        sphere_mock = MagicMock()
+        sphere_mock.patterns = {"pat_a": MagicMock(), "pat_b": MagicMock()}
+        sphere_mock.entity_line.side_effect = lambda pid: "customers"
         _state["sphere"] = MagicMock()
+        _state["sphere"]._sphere = sphere_mock
 
     def teardown_method(self):
         _state["navigator"] = None
         _state["sphere"] = None
+
+    def test_detect_cross_pattern_discrepancy_single_pattern_returns_diagnostic(self):
+        """When entity_line has only 1 covering pattern, return diagnostic not empty list."""
+        from hypertopos_mcp.tools.detection import detect_cross_pattern_discrepancy
+
+        sphere_mock = MagicMock()
+        sphere_mock.patterns = {"pat_a": MagicMock()}
+        sphere_mock.entity_line.side_effect = lambda pid: "accounts" if pid == "pat_a" else None
+        _state["sphere"]._sphere = sphere_mock
+
+        response = json.loads(detect_cross_pattern_discrepancy("accounts"))
+        assert response["total_found"] == 0
+        assert response["results"] == []
+        assert "diagnostic" in response
+        assert "requires" in response["diagnostic"].lower()
 
     def test_returns_valid_json_with_correct_keys(self):
         from hypertopos_mcp.tools.detection import detect_cross_pattern_discrepancy
@@ -128,6 +147,34 @@ class TestDetectTrajectoryAnomaly:
         assert "error" in result
         assert "event type" in result["error"]
 
+    def test_detect_trajectory_anomaly_accepts_sample_size(self):
+        """detect_trajectory_anomaly MCP tool must accept sample_size parameter."""
+        import inspect
+        from hypertopos_mcp.tools.detection import detect_trajectory_anomaly
+        sig = inspect.signature(detect_trajectory_anomaly)
+        assert "sample_size" in sig.parameters
+
+    def test_detect_trajectory_anomaly_passes_sample_size_to_navigator(self):
+        """sample_size must be forwarded to the navigator call."""
+        from hypertopos_mcp.tools.detection import detect_trajectory_anomaly
+
+        self.nav.detect_trajectory_anomaly.return_value = []
+        detect_trajectory_anomaly("pat_a", sample_size=100)
+        self.nav.detect_trajectory_anomaly.assert_called_once_with(
+            "pat_a",
+            displacement_ranks=None,
+            top_n_per_range=5,
+            sample_size=100,
+        )
+
+    def test_detect_trajectory_anomaly_sample_size_in_response(self):
+        """sample_size must appear in the returned JSON."""
+        from hypertopos_mcp.tools.detection import detect_trajectory_anomaly
+
+        self.nav.detect_trajectory_anomaly.return_value = []
+        result = json.loads(detect_trajectory_anomaly("pat_a", sample_size=50))
+        assert result["sample_size"] == 50
+
 
 class TestDetectSegmentShift:
     def setup_method(self):
@@ -166,3 +213,59 @@ class TestDetectSegmentShift:
         self.nav.detect_segment_shift.side_effect = ValueError("No entity line")
         result = json.loads(detect_segment_shift("bad_pat"))
         assert "error" in result
+
+    def test_detect_segment_shift_no_string_columns_returns_diagnostic(self):
+        """Pattern with no string-typed entity columns returns diagnostic, not silent empty."""
+        from hypertopos_mcp.tools.detection import detect_segment_shift
+
+        # Build a sphere mock where entity line has only numeric columns (no string columns)
+        numeric_col_a = MagicMock()
+        numeric_col_a.name = "amount"
+        numeric_col_a.type = "int64"
+        numeric_col_b = MagicMock()
+        numeric_col_b.name = "balance"
+        numeric_col_b.type = "float64"
+
+        entity_line_mock = MagicMock()
+        entity_line_mock.columns = [numeric_col_a, numeric_col_b]
+
+        sphere_mock = MagicMock()
+        sphere_mock.entity_line.return_value = "accounts"
+        sphere_mock.lines = {"accounts": entity_line_mock}
+        _state["sphere"]._sphere = sphere_mock
+
+        self.nav.detect_segment_shift.return_value = []
+
+        response = json.loads(detect_segment_shift("pattern_with_no_string_cols"))
+        assert response["total_found"] == 0
+        assert "diagnostic" in response
+        assert (
+            "string" in response["diagnostic"].lower()
+            or "prop_column" in response["diagnostic"].lower()
+        )
+
+    def test_detect_segment_shift_string_columns_but_no_shift_returns_diagnostic(self):
+        """When string columns exist but no segment exceeded threshold, return diagnostic."""
+        from hypertopos_mcp.tools.detection import detect_segment_shift
+
+        string_col = MagicMock()
+        string_col.name = "region"
+        string_col.type = "string"
+        pk_col = MagicMock()
+        pk_col.name = "primary_key"
+        pk_col.type = "string"
+
+        entity_line_mock = MagicMock()
+        entity_line_mock.columns = [pk_col, string_col]
+
+        sphere_mock = MagicMock()
+        sphere_mock.entity_line.return_value = "customers"
+        sphere_mock.lines = {"customers": entity_line_mock}
+        _state["sphere"]._sphere = sphere_mock
+
+        self.nav.detect_segment_shift.return_value = []
+
+        response = json.loads(detect_segment_shift("pattern_with_string_cols_no_shift"))
+        assert response["total_found"] == 0
+        assert "diagnostic" in response
+        assert "min_shift_ratio" in response["diagnostic"]

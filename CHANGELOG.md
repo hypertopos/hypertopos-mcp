@@ -4,6 +4,23 @@ All notable changes to `hypertopos-mcp` will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+## [0.5.1] — 2026-04-21
+
+### Added
+- `score_motif` and `find_high_potential_motifs` recognise two new motif types: `fan_in` (sink-centric mirror of `fan_out`) and `chain_k` (open directed chain of parametric length 3 ≤ k ≤ 8). New `k` parameter on both tools (default 4, chain_k only). Both tools pass through the new `log_score`, `score_clamped` numeric-stability fields and the `frontier_truncated` flag on `chain_k` results (see hypertopos-py CHANGELOG). `score_motif` additionally gains a `min_k: int | None = None` override — forwards to the single-seed `fan_out` / `fan_in` enumerators so agents can check "is this hub / sink connected to ≥ N distinct counterparties?" without the pattern-wide cold cache on `find_high_potential_motifs`. Extended docstrings and `docs/tools.md` tables cover the new types, parameters, and return fields.
+- Large-motif response truncation on `score_motif` and `find_high_potential_motifs`. When a motif instance carries more than 50 edges, `edges` and `breakdown` are capped at the top 50 contributors by `edge_potential` DESC; `edges_total_count` reports the original count, `edges_truncated` / `breakdown_truncated` flag the truncation, and `breakdown_summary` surfaces `count`, `mean`, `std`, `min`, `max`, `p25`, `p50`, `p75`, `p95` of `edge_potential` over the full edge set so the agent sees the distribution even when only the top 50 are materialised. Rationale: pre-fix, a fan_in hub with ~500 sources produced ~200k-char responses that overflowed the MCP token limit and got spilled to a file instead of returned inline. `count` in the `find_high_potential_motifs` envelope counts motif instances and is unaffected.
+- MCP wire format for motif tools is now strict RFC 8259 JSON. Non-finite float values (including `log_score = -inf` on motifs where a `saw_zero` edge collapses the product) are rendered as JSON `null` instead of the non-standard `Infinity` / `-Infinity` / `NaN` literals that Python's default `json.dumps` emits. Affects `score_motif`, `find_high_potential_motifs`, and (defensively) `trace_root_cause`. Consumers read `log_score == null` as "score degenerate / not finite"; strict parsers (browser `JSON.parse`, many non-Python MCP clients) no longer reject these payloads.
+
+### Fixed
+- `get_event_polygons` parameter renamed from `event_pattern_id` to `pattern_id` for consistency with all other polygon tools.
+- `detect_cross_pattern_discrepancy` and `detect_segment_shift` return a `diagnostic` field explaining why results are empty, instead of a silent empty response.
+- `detect_trajectory_anomaly` accepts a `sample_size` parameter to cap entity streaming on large patterns.
+- `find_counterparties` smart step resolves `pattern_id` from `event_pattern_id` alias, enabling the edge-table fast path.
+- `anomaly_confidence` is omitted from polygon output when bootstrap confidence was not computed for the pattern (previously emitted as `0.0`, which could be misread as a computed score).
+- Downstream of the hypertopos-py single-seed window-filter fix: `score_motif(..., motif_type in {"fan_out", "cycle_2", "cycle_3"}, time_window_hours=H)` now enforces the declared window — previously silently disabled in production because of a microseconds-vs-seconds unit mismatch. Behaviour change on three of six motif types; consult the hypertopos-py CHANGELOG for the full rationale.
+
 ## [0.5.0] — 2026-04-19
 
 ### Added

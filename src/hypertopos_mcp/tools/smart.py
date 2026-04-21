@@ -341,12 +341,14 @@ def _step_hub_history(params: dict) -> dict:
 def _step_find_counterparties(params: dict) -> dict:
     """Run find_counterparties — transaction partners with anomaly enrichment."""
     nav = _state["navigator"]
+    # Accept both 'pattern_id' and 'event_pattern_id' from LLM planner output
+    pattern_id = params.get("pattern_id") or params.get("event_pattern_id") or None
     result = nav.find_counterparties(
         params.get("primary_key", ""),
         params.get("line_id", ""),
         params.get("from_col", ""),
         params.get("to_col", ""),
-        pattern_id=params.get("pattern_id"),
+        pattern_id=pattern_id,
         top_n=params.get("top_n", 20),
     )
     total = len(result.get("outgoing", [])) + len(result.get("incoming", []))

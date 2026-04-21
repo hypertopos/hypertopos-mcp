@@ -1562,9 +1562,20 @@ def test_get_event_polygons_raises_when_filters_is_dict(open_berka_sphere) -> No
     with pytest.raises(RuntimeError, match="filters must be a list"):
         get_event_polygons(
             entity_key="1",
-            event_pattern_id="tx_pattern",
+            pattern_id="tx_pattern",
             filters={"line": "accounts", "key": "741"},
         )
+
+
+def test_get_event_polygons_accepts_pattern_id_not_event_pattern_id() -> None:
+    """get_event_polygons must use pattern_id parameter, not event_pattern_id."""
+    import inspect
+
+    from hypertopos_mcp.tools.geometry import get_event_polygons
+
+    sig = inspect.signature(get_event_polygons)
+    assert "pattern_id" in sig.parameters, "parameter must be named pattern_id"
+    assert "event_pattern_id" not in sig.parameters, "old param name must be gone"
 
 
 # ---------------------------------------------------------------------------
@@ -1883,6 +1894,8 @@ class TestFindSimilarEntities:
                 top_n=2,
                 filter_expr=None,
                 missing_edge_to=None,
+                dim_mask=None,
+                metric="L2",
             )
             assert result["reference"]["primary_key"] == "CUST-001"
             assert result["reference"]["delta_norm"] == pytest.approx(1.23)
@@ -4902,6 +4915,8 @@ class TestFindSimilarEntitiesMissingEdgeTo:
                 top_n=5,
                 filter_expr=None,
                 missing_edge_to="transactions",
+                dim_mask=None,
+                metric="L2",
             )
         finally:
             for k in list(_state.keys()):
@@ -4929,6 +4944,8 @@ class TestFindSimilarEntitiesMissingEdgeTo:
                 top_n=5,
                 filter_expr=None,
                 missing_edge_to=None,
+                dim_mask=None,
+                metric="L2",
             )
         finally:
             for k in list(_state.keys()):

@@ -22,6 +22,25 @@ def detect_cross_pattern_discrepancy(
     """
     _require_navigator()
     nav = _state["navigator"]
+    sphere = _state["sphere"]._sphere
+    covering = [
+        pid for pid, _p in sphere.patterns.items()
+        if sphere.entity_line(pid) == entity_line
+    ]
+    if len(covering) < 2:
+        return json.dumps(
+            {
+                "entity_line": entity_line,
+                "total_found": 0,
+                "results": [],
+                "diagnostic": (
+                    f"entity_line '{entity_line}' is covered by "
+                    f"{len(covering)} pattern(s) ({covering}). "
+                    "detect_cross_pattern_discrepancy requires >=2 anchor patterns on the same entity line."
+                ),
+            },
+            indent=2,
+        )
     results = nav.detect_cross_pattern_discrepancy(entity_line, top_n=top_n)
     return json.dumps(
         {"entity_line": entity_line, "total_found": len(results), "results": results},
@@ -67,10 +86,12 @@ def detect_trajectory_anomaly(
     pattern_id: str,
     displacement_ranks: list[int] | None = None,
     top_n_per_range: int = 5,
+    sample_size: int | None = None,
 ) -> str:
     """Detect entities with non-linear temporal trajectories (arch, V-shape, spike-recovery).
 
     Anchor patterns with temporal data only. top_n_per_range: max results (default 5).
+    sample_size: cap the number of entities streamed (None = all; use ~500–2000 on large patterns).
     Returns: entities with trajectory_shape, displacement, path_length, cohort_size/keys.
     """
     _require_navigator()
@@ -80,6 +101,7 @@ def detect_trajectory_anomaly(
             pattern_id,
             displacement_ranks=displacement_ranks,
             top_n_per_range=top_n_per_range,
+            sample_size=sample_size,
         )
     except ValueError as exc:
         return json.dumps({"error": str(exc)}, indent=2)
@@ -88,6 +110,7 @@ def detect_trajectory_anomaly(
             "pattern_id": pattern_id,
             "displacement_ranks": displacement_ranks or [0, 20, 100],
             "top_n_per_range": top_n_per_range,
+            "sample_size": sample_size,
             "total_found": len(results),
             "results": results,
         },
@@ -112,6 +135,18 @@ def detect_segment_shift(
     """
     _require_navigator()
     nav = _state["navigator"]
+    sphere = _state["sphere"]._sphere
+    entity_line_id = sphere.entity_line(pattern_id)
+    line = sphere.lines.get(entity_line_id) if entity_line_id else None
+    string_cols = (
+        [
+            c.name
+            for c in (line.columns or [])
+            if c.type == "string" and c.name != "primary_key"
+        ]
+        if line
+        else []
+    )
     try:
         results = nav.detect_segment_shift(
             pattern_id,
@@ -121,13 +156,24 @@ def detect_segment_shift(
         )
     except ValueError as exc:
         return json.dumps({"error": str(exc)}, indent=2)
-    return json.dumps(
-        {
-            "pattern_id": pattern_id,
-            "max_cardinality": max_cardinality,
-            "min_shift_ratio": min_shift_ratio,
-            "total_found": len(results),
-            "results": results,
-        },
-        indent=2,
-    )
+    out: dict = {
+        "pattern_id": pattern_id,
+        "max_cardinality": max_cardinality,
+        "min_shift_ratio": min_shift_ratio,
+        "total_found": len(results),
+        "results": results,
+    }
+    if not results:
+        if not string_cols:
+            out["diagnostic"] = (
+                f"No string-typed columns on entity line '{entity_line_id}'. "
+                "detect_segment_shift requires categorical string columns to segment by. "
+                "Add prop_columns to the pattern or use a line with categorical properties."
+            )
+        else:
+            out["diagnostic"] = (
+                f"String columns found: {string_cols}, but no segment exceeded "
+                f"min_shift_ratio={min_shift_ratio}x the population anomaly rate. "
+                f"Try lowering min_shift_ratio (e.g. 1.5) or max_cardinality={max_cardinality}."
+            )
+    return json.dumps(out, indent=2)

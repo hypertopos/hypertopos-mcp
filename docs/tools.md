@@ -420,7 +420,7 @@ Lists polygons for a specific entity in an event pattern.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `entity_key` | string | required | Entity key |
-| `event_pattern_id` | string | required | Event pattern |
+| `pattern_id` | string | required | Event pattern |
 | `limit` | int | `10` | Max polygons to return |
 | `offset` | int | `0` | Skip first N polygons (pagination) |
 | `filters` | list[dict] | `null` | Record-level field filters on the event line: `[{"line": "company_codes", "key": "CC-PL"}]`. Do not use for `is_anomaly` — use `geometry_filters` instead. |
@@ -1133,24 +1133,70 @@ Rank all edges in the pattern's companion event table by geometric edge potentia
 
 ### `score_motif`
 
-Score the best structural motif seeded at `entity_key`. Composes `edge_potential` across the k edges of the motif via product — a motif of rare edges is rare. Closed vocabulary of four motif types covering the structural atoms of 25 documented AML typologies.
+Score the best structural motif seeded at `entity_key`. Composes `edge_potential` across the edges of the motif via product — a motif of rare edges is rare. Closed vocabulary of six motif types covering the structural atoms of 25 documented AML typologies.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `entity_key` | string | required | Seed entity primary key |
-| `motif_type` | string | required | One of `fan_out`, `cycle_2`, `cycle_3`, `structuring` |
+| `entity_key` | string | required | Seed entity primary key (source for fan_out/chain_k/structuring, sink for fan_in, pivot for cycle_2/cycle_3) |
+| `motif_type` | string | required | One of `fan_out`, `fan_in`, `cycle_2`, `cycle_3`, `structuring`, `chain_k` |
 | `pattern_id` | string | required | Pattern whose geometry provides delta vectors |
-| `time_window_hours` | int | `null` | Override default: fan_out=168h, cycle_2=24h, cycle_3=72h, structuring=1h |
+| `time_window_hours` | int | `null` | Override default: fan_out=168h, fan_in=168h, cycle_2=24h, cycle_3=72h, structuring=1h, chain_k=168h |
 | `amt1_min` | float | `10000.0` | **structuring only** — minimum amount on hop 1 (A→B) |
 | `amt2_max` | float | `10000.0` | **structuring only** — maximum amount on hops 2 and 3 (B→C, C→D) |
+| `k` | int | `4` | **chain_k only** — chain length (3 ≤ k ≤ 8, k-1 edges). Default 4 matches typology T5 / T18 depth. |
+| `min_k` | int | `null` | **fan_out / fan_in only** — override distinct-neighbour threshold (default 3 when `null`). Lets you single-seed-check whether an entity has e.g. ≥ 10 sources without triggering the cold ranking cache on `find_high_potential_motifs`. |
 
 **Motif types:**
-- **`fan_out`** — hub → k distinct targets in the window (min k=3). Typology atoms: T6 Offshore Hub, T13 Concentrator.
+- **`fan_out`** — hub → k distinct targets in the window (min k=3). Typology atoms: T6 Offshore Hub, T13 Concentrator (source side).
+- **`fan_in`** — k distinct sources → sink in the window (min k=3). Mirror of `fan_out`. Typology atoms: T12 Parallel Layering (destination side), T13 Concentrator/Sink.
 - **`cycle_2`** — A↔B bidirectional pair within the window. Typology atoms: T2 Flash-Burst Round-Trip, T4 Bidirectional Burst.
 - **`cycle_3`** — A→B→C→A triad with strict temporal ordering `ts1 < ts2 < ts3`, total span ≤ window. Typology atoms: T3 Round-Tripping 3-Party, T5 Long-Cycle, T11 Multi-Round-Tripping.
+- **`chain_k`** — open A→B→…→Z chain of length `k` (3 ≤ k ≤ 8), no cycle closure, no node revisit, strict monotone timestamps, total span ≤ window. Typology atoms: T5 Multi-Stage Layering, T18 Multi-Jurisdiction Latency Chain, T15 Attenuation Pattern (when `k ≥ 4` with wider window). Default `k=4` matches typology depth; raise for deeper layering investigations, lower (`k=3`) for faster scans of shallow chains.
 - **`structuring`** — open A→B→C→D linear chain with hop1 amount ≥ `amt1_min`, hops 2 and 3 amount ≤ `amt2_max`, strict temporal ordering within `time_window_hours` (default 1h — flash). Typology atoms: structuring / smurfing (cash-deposit-split-and-wire for reporting-threshold evasion). Defaults 10000 assume the pattern's amount column is in USD; override per jurisdiction (GBP, EUR, crypto unit) via `amt1_min`/`amt2_max`. **Assumes the edge table's `amount` column is non-negative (positive money flow); NULL or ≤ 0 amounts on any hop are silently skipped rather than surfaced as structuring matches.** Producers emitting signed amounts (credit-positive / debit-negative convention) will see zero structuring results — pre-process to magnitude before building the sphere if that's the semantics.
 
-**Returns:** `{found, score, motif_type, breakdown}` on success, or `{found: false, reason}` when no motif matches. `breakdown` lists per-edge `edge_potential`, `delta_distance`, `pair_tx_count` so the agent can see which edge contributed most. `cycle_2` adds `counterparty`; `cycle_3` adds `ring` (list of 3 keys); `fan_out` adds `k` (distinct targets); `structuring` adds `path` (list of 4 keys), `timestamps` (per-hop unix seconds), `amounts` (per-hop amount).
+**Returns:** `{found, score, log_score, score_clamped, motif_type, breakdown}` on success, or `{found: false, reason}` when no motif matches. `log_score` is `sum(log(edge_potential))` over non-zero edges (`-inf` when any edge is zero); `score_clamped` is `true` when the raw edge-potential product overflowed and was clamped at `1e300` — log_score is authoritative for ordering above the clamp. `breakdown` lists per-edge `edge_potential`, `delta_distance`, `pair_tx_count` so the agent can see which edge contributed most. `cycle_2` adds `counterparty`; `cycle_3` adds `ring` (list of 3 keys); `fan_out` / `fan_in` add `k` (distinct neighbours); `chain_k` adds `path` (list of k keys), `k`, and `frontier_truncated: bool` (true when the per-level frontier cap was hit during enumeration — rankings may be incomplete; retry with tighter window or lower k); `structuring` adds `path` (list of 4 keys), `timestamps` (per-hop unix seconds), `amounts` (per-hop amount).
+
+**Large-motif response shape.** When a motif carries more than 50 edges, `edges` and `breakdown` are capped at the top 50 contributors by `edge_potential` DESC; `edges_total_count` reports the original count, `edges_truncated` / `breakdown_truncated` flag the truncation, and `breakdown_summary` provides `count`, `mean`, `std`, `min`, `max`, `p25`, `p50`, `p75`, `p95` of `edge_potential` over the full edge set so the agent sees the distribution even when only the top 50 are materialised. For motifs with ≤ 50 edges both truncation flags are `false` and no `breakdown_summary` is emitted. Rationale: pre-fix, a fan_in hub with ~500 sources produced ~200k-char responses that overflowed the MCP token limit.
+
+Example (truncated, k = 500):
+
+```json
+{
+  "found": true,
+  "motif_type": "fan_in",
+  "seed": "SINK",
+  "score": 1e300,
+  "log_score": 1151.29,
+  "score_clamped": true,
+  "k": 500,
+  "edges": [["src_a", "SINK"], "... top 50 ..."],
+  "edges_total_count": 500,
+  "edges_truncated": true,
+  "breakdown": ["... top 50 breakdown entries ..."],
+  "breakdown_truncated": true,
+  "breakdown_summary": {
+    "count": 500, "mean": 2.3, "std": 1.1, "min": 0.2, "max": 9.8,
+    "p25": 1.4, "p50": 2.1, "p75": 3.0, "p95": 4.9
+  }
+}
+```
+
+Example (small, k = 3):
+
+```json
+{
+  "found": true,
+  "motif_type": "cycle_3",
+  "score": 0.42,
+  "log_score": -0.87,
+  "score_clamped": false,
+  "ring": ["A", "B", "C"],
+  "edges": [["A", "B"], ["B", "C"], ["C", "A"]],
+  "edges_total_count": 3,
+  "edges_truncated": false,
+  "breakdown_truncated": false
+}
+```
 
 ---
 
@@ -1161,17 +1207,18 @@ Rank all motifs of a given type across the pattern's companion event table, high
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `pattern_id` | string | required | Pattern with companion event edge table |
-| `motif_type` | string | required | One of `fan_out`, `cycle_2`, `cycle_3`, `structuring` |
+| `motif_type` | string | required | One of `fan_out`, `fan_in`, `cycle_2`, `cycle_3`, `structuring`, `chain_k` |
 | `top_n` | int | `10` | Max results (hard cap 100) |
 | `time_window_hours` | int | `null` | Override motif default |
 | `seeds` | list[string] | `null` | Restrict ranking to these entities (post-cache filter) |
-| `min_k` | int | `null` | For `fan_out` only: minimum distinct-target threshold |
+| `min_k` | int | `null` | For `fan_out` and `fan_in` only: minimum distinct-neighbour threshold |
 | `amt1_min` | float | `10000.0` | **structuring only** — minimum amount on hop 1 (A→B). Part of the cache key, so changing it triggers recompute. |
 | `amt2_max` | float | `10000.0` | **structuring only** — maximum amount on hops 2 and 3 (B→C, C→D). Part of the cache key. |
+| `k` | int | `4` | **chain_k only** — chain length (3 ≤ k ≤ 8). Part of the cache key; different `k` values are cached separately. |
 
-**Latency note:** first call per `(pattern, motif_type, window, amt1_min, amt2_max)` is cold — enumerates motifs across all seeds in the pattern. Cold call can take 30–90s on patterns with >500k entities. Subsequent calls hit an LRU cache (cap 8). `cycle_3` is deduplicated by canonical ring (sorted primary keys) so each physical cycle appears once regardless of which of 3 seeds surfaces it. `structuring` is deduplicated by canonical path (tuple of 4 primary keys) so repeated edge rows producing the same A→B→C→D appear once.
+**Latency note:** first call per `(pattern, motif_type, window, amt1_min, amt2_max, k)` is cold — enumerates motifs across all seeds in the pattern. Cold call can take 30–90s on patterns with >500k entities. Subsequent calls hit an LRU cache (cap 8). `cycle_3` is deduplicated by canonical ring; `structuring` and `chain_k` are deduplicated by canonical path tuple. `chain_k` cost scales with out-degree and `k`; prefer `k=3` for fast scans and `k≥6` only for targeted deep-layering investigations.
 
-**Returns:** list of motif instances with `score`, `score_rank_pct`, `is_high_potential` (p95 threshold within motif_type), motif-specific fields (see `score_motif` above for the per-type field list).
+**Returns:** list of motif instances with `score`, `log_score`, `score_clamped`, `score_rank_pct`, `is_high_potential` (p95 threshold within motif_type), motif-specific fields (see `score_motif` above for the per-type field list, including `frontier_truncated` on `chain_k`). The same large-motif truncation rules from `score_motif` apply — motifs with > 50 edges carry top-50 `edges` / `breakdown` plus `breakdown_summary` population stats; the envelope `count` (number of motif instances) is unaffected.
 
 ---
 
@@ -1416,7 +1463,7 @@ Screens an entire entity population across all geometric patterns in one call. F
 - `compound` — geometry ∩ points intersection
 - `graph` — graph contagion: flags entities whose anomalous counterparty ratio exceeds `contagion_threshold`. Requires event pattern with edge table. Auto-discovered by `auto_discover()`
 
-Response includes `anomaly_intensity` per source hit for geometry sources.
+Response includes `anomaly_intensity` per source hit for geometry sources. For chain and composite sources, `related_count` in each hit reflects the entity-specific related count (not the total pattern population).
 
 ---
 
@@ -1454,7 +1501,7 @@ Detect entities anomalous in one pattern but normal in another (cross-pattern sp
 
 **Returns:** `entity_line`, `total_found`, `results[]` where each result has: `entity_key`, `anomalous_pattern`, `normal_patterns`, `delta_norm_anomalous`, `delta_rank_pct_anomalous`, `interpretation`.
 
-Returns `[]` if entity_line covered by fewer than 2 patterns.
+Returns `{"diagnostic": "..."}` (instead of silent empty) if entity_line is covered by fewer than 2 patterns.
 
 ---
 
@@ -1483,6 +1530,7 @@ Detect entities with non-linear temporal trajectories (arch, V-shape, spike-reco
 |-----------|------|---------|-------------|
 | `pattern_id` | string | required | Anchor pattern with temporal data |
 | `top_n_per_range` | integer | 5 | Max results returned |
+| `sample_size` | int | `null` | Cap the number of entities streamed. Recommended for patterns with >100K entities. |
 
 > `displacement_ranks` parameter is deprecated and ignored.
 
@@ -1505,7 +1553,7 @@ Detect population segments with disproportionate anomaly rates (segment shift).
 
 **Returns:** `pattern_id`, `max_cardinality`, `min_shift_ratio`, `total_found`, `results[]` where each result has: `segment_property`, `segment_value`, `anomaly_rate`, `population_rate`, `shift_ratio`, `entity_count`, `anomalous_count`, `changepoint_date`, `interpretation`.
 
-Returns `[]` if no categorical properties or no shifts above threshold.
+Returns `{"diagnostic": "..."}` (instead of silent empty) if no string columns exist in the pattern or no segments exceed the shift threshold.
 
 ---
 

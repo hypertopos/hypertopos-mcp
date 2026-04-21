@@ -10,7 +10,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hypertopos_mcp.server import _state
-from hypertopos_mcp.tools.smart import _available_steps, _fallback_plan, detect_pattern
+from hypertopos_mcp.tools.smart import (
+    _available_steps,
+    _fallback_plan,
+    _step_find_counterparties,
+    detect_pattern,
+)
 
 
 class TestFallbackPlan:
@@ -137,3 +142,46 @@ class TestDetectPatternFallback:
             self.nav.π5_attract_anomaly.side_effect = RuntimeError("boom")
             result = json.loads(await detect_pattern("show anomalies", ctx=None))
             assert "error" in result["results"].get("find_anomalies", {})
+
+
+class TestStepFindCounterparties:
+    """Test _step_find_counterparties param aliasing."""
+
+    def setup_method(self):
+        self.nav = MagicMock()
+        self.nav.find_counterparties.return_value = {"outgoing": [], "incoming": []}
+        _state["navigator"] = self.nav
+
+    def teardown_method(self):
+        _state["navigator"] = None
+
+    def test_step_find_counterparties_resolves_event_pattern_id_alias(self):
+        """_step_find_counterparties must resolve pattern_id from event_pattern_id alias."""
+        _step_find_counterparties({
+            "primary_key": "ACC-001",
+            "line_id": "transactions",
+            "from_col": "from_account",
+            "to_col": "to_account",
+            "event_pattern_id": "tx_pattern",  # alias key — no pattern_id present
+        })
+        call_kwargs = self.nav.find_counterparties.call_args
+        assert call_kwargs is not None, "find_counterparties was not called"
+        passed_pattern_id = call_kwargs.kwargs.get("pattern_id")
+        assert passed_pattern_id == "tx_pattern", (
+            f"Expected pattern_id='tx_pattern', got {passed_pattern_id!r}"
+        )
+
+    def test_step_find_counterparties_pattern_id_takes_precedence(self):
+        """When both pattern_id and event_pattern_id are present, pattern_id wins."""
+        _step_find_counterparties({
+            "primary_key": "ACC-001",
+            "line_id": "transactions",
+            "from_col": "from_account",
+            "to_col": "to_account",
+            "pattern_id": "explicit_pattern",
+            "event_pattern_id": "should_be_ignored",
+        })
+        call_kwargs = self.nav.find_counterparties.call_args
+        assert call_kwargs is not None
+        passed_pattern_id = call_kwargs.kwargs.get("pattern_id")
+        assert passed_pattern_id == "explicit_pattern"

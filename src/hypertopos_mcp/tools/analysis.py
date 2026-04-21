@@ -5,8 +5,10 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 
+import numpy as np
 from hypertopos.navigation.navigator import GDSNavigationError
 
 from hypertopos_mcp.enrichment import (
@@ -16,6 +18,28 @@ from hypertopos_mcp.enrichment import (
 )
 from hypertopos_mcp.server import _require_navigator, _state, mcp, timed
 from hypertopos_mcp.tools._guards import binary_geometry_note_for_pattern, dead_dim_indices
+
+
+def _sanitize_for_json(obj: Any) -> Any:
+    """Replace non-finite floats (``±inf`` / ``NaN``) with ``None`` recursively.
+
+    Python's ``json.dumps`` emits ``Infinity`` / ``-Infinity`` / ``NaN`` literals
+    for non-finite floats, which are NOT valid per RFC 8259 and are rejected by
+    strict parsers (browser ``JSON.parse``, many non-Python MCP clients). The
+    navigator's motif scorers legitimately emit ``log_score = -inf`` when a
+    motif contains a zero-product edge (identical-delta endpoints). Converting
+    to ``null`` keeps the wire format strict-JSON-compliant; consumers read
+    ``log_score == null`` as "score degenerate / not finite".
+    """
+    if isinstance(obj, (float, np.floating)) and not math.isfinite(float(obj)):
+        return None
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_for_json(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_sanitize_for_json(v) for v in obj)
+    return obj
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -1819,7 +1843,12 @@ def trace_root_cause(
         edge_counterparty_top_n=edge_counterparty_top_n,
         branches_enabled=branches_enabled,
     )
-    return json.dumps(result, indent=2, default=str)
+    # Defensive sanitisation — trace_root_cause enriches nodes with
+    # motif_potential sub-blocks and other navigator outputs. None currently
+    # emits non-finite log-scale fields, but future enrichment (e.g.
+    # inheriting log_score from score_motif) could, and the nested shape of
+    # the DAG makes ad-hoc post-processing error-prone.
+    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -1884,6 +1913,70 @@ def find_high_potential_edges(
     return json.dumps(output, indent=2, default=str)
 
 
+def _truncate_motif_instance(inst: dict, threshold: int = 50) -> dict:
+    """Cap ``edges`` and ``breakdown`` at the top ``threshold`` contributors.
+
+    Pre-fix, a fan_in hub with ~500 sources produced ~200k-char responses
+    that overflowed the MCP token limit and forced responses to be written
+    to a file instead of returned inline. Truncation keeps the top
+    ``threshold`` entries sorted by ``edge_potential`` DESC, plus a
+    ``breakdown_summary`` with population statistics over the FULL
+    ``breakdown`` so the agent still sees the distribution.
+
+    When the instance is already small (``len(edges) <= threshold``) the
+    dict is returned with untouched ``edges`` / ``breakdown`` plus
+    ``edges_truncated=False`` / ``breakdown_truncated=False`` /
+    ``edges_total_count`` for API symmetry — no ``breakdown_summary`` is
+    emitted in that case.
+    """
+    edges = inst.get("edges", [])
+    total = len(edges)
+    if total <= threshold:
+        return {
+            **inst,
+            "edges_total_count": total,
+            "edges_truncated": False,
+            "breakdown_truncated": False,
+        }
+    breakdown = inst.get("breakdown", [])
+    # Full-population stats first (before sorting/truncation). Single
+    # np.percentile batch call avoids 4× redundant sort over the same array.
+    ep_full = np.asarray(
+        [float(b.get("edge_potential", 0.0)) for b in breakdown],
+        dtype=np.float64,
+    )
+    p25, p50, p75, p95 = (
+        np.percentile(ep_full, [25, 50, 75, 95]).tolist()
+        if ep_full.size else (0.0, 0.0, 0.0, 0.0)
+    )
+    summary: dict[str, float] = {
+        "count": int(ep_full.size),
+        "mean": float(ep_full.mean()) if ep_full.size else 0.0,
+        "std": float(ep_full.std()) if ep_full.size else 0.0,
+        "min": float(ep_full.min()) if ep_full.size else 0.0,
+        "max": float(ep_full.max()) if ep_full.size else 0.0,
+        "p25": float(p25),
+        "p50": float(p50),
+        "p75": float(p75),
+        "p95": float(p95),
+    }
+    sorted_breakdown = sorted(
+        breakdown,
+        key=lambda b: float(b.get("edge_potential", 0.0)),
+        reverse=True,
+    )
+    top = sorted_breakdown[:threshold]
+    top_edges = [b["edge"] for b in top]
+    out = {**inst}
+    out["edges"] = top_edges
+    out["edges_total_count"] = total
+    out["edges_truncated"] = True
+    out["breakdown"] = top
+    out["breakdown_truncated"] = True
+    out["breakdown_summary"] = summary
+    return out
+
+
 @mcp.tool(annotations={"readOnlyHint": True})
 @timed
 def score_motif(
@@ -1893,30 +1986,55 @@ def score_motif(
     time_window_hours: int | None = None,
     amt1_min: float = 10000.0,
     amt2_max: float = 10000.0,
+    min_k: int | None = None,
+    k: int = 4,
 ) -> str:
     """Score the best structural motif seeded at entity_key.
 
-    motif_type ∈ {fan_out, cycle_2, cycle_3, structuring}. Composes
-    edge_potential across the k edges of the motif via product — a motif of
-    rare edges is rare.
+    motif_type ∈ {fan_out, fan_in, cycle_2, cycle_3, structuring, chain_k}.
+    Composes edge_potential across the edges of the motif via product —
+    a motif of rare edges is rare.
 
-    Defaults when time_window_hours is None: fan_out=168h, cycle_2=24h,
-    cycle_3=72h, structuring=1h.
+    Defaults when time_window_hours is None: fan_out=168h, fan_in=168h,
+    cycle_2=24h, cycle_3=72h, structuring=1h, chain_k=168h.
 
     fan_out: hub → k distinct targets in the window (min k=3). Typology atoms:
-      T6 Offshore Hub, T13 Concentrator.
+      T6 Offshore Hub, T13 Concentrator (source side).
+    fan_in: k distinct sources → sink in the window (min k=3). Typology atoms:
+      T12 Parallel Layering (destination side), T13 Concentrator/Sink.
     cycle_2: A↔B bidirectional pair within the window. Typology atoms:
       T2 Flash-Burst Round-Trip, T4 Bidirectional Burst.
-    cycle_3: A→B→C→A with strict temporal ordering ts1<ts2<ts3, span ≤ window.
-      Typology atoms: T3 Round-Tripping 3-Party, T5 Long-Cycle, T11 Multi-Round-Tripping.
-    structuring: open A→B→C→D linear chain with hop1 amount ≥ amt1_min, hop2
-      and hop3 amount ≤ amt2_max, strict temporal ordering within window.
-      amt1_min/amt2_max default 10000 (USD reporting threshold); override per
-      jurisdiction (GBP, EUR, crypto unit). Typology atoms: structuring /
-      smurfing (cash-deposit-split-and-wire for reporting-threshold evasion).
+    cycle_3: A→B→C→A with strict temporal ordering, span ≤ window. Typology
+      atoms: T3 Round-Tripping 3-Party, T5 Long-Cycle, T11 Multi-Round-Tripping.
+    chain_k: open A→B→…→Z chain of length k (3 ≤ k ≤ 8), no cycle closure,
+      strict monotone timestamps, total span ≤ window. Typology atoms:
+      T5 Multi-Stage Layering, T18 Multi-Jurisdiction Latency Chain.
+      Default k=4; override to match the layering depth under investigation.
+    structuring: open A→B→C→D linear chain with hop1 amount ≥ amt1_min, hops
+      2 and 3 amount ≤ amt2_max, strict temporal ordering within window.
+      Typology atoms: structuring / smurfing.
 
-    Returns: {found, score, motif_type, breakdown (per-edge edge_potentials),
-    motif-specific fields (ring/counterparty/k/path/amounts), reason when not found}.
+    amt1_min/amt2_max gate only structuring; k gates only chain_k.
+    min_k raises the distinct-neighbour threshold for fan_out / fan_in
+    (default 3 when None); ignored for other motif types. Use to
+    single-seed-check whether an entity has e.g. ≥10 sources without
+    triggering the cold ranking cache on find_high_potential_motifs.
+
+    **Large-motif response truncation.** When a motif contains > 50 edges,
+    `edges` and `breakdown` are capped at the top 50 contributors by
+    `edge_potential` DESC. `edges_total_count` reports the original
+    count; `edges_truncated` / `breakdown_truncated` flag the truncation;
+    `breakdown_summary` provides population statistics (count, mean, std,
+    min, max, p25/p50/p75/p95 of `edge_potential`) over the full edge set
+    so the agent sees the distribution even when only the top 50 are
+    materialised. Rationale: pre-fix, a fan_in hub with ~500 sources
+    produced ~200k-char responses that overflowed the MCP token limit.
+
+    Returns: {found, score, log_score, score_clamped, motif_type,
+    breakdown, edges, edges_total_count, edges_truncated,
+    breakdown_truncated, breakdown_summary (when truncated),
+    motif-specific fields (ring/counterparty/k/path/amounts),
+    frontier_truncated for chain_k, reason when not found}.
     """
     _require_navigator()
     nav = _state["navigator"]
@@ -1927,8 +2045,12 @@ def score_motif(
         time_window_hours=time_window_hours,
         amt1_min=amt1_min,
         amt2_max=amt2_max,
+        min_k=min_k,
+        k=k,
     )
-    return json.dumps(result, indent=2, default=str)
+    if result.get("found"):
+        result = _truncate_motif_instance(result)
+    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -1942,24 +2064,38 @@ def find_high_potential_motifs(
     min_k: int | None = None,
     amt1_min: float = 10000.0,
     amt2_max: float = 10000.0,
+    k: int = 4,
 ) -> str:
     """Rank motifs of a given type across the pattern, highest score first.
 
-    motif_type ∈ {fan_out, cycle_2, cycle_3, structuring}. First call per
-    (pattern, motif_type, window, amt1_min, amt2_max) is cold — enumerates
-    motifs across all seeds. Subsequent calls hit an LRU cache (cap 8). On
-    large patterns (>500k entities) the cold call can take 30–90s — plan
-    accordingly.
+    motif_type ∈ {fan_out, fan_in, cycle_2, cycle_3, structuring, chain_k}.
+    First call per (pattern, motif_type, window, amt1_min, amt2_max, k) is
+    cold — enumerates motifs across all seeds. Subsequent calls hit an LRU
+    cache (cap 8). On large patterns (>500k entities) the cold call can take
+    30–90s — plan accordingly.
 
     top_n capped internally at 100. seeds filter restricts to specific entities
     after the base ranking is cached.
 
-    amt1_min, amt2_max gate the three hops of a structuring motif (hop1 amount
-    ≥ amt1_min, hop2 and hop3 amount ≤ amt2_max); ignored for other motif
-    types. Defaults 10000 (USD reporting threshold); override per jurisdiction.
+    min_k raises the distinct-neighbour threshold for fan_out and fan_in
+    (default 3 when None). amt1_min/amt2_max gate only structuring. k gates
+    only chain_k (3 ≤ k ≤ 8, default 4) and is part of the cache key.
+
+    **Large-motif response truncation.** When any ranked motif contains
+    > 50 edges, its `edges` and `breakdown` are capped at the top 50
+    contributors by `edge_potential` DESC. `edges_total_count` reports
+    the original count; `edges_truncated` / `breakdown_truncated` flag
+    the truncation; `breakdown_summary` provides population statistics
+    (count, mean, std, min, max, p25/p50/p75/p95 of `edge_potential`)
+    over the full edge set so the agent sees the distribution even when
+    only the top 50 are materialised. Rationale: pre-fix, a fan_in hub
+    with ~500 sources produced ~200k-char responses that overflowed the
+    MCP token limit. `count` in the envelope is the motif-instance count
+    and is unaffected.
 
     Returns: list of motif instances with score_rank_pct + is_high_potential
-    (p95 threshold within motif_type).
+    (p95 threshold within motif_type), plus the truncation fields above on
+    each instance.
     """
     _require_navigator()
     navigator = _state["navigator"]
@@ -1976,7 +2112,9 @@ def find_high_potential_motifs(
         min_k=min_k,
         amt1_min=amt1_min,
         amt2_max=amt2_max,
+        k=k,
     )
+    results = [_truncate_motif_instance(r) for r in results]
     output: dict[str, Any] = {
         "pattern_id": pattern_id,
         "motif_type": motif_type,
@@ -1985,4 +2123,4 @@ def find_high_potential_motifs(
     }
     if capped_warning:
         output["capped_warning"] = capped_warning
-    return json.dumps(output, indent=2, default=str)
+    return json.dumps(_sanitize_for_json(output), indent=2, default=str)

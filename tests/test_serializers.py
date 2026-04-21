@@ -343,3 +343,28 @@ class TestSerializePosition:
         solid = _make_solid()
         result = _serialize_position(solid)
         assert result["type"] == "Solid"
+
+
+class TestSerializePolygonAnomalyConfidence:
+    def test_omits_anomaly_confidence_when_zero(self) -> None:
+        """anomaly_confidence=0.0 means bootstrap was skipped; field must be omitted from output."""
+        poly = _make_polygon()
+        poly.anomaly_confidence = 0.0
+        result = _serialize_polygon(poly)
+        assert "anomaly_confidence" not in result
+
+    def test_omits_anomaly_confidence_when_none(self) -> None:
+        """anomaly_confidence=None means bootstrap was skipped; field must be omitted."""
+        poly = _make_polygon()
+        poly.anomaly_confidence = None
+        result = _serialize_polygon(poly)
+        assert "anomaly_confidence" not in result
+
+    def test_includes_anomaly_confidence_when_positive(self) -> None:
+        """anomaly_confidence > 0 is a real calibrated value; must appear in output."""
+        import pytest
+        poly = _make_polygon()
+        poly.anomaly_confidence = 0.85
+        result = _serialize_polygon(poly)
+        assert "anomaly_confidence" in result
+        assert result["anomaly_confidence"] == pytest.approx(0.85, abs=0.001)

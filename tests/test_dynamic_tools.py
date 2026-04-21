@@ -35,7 +35,7 @@ _EDGE = {
     "find_geometric_path", "discover_chains", "edge_stats", "entity_flow",
     "contagion_score", "contagion_score_batch", "degree_velocity",
     "investigation_coverage", "propagate_influence", "cluster_bridges",
-    "anomalous_edges", "find_witness_cohort",
+    "anomalous_edges", "find_witness_cohort", "find_novel_entities",
 }
 
 

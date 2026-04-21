@@ -107,7 +107,7 @@ def get_solid(
 @timed
 def get_event_polygons(
     entity_key: str,
-    event_pattern_id: str,
+    pattern_id: str,
     filters: list[dict] | None = None,
     limit: int = 10,
     offset: int = 0,
@@ -131,8 +131,8 @@ def get_event_polygons(
         raise RuntimeError("sample_pct must be in range (0.0, 1.0].")
     _require_navigator()
     sphere = _state["sphere"]._sphere
-    pattern = sphere.patterns[event_pattern_id]
-    _entity_line_id = sphere.entity_line(event_pattern_id) or sphere.event_line(event_pattern_id)
+    pattern = sphere.patterns[pattern_id]
+    _entity_line_id = sphere.entity_line(pattern_id) or sphere.event_line(pattern_id)
     _entity_line = sphere.lines.get(_entity_line_id) if _entity_line_id else None
     _n_entity_props = len(_entity_line.columns) if (_entity_line and _entity_line.columns) else None
     cap = adaptive_polygon_cap(pattern, n_entity_props=_n_entity_props)
@@ -161,7 +161,7 @@ def get_event_polygons(
     # Delegate sampling to navigator (core handles numpy internally)
     polygons = nav.event_polygons_for(
         entity_key,
-        event_pattern_id,
+        pattern_id,
         filters=filters,
         geometry_filters=geometry_filters,
         limit=limit if not use_sampling else None,
@@ -192,7 +192,7 @@ def get_event_polygons(
 
     result = {
         "entity_key": entity_key,
-        "event_pattern_id": event_pattern_id,
+        "pattern_id": pattern_id,
         "total": total,
         "returned": len(enriched),
         "polygons": enriched,
