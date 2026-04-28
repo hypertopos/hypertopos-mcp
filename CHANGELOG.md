@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-04-28
+
+### Added
+- `score_motif` and `find_high_potential_motifs` recognise two new motif types: `split_recombine` (diamond scatter-gather S → k intermediaries → D with stacked-bipartite temporal order) and `bipartite_burst` (complete K_{k,m} bipartite subgraph within a tight window). `score_motif(motif_type="split_recombine", direction="backward")` anchors the seed at the sink and enumerates backward; `direction="forward"` (default) anchors at the source. `bipartite_burst` accepts `min_k` and `min_m` for asymmetric density thresholds on the source and sink sides. Docstrings and `docs/tools.md` updated with per-motif typology atoms, parameter semantics, and seed anchoring. See hypertopos-py CHANGELOG for the canonical definitions.
+
+### Changed
+- score_motif and find_high_potential_motifs inherit the hypertopos-py chain_k adaptive frontier cap. No MCP-layer changes — speedup observed transparently through the existing tool surface. tools.md chain_k section gains a Performance paragraph explaining the per-k cap behaviour and `frontier_truncated` expectations.
+- score_motif and trace_root_cause's motif_potential branch inherit the hypertopos-py fixes for per-edge scoring and uniform single-seed enumeration latency. No MCP-layer changes — the speedup is observed transparently through the existing tool surface.
+- score_motif and find_high_potential_motifs inherit the hypertopos-py cycle_3 pre-filter speedup. No MCP-layer changes — speedup observed transparently through the existing tool surface.
+
 ## [0.5.1] — 2026-04-21
 
 ### Added

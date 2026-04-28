@@ -1988,15 +1988,18 @@ def score_motif(
     amt2_max: float = 10000.0,
     min_k: int | None = None,
     k: int = 4,
+    direction: str = "forward",
+    min_m: int = 3,
 ) -> str:
     """Score the best structural motif seeded at entity_key.
 
-    motif_type ∈ {fan_out, fan_in, cycle_2, cycle_3, structuring, chain_k}.
-    Composes edge_potential across the edges of the motif via product —
-    a motif of rare edges is rare.
+    motif_type ∈ {fan_out, fan_in, cycle_2, cycle_3, structuring, chain_k,
+    split_recombine, bipartite_burst}. Composes edge_potential across the
+    edges of the motif via product — a motif of rare edges is rare.
 
     Defaults when time_window_hours is None: fan_out=168h, fan_in=168h,
-    cycle_2=24h, cycle_3=72h, structuring=1h, chain_k=168h.
+    cycle_2=24h, cycle_3=72h, structuring=1h, chain_k=168h,
+    split_recombine=168h, bipartite_burst=24h.
 
     fan_out: hub → k distinct targets in the window (min k=3). Typology atoms:
       T6 Offshore Hub, T13 Concentrator (source side).
@@ -2013,12 +2016,35 @@ def score_motif(
     structuring: open A→B→C→D linear chain with hop1 amount ≥ amt1_min, hops
       2 and 3 amount ≤ amt2_max, strict temporal ordering within window.
       Typology atoms: structuring / smurfing.
+    split_recombine: diamond S → {M₁,…,Mₖ} → D with stacked-bipartite
+      temporal order — all split-hops S→Mᵢ precede all recombine-hops Mᵢ→D
+      within the window, no node revisits. direction="forward" picks the
+      seed as source S (split-then-recombine); direction="backward" picks
+      the seed as sink D (gather-then-fan). min_k overrides the
+      intermediary-cardinality threshold (default 3, must be ≥ 2).
+      Typology atoms: T1 Structured Layering (forward — scatter-gather
+      diamond), T12 Parallel Layering (backward — multiple chains
+      converging on the seed), T13 Concentrator/Sink (backward — diamond
+      subtype where the sink also looks like a fan_in target).
+    bipartite_burst: complete K_{k,m} bipartite subgraph in a tight time
+      window — k distinct sources each transact with every one of m
+      distinct sinks, all edges fall within the window. Seed is tried as
+      source first, then as sink. min_k sets the source-side cardinality
+      (default 3, must be ≥ 2); min_m sets the sink-side cardinality
+      (default 3, must be ≥ 2). Typology atoms: T16 Mirror-Flow Burst
+      (cohort / parallel-collusion variant — k coordinated senders fan
+      to m shared receivers in a tight window).
 
     amt1_min/amt2_max gate only structuring; k gates only chain_k.
-    min_k raises the distinct-neighbour threshold for fan_out / fan_in
-    (default 3 when None); ignored for other motif types. Use to
-    single-seed-check whether an entity has e.g. ≥10 sources without
-    triggering the cold ranking cache on find_high_potential_motifs.
+    min_k overrides the distinct-neighbour threshold for fan_out / fan_in
+    / split_recombine / bipartite_burst (default 3 when None); ignored for
+    other motif types. Use to single-seed-check whether an entity has e.g.
+    ≥10 sources without triggering the cold ranking cache on
+    find_high_potential_motifs.
+    direction ("forward" | "backward") only steers split_recombine;
+    ignored for other motif types.
+    min_m sets the second cardinality of bipartite_burst K_{k,m}
+    (default 3); ignored for other motif types.
 
     **Large-motif response truncation.** When a motif contains > 50 edges,
     `edges` and `breakdown` are capped at the top 50 contributors by
@@ -2047,6 +2073,8 @@ def score_motif(
         amt2_max=amt2_max,
         min_k=min_k,
         k=k,
+        direction=direction,
+        min_m=min_m,
     )
     if result.get("found"):
         result = _truncate_motif_instance(result)
@@ -2065,21 +2093,41 @@ def find_high_potential_motifs(
     amt1_min: float = 10000.0,
     amt2_max: float = 10000.0,
     k: int = 4,
+    direction: str = "forward",
+    min_m: int = 3,
 ) -> str:
     """Rank motifs of a given type across the pattern, highest score first.
 
-    motif_type ∈ {fan_out, fan_in, cycle_2, cycle_3, structuring, chain_k}.
-    First call per (pattern, motif_type, window, amt1_min, amt2_max, k) is
-    cold — enumerates motifs across all seeds. Subsequent calls hit an LRU
-    cache (cap 8). On large patterns (>500k entities) the cold call can take
-    30–90s — plan accordingly.
+    motif_type ∈ {fan_out, fan_in, cycle_2, cycle_3, structuring, chain_k,
+    split_recombine, bipartite_burst}. First call per (pattern, motif_type,
+    window, amt1_min, amt2_max, k, direction, min_m) is cold — enumerates
+    motifs across all seeds. Subsequent calls hit an LRU cache (cap 8). On
+    large patterns (>500k entities) the cold call can take 30–90s — plan
+    accordingly.
 
     top_n capped internally at 100. seeds filter restricts to specific entities
     after the base ranking is cached.
 
-    min_k raises the distinct-neighbour threshold for fan_out and fan_in
-    (default 3 when None). amt1_min/amt2_max gate only structuring. k gates
-    only chain_k (3 ≤ k ≤ 8, default 4) and is part of the cache key.
+    min_k raises the distinct-neighbour threshold for fan_out / fan_in /
+    split_recombine / bipartite_burst (default 3 when None). amt1_min /
+    amt2_max gate only structuring. k gates only chain_k (3 ≤ k ≤ 8,
+    default 4) and is part of the cache key.
+
+    split_recombine: diamond S → {M₁,…,Mₖ} → D with stacked-bipartite
+    temporal order (all split-hops precede all recombine-hops within the
+    window). direction="forward" ranks seeds as the source S,
+    direction="backward" ranks them as the sink D. Both modes deduplicate
+    by (direction, source, sink, sorted intermediaries). Typology atoms:
+    T1 Structured Layering (forward), T12 Parallel Layering (backward),
+    T13 Concentrator/Sink (backward — diamond subtype of fan_in).
+    bipartite_burst: complete K_{k,m} bipartite subgraph in a tight time
+    window — k distinct sources × m distinct sinks fully connected. min_k
+    sets the source side (default 3); min_m sets the sink side (default
+    3); both must be ≥ 2 and both are part of the cache key. Results
+    deduplicated by (frozenset sources, frozenset sinks). Typology atoms:
+    T16 Mirror-Flow Burst (cohort / parallel-collusion variant).
+    direction is ignored for motifs other than split_recombine; min_m is
+    ignored for motifs other than bipartite_burst.
 
     **Large-motif response truncation.** When any ranked motif contains
     > 50 edges, its `edges` and `breakdown` are capped at the top 50
@@ -2113,6 +2161,8 @@ def find_high_potential_motifs(
         amt1_min=amt1_min,
         amt2_max=amt2_max,
         k=k,
+        direction=direction,
+        min_m=min_m,
     )
     results = [_truncate_motif_instance(r) for r in results]
     output: dict[str, Any] = {
