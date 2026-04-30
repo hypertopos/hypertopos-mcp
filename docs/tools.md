@@ -223,7 +223,7 @@ Fuses ANN vector similarity and BM25 full-text search into one ranked result.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `primary_key` | string | required | Reference entity key |
+| `primary_key` | string | required | Reference entity key (e.g. `"100428738"`). Must be an actual entity key — NOT a line name or pattern ID. Obtain from `walk_line` or `search_entities`. |
 | `pattern_id` | string | required | Pattern (determines geometry and line) |
 | `query` | string | required | BM25 text query |
 | `alpha` | float | `0.7` | Vector weight in fusion: 0.0 = pure text, 1.0 = pure vector |
@@ -471,6 +471,8 @@ Each polygon in `polygons[]` includes:
 |-------|-------------|
 | `bregman_divergence` | Distribution-aware anomaly distance (sum of per-dimension Bregman terms). `null` on pre-2.3 spheres. |
 | `anomaly_confidence` | Bootstrap stability score (0–1): fraction of bootstrap resamples in which the entity is classified as anomalous. `null` when bootstrap was skipped (N > 50K, `group_by_property`, `use_mahalanobis`). |
+| `total_impact` | M4 additive — aggregate L2 norm of leave-one-out impact on coordinate calibration. `null` when pattern is event-type, `N<2`, or storage backend lacks shape reconstruction prerequisites. Use `find_calibration_influencers` for the full per-dim breakdown + classification context. |
+| `classification` | M4 additive — one of `"hidden"` / `"distorter"` / `"standard_anomaly"` / `"normal"`. Same null rules as `total_impact`. Use `find_calibration_influencers` for ranked entries within a specific cell. |
 
 **Hard cap:** Adaptive — edge-count-based, typically 15–51. Use `offset` to paginate, `anomaly_summary` for counts, or `aggregate_anomalies` for distribution analysis.
 
@@ -615,6 +617,189 @@ Measures geometric distance between two entities.
 | `mode` | string | `"intraclass"` | `"intraclass"` = Euclidean delta distance; `"temporal"` = DTW over slice sequences |
 
 **Returns:** `distance`, `interpretation`, plus polygon details (intraclass) or slice counts (temporal).
+
+---
+
+### `compare_calibrations`
+
+Per-dimension μ/σ/θ drift between two calibration epochs of one pattern. Diagnostic for inspecting how a pattern's calibration shifted between two builder rebuilds.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `pattern_id` | string | required | Which pattern to inspect |
+| `v_from` | int | `null` | Starting epoch. `null` resolves to second-to-last epoch on disk |
+| `v_to` | int | `null` | Ending epoch. `null` resolves to latest epoch on disk |
+| `top_n` | int | `10` | Number of top-drifted dimensions to return |
+| `verbose` | bool | `false` | When true, also include the full per-dimension breakdown in `per_dimension` |
+
+**Returns:** JSON-encoded `CalibrationDriftReport` with `pattern_id`, `v_from`, `v_to`, `schema_hash`, `population_size_from`, `population_size_to`, `overall_drift_rms` (RMS in σ units, comparable across patterns), `top_drifted` (ranked list of `DimensionDrift`), and `per_dimension` (full list when `verbose=true`, else `null`). Each `DimensionDrift` carries `dim_index`, `dim_kind`, the from/to/delta triples for `mu`, `sigma`, `theta`, and `mu_delta_normalized` (z-score with sigma-safe guard for degenerate dims).
+
+**Errors:**
+- `ValueError` on `v_from == v_to`, single-epoch auto-resolve (only one epoch on disk), or schema_hash mismatch (cross-schema mu vectors are not dimensionally comparable).
+- `CalibrationNotFoundError` from missing versions (trimmed by GC, schema bump wiped history).
+
+**Use after** a builder rebuild to inspect calibration shifts; complementary to `compare_time_windows` (which compares geometry across temporal slices of a single fit) and `compare_entities` (which compares two entities under the same fit).
+
+---
+
+### `decompose_drift`
+
+Per-entity intrinsic vs extrinsic decomposition of geometric drift between two temporal slices, viewed across two calibration epochs.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `entity_key` | string | required | Which entity to decompose |
+| `pattern_id` | string | required | Anchor pattern with temporal data |
+| `v_from` | int | `null` | Starting calibration epoch. `null` resolves to oldest retained on disk |
+| `v_to` | int | `null` | Ending calibration epoch. `null` resolves to latest on disk |
+| `timestamp_from` | float | `null` | Unix-seconds lower bound for slice window. `null` → first slice |
+| `timestamp_to` | float | `null` | Unix-seconds upper bound for slice window. `null` → last slice |
+| `top_n` | int | `10` | Number of top dimensions (by `|total|`) to return |
+| `verbose` | bool | `false` | When true, also include full per-dimension breakdown |
+
+**Returns:** JSON-encoded `IntrinsicExtrinsicReport` with `pattern_id`, `entity_key`, `v_from`, `v_to`, `schema_hash`, `timestamp_from`, `timestamp_to`, aggregate `intrinsic_displacement` / `extrinsic_displacement` / `total_displacement` / `intrinsic_fraction` (sum-of-squares ratio in `[0, 1]`), ranked `top_dimensions`, and optional `per_dimension` (when `verbose=true`). Each `DimensionDecomposition` carries `dim_index`, `dim_kind`, `dim_label`, `total` (delta_b - delta_a), `intrinsic` ((s_b - s_a) / σ_v1), `extrinsic` (residual), and per-dim `intrinsic_fraction`.
+
+**Errors:**
+- `ValueError` on `<2` retained calibration epochs, `v_from == v_to`, schema_hash mismatch, `<2` slices in window, or event pattern.
+- `CalibrationNotFoundError` from missing versions.
+
+**Use after** a builder rebuild + sufficient temporal history accumulation to ask: "did THIS entity move, or did the population calibrate around it?". Complementary to `compare_calibrations` (population-level shift between epochs) and `find_drifting_entities` (which now carries the same 3 scalar fields per entity for batch monitoring).
+
+---
+
+### `find_calibration_influencers`
+
+Detect entities with high influence on the population-relative coordinate system. Classifies into a 4-cell influence × anomaly matrix (hidden / distorter / standard_anomaly / normal). Includes cascading reclassification (`cascading_flip_count` per entry).
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `pattern_id` | string | required | Anchor pattern. |
+| `top_n` | int | `10` | Max results (hard cap 50). |
+| `classify` | string | `"hidden"` | Filter: `"hidden"` / `"distorter"` / `"standard_anomaly"` / `"normal"` / `"all"`. |
+| `high_threshold_pct` | float | `90.0` | Percentile cutoff for "high impact" classification. |
+| `sample_size` | int | `null` | Subsample N entities before leave-one-out scan. |
+| `verbose` | bool | `false` | When true, each entry gains `cascading_flip_count` — count of OTHER entities that flip is_anomaly classification after this entity's removal. Adds O(top_n × N × D) recompute. |
+
+**Returns:** JSON-encoded `InfluenceReport` with `pattern_id`, `pattern_version`, `population_size`, `high_threshold_pct`, `total_impact_threshold` (absolute value at percentile), `theta_norm` (echoed), `classify_filter` (echoed), `cell_counts` (population-level distribution: `{hidden: K1, distorter: K2, standard_anomaly: K3, normal: K4}` summing to N), and `entries` (filtered + sorted by `total_impact` desc, ≤ top_n). Each `InfluenceEntry` carries `entity_key`, `mu_impact`, `sigma_impact`, `total_impact`, `delta_norm` (current anomaly score), `classification`, `top_dim_contributions` (top 5 by `|contribution|`), and `cascading_flip_count` (null unless verbose=True). Each `DimensionContribution` carries `dim_index`, `dim_kind`, `dim_label`, `mu_shift`, `sigma_shift`, `contribution`.
+
+**Math:** exact leave-one-out via rolling Σs/Σs². For each entity E:
+- `μ_without[i] = (Σs[i] - s_E[i]) / (N-1)`
+- `σ²_without[i] = (Σs²[i] - s_E[i]²) / (N-1) - μ_without[i]²`
+- `mu_impact = ‖(μ_full - μ_without) / σ_full_safe‖`
+- `sigma_impact = ‖(σ_full - σ_without) / σ_full_safe‖`
+- `total_impact = sqrt(mu_impact² + sigma_impact²)`
+
+Classification: `high_impact = total_impact ≥ percentile(total_impact, high_threshold_pct)`; `high_anomaly = ‖δ(E)‖ ≥ θ_norm`.
+
+**Errors:** `ValueError` on event pattern, `N<2`, `high_threshold_pct ∉ (0, 100)`, invalid `classify`, or `top_n ∉ [1, 50]`.
+
+**Use after** running `find_anomalies` to ask "which of these are calibration distorters that should be excluded vs hidden influencers that quietly define what 'normal' means?". Common operational triggers: data-quality audit, adversarial AML population manipulation detection.
+
+---
+
+### `find_group_influence`
+
+Per-group leave-set-out impact + reinforcing/canceling factor (caller-supplied form). Detects coordinated population-shift attacks where individual entities have small impact but a group of coordinated entities together moves μ/σ.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `pattern_id` | string | required | Anchor pattern. |
+| `groups` | `list[list[string]]` | required | List of groups; each group is a list of entity_keys. |
+
+**Returns:** JSON-encoded `list[GroupInfluenceReport]` (input order preserved). Each report carries `pattern_id`, `pattern_version`, `group_index`, `member_count`, `members` (echoed entity_keys), `mu_impact_set`, `sigma_impact_set`, `total_impact_set`, `sum_individual_impacts` (Σ of per-entity total_impact), `reinforcing_factor = total_impact_set / sum_individual_impacts` (>1.0 reinforcing, <1.0 canceling), and `top_dim_contributions` (top 5 dims of group's collective shift).
+
+**Errors:** `ValueError` on event pattern, `N<3`, empty groups list, group with `<2` members, group `≥ N`, missing entity_key, duplicate entity in group, or undefined reinforcing factor (sum of individual impacts = 0).
+
+**Use** after a candidate-set forms (e.g. via `find_witness_cohort`, `cluster_bridges`, or co-anomalous account selection) to ask "is this set coordinating — together they shape calibration more than sum of individuals?". `reinforcing_factor > 1.5` on AML data is a signature of collusion rings or duplicate-record contamination.
+
+---
+
+### `find_motif_by_hops`
+
+Declarative motif API — escape hatch from the closed-vocab `find_motif` registry. Caller passes a list of dicts describing per-hop constraints (`amount_min`, `amount_max`, `time_delta_max_hours`, `direction` (`"forward"` / `"reverse"` / `"any"`), `edge_dim_predicates: {dim: [op, value]}`) and the navigator walks the edge table for matching chains of length 1..6.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `pattern_id` | string | required | Event pattern with edge_table |
+| `hops` | list of dict | required | 1..6 per-hop predicate dicts |
+| `seed_keys` | list of string | `null` | Restrict to these seeds; `null` = all `from_key`s |
+| `max_results` | int | `100` | Cap on returned motif instances |
+| `score` | bool | `true` | Apply `_score_motif_from_edges`; silently skipped on event patterns (anchor-companion scoring is follow-up) |
+
+**Per-hop dict fields:** `amount_min: float`, `amount_max: float`, `time_delta_max_hours: float`, `direction: "forward"|"reverse"|"any"`, `edge_dim_predicates: {dim_name: [op, value]}` where op is one of `<`, `<=`, `>`, `>=`, `==`.
+
+**Returns:** JSON object with `pattern_id`, `n_results`, `motifs` (each carrying `nodes`, `edges`, `timestamps`, `amounts`, optional `dim_values_per_hop`, optional `score` + `score_breakdown`).
+
+**Smart-mode keywords:** *custom motif*, *hop predicate*, *edge dim filter motif*, *motif by hops*.
+
+**Use** when the closed-vocab motif library doesn't fit — express ad-hoc temporal-amount-edge_dim chains without a Python PR. Bounded MVP; `amount_ratio_to_prev` and `require_anomalous_entity` ship in follow-up release.
+
+---
+
+### `find_density_gaps`
+
+Joint density gap detection via probability integral transform plus independence null. For an anchor pattern, build a uniform-marginal `bins × bins` 2D histogram on selected dim pairs and flag bins whose observed count is significantly below the uniform-independence expectation. Each flagged bin maps back to a named delta-space (z-score) range with a BH-corrected q-value. Note: `delta_range_*` is in delta units (geometry z-scores), not raw property values; raw-unit mapping is a follow-up.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `pattern_id` | string | required | Anchor pattern id (event patterns get few usable pairs) |
+| `top_n` | int | `10` | Max gap cells to return, sorted by `expected/observed` ratio desc |
+| `dim_pairs` | list of `[a, b]` | `null` | Optional explicit pairs by dim name; otherwise auto-select top-20 in `[r_min, r_max]` |
+| `bins` | int | `10` | Histogram resolution per axis; range `[4, 50]` |
+| `alpha` | float | `0.05` | BH significance level |
+| `r_min` | float | `0.1` | Lower bound on Pearson `|r|` for auto pair selection |
+| `r_max` | float | `0.7` | Upper bound on Pearson `|r|` for auto pair selection |
+| `sample_size` | int | `100000` | Max entities to read (random sample when sphere is larger). Pass `0` to read all entities. |
+
+**Returns:** JSON object with `pattern_id`, `n_entities`, `n_pairs_tested`, `excluded_dims` (list of `{dim, reason}`), and `gaps` (each cell carrying `dim_i`, `dim_j`, `delta_range_i`, `delta_range_j`, `u_range_i`, `u_range_j`, `observed`, `expected`, `ratio`, `p_value`, `q_value`, `is_gap`, `correlation`).
+
+**Smart-mode keywords:** *missing segment*, *density gap*, *dark matter*, *under-represented*, *missing combination*, *anomaly by absence*.
+
+**Use** to surface "anomaly by absence" — combinations of feature values that the independence null says should be populated but are not. Complementary to `find_anomalies` (which surfaces present-but-unusual entities); together they cover both directions of structural surprise.
+
+---
+
+### `find_lead_lag`
+
+Cross-pattern temporal lead-lag in population-relative coordinates. Population-aggregated centroid drift series cross-correlation between two anchor patterns plus per-dim D_A × D_B matrix with BH or Storey FDR.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `pattern_a` | string | required | First anchor pattern id |
+| `pattern_b` | string | required | Second anchor pattern id (must differ from pattern_a) |
+| `timestamp_from` | string | `null` | ISO-8601 lower bound (inclusive) |
+| `timestamp_to` | string | `null` | ISO-8601 upper bound (exclusive) |
+| `cohort` | string | `"fixed"` | `"fixed"` (entities present at every common epoch in both patterns) or `"all"` (per-epoch present entities) |
+| `min_epochs` | int | `8` | Hard floor on the timestamp intersection; raises if violated |
+| `max_lag` | int | `null` | Default = `(N - 1) // 4` |
+| `fdr_alpha` | float | `0.05` | FDR level for the per-dim matrix |
+| `fdr_method` | string | `"storey"` | `"bh"` or `"storey"` |
+| `verbose` | bool | `false` | Include full `D_A × D_B` matrix in `per_dim_pairs` |
+| `entity_key` | string | `null` | Per-entity drill-down: replace population centroid by this entity's delta trajectory |
+
+**Returns:** JSON-encoded `LeadLagReport` with:
+
+| Field | Description |
+|-------|-------------|
+| `lag` | Peak lag (epochs); positive = pattern_a leads pattern_b |
+| `correlation` | Pearson correlation at peak lag (population centroid drift) |
+| `lag_volatility`, `correlation_volatility` | Same on the volatility (mean step magnitude) confirmation series |
+| `agreement` | `"strong"` / `"weak"` / `"divergent"` — match between centroid and volatility peaks |
+| `is_significant` | `abs(correlation) > max_corr_threshold` (Bonferroni-adjusted peak threshold) |
+| `bartlett_ci_95` | Single-test 95 % CI; informational |
+| `max_corr_threshold` | The actual peak-adjusted cut-off |
+| `reliability` | `"high"` (N-1 ≥ 24), `"medium"` (≥ 12), else `"low"` |
+| `degenerate_signal` | `true` when either centroid drift series has zero variance (constant population) — agreement forced to `"divergent"` |
+| `top_dim_pairs[]` | Top-10 `(dim_a, dim_b)` pairs sorted by ascending q-value, ties broken by descending |corr| |
+| `per_dim_pairs[]` | Full sorted matrix when `verbose=true` |
+| `centroid_drift_series_a/b`, `volatility_series_a/b`, `correlation_by_lag` | Raw arrays for downstream agent analysis |
+| `n_epochs_used`, `n_dropped_a/b`, `cohort_size`, `cohort_dropped`, `coverage_warning` | Window + cohort diagnostic |
+
+**Use cases:** "behavior leads stress" workflows on shared-entity-space patterns (e.g. Berka `account_behavior_pattern` × `account_stress_pattern`); cross-pattern monitoring when both patterns flag drift simultaneously; per-entity timelines via `entity_key`.
+
+**Limits:** Cross-pattern lead-lag is well-defined only when both patterns share entity population (same account PKs etc.). On completely disjoint entity spaces (e.g. AML accounts vs chain entities) `cohort="fixed"` raises "empty cohort — no entities present at every epoch in both patterns" and `cohort="all"` raises "tensor budget exceeded". Use `entity_key=<id>` for per-entity drill-down if a specific entity appears in both patterns' temporal histories.
+
+**Errors:** Raises `ValueError` on event pattern, `pattern_a == pattern_b`, intersection below `min_epochs`, empty fixed cohort (disjoint entity populations — use `entity_key=<id>` for per-entity drill-down), `entity_key` not present in both patterns over the window, `max_lag` too large for trimmed window, or tensor budget exceeded (>1 GB for cross-population queries).
 
 ---
 
@@ -1336,6 +1521,9 @@ Finds entities with the highest temporal drift — geometric velocity over recor
 | `first_timestamp` / `last_timestamp` | Earliest and latest recorded deformation |
 | `delta_norm_first` / `delta_norm_last` | Anomaly signal at start and end of recorded history |
 | `reputation` | `{value: Bayesian posterior, anomaly_tenure}` |
+| `intrinsic_displacement` | M3 additive — L2 norm of the entity-driven (σ_v1-normalised) component of drift between the oldest retained and current calibration epoch. `null` when storage backend lacks multi-epoch retention, sphere has `<2` retained epochs, schema_hash mismatch, or `<2` slices for this entity. |
+| `extrinsic_displacement` | M3 additive — L2 norm of the population-recalibration-driven (residual) component. Same null rules. |
+| `intrinsic_fraction` | M3 additive — sum-of-squares ratio `‖I‖² / (‖I‖² + ‖E‖²)` bounded `[0, 1]`. Same null rules. Use `decompose_drift` for the full per-dimension breakdown. |
 | `drift_forecast` | (when `forecast_horizon` set) `{predicted_delta_norm, forecast_is_anomaly, current_is_anomaly, reliability, horizon}` |
 
 ---
@@ -1543,11 +1731,11 @@ Detect entities with non-linear temporal trajectories (arch, V-shape, spike-reco
 |-----------|------|---------|-------------|
 | `pattern_id` | string | required | Anchor pattern with temporal data |
 | `top_n_per_range` | integer | 5 | Max results returned |
-| `sample_size` | int | `null` | Cap the number of entities streamed. Recommended for patterns with >100K entities. |
+| `sample_size` | int | `10000` | Max distinct entities streamed before stopping. Pass `0` to scan the full population (may be slow on large patterns). |
 
 > `displacement_ranks` parameter is deprecated and ignored.
 
-**Returns:** `pattern_id`, `top_n_per_range`, `total_found`, `results[]` where each result has: `entity_key`, `trajectory_shape`, `displacement`, `path_length`, `num_slices`, `first_timestamp`, `last_timestamp`, `cohort_size`, `cohort_keys`, `interpretation`.
+**Returns:** `pattern_id`, `top_n_per_range`, `sample_size`, `total_found`, `results[]` where each result has: `entity_key`, `trajectory_shape`, `displacement`, `path_length`, `num_slices`, `first_timestamp`, `last_timestamp`, `cohort_size`, `cohort_keys`, `interpretation`.
 
 Returns `{"error": "..."}` if pattern is event type or has no temporal data.
 
@@ -1564,7 +1752,7 @@ Detect population segments with disproportionate anomaly rates (segment shift).
 | `min_shift_ratio` | float | 2.0 | Min segment/population anomaly rate ratio |
 | `top_n` | integer | 20 | Max segments returned |
 
-**Returns:** `pattern_id`, `max_cardinality`, `min_shift_ratio`, `total_found`, `results[]` where each result has: `segment_property`, `segment_value`, `anomaly_rate`, `population_rate`, `shift_ratio`, `entity_count`, `anomalous_count`, `changepoint_date`, `interpretation`.
+**Returns:** `pattern_id`, `max_cardinality`, `min_shift_ratio`, `total_found`, `results[]` where each result has: `segment_property`, `segment_value`, `anomaly_rate`, `population_rate`, `shift_ratio`, `entity_count`, `anomalous_count`, `interpretation`.
 
 Returns `{"diagnostic": "..."}` (instead of silent empty) if no string columns exist in the pattern or no segments exceed the shift threshold.
 

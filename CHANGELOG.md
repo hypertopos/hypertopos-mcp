@@ -6,6 +6,115 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-04-30
+
+### Fixed
+- `detect_trajectory_anomaly`: `sample_size` default changed from `null`
+  (full scan) to `10,000`. Pass `sample_size=0` to restore the full-
+  population temporal scan.
+- `detect_segment_shift`: `changepoint_date` field removed from output
+  (it was populated by an internal full changepoint-detection scan for
+  a single optional enrichment field). Tool is now significantly faster.
+  Callers needing changepoint context should call `find_regime_changes`
+  directly.
+- `find_high_potential_edges` on event patterns with large edge tables:
+  pair-count computation now uses a direct two-column PyArrow groupby
+  on the edge table instead of a full-table `to_pylist()` rebuild of
+  the in-memory adjacency index. Added an entity-type ratio guard that
+  fires BEFORE any edge-table or geometry I/O — read the build-time
+  `edge_stats` cache for `unique_from + unique_to` and compare against
+  `pattern.population_size` from `sphere.json`. When the ratio is < 1 %
+  the edge endpoints belong to a different entity type than the host
+  geometry (e.g. zone IDs in a trip-edge pattern whose geometry holds
+  trips) and the tool returns an empty ranking without opening either
+  dataset.
+- `search_entities_hybrid` docstring: clarified that `primary_key` must
+  be an actual entity key (e.g. `"100428738"`), not a line name or
+  pattern ID. Obtain from `walk_line` or `search_entities` first.
+
+### Added
+- `find_motif_by_hops` MCP tool — declarative motif API. Power-user
+  escape hatch from the closed-vocab `find_motif` registry; agent passes
+  a list of dicts describing per-hop predicates and the navigator walks
+  the edge table for matching chains of length 1..6. Composes with the
+  per-edge sidecar from the edge_dimensions YAML block. Smart-mode
+  keywords: *custom motif*, *hop predicate*, *edge dim filter motif*,
+  *motif by hops*. Strict-JSON sanitisation of `±inf` scores. Tier
+  `base` — accessible after `sphere_overview`. `direction="reverse"`
+  walks the predecessor chain in causal order (timestamps strictly
+  decreasing); `direction="any"` drops monotonicity and treats the
+  time window as `|Δt|`. `hops[0].time_delta_max_hours` must be omitted
+  (validation rejects it — there is no previous timestamp on the first
+  hop). `score` defaults to `false`. Seeded queries (`seed_keys`
+  provided) build a scoped adjacency via Lance BTREE-pushdown reads
+  expanding the BFS frontier hop-by-hop — only the visited subgraph is
+  materialised, never the full edge table. Unseeded full enumeration
+  uses the cached global adjacency.
+- `find_density_gaps` MCP tool — joint density gap detection via
+  probability integral transform plus independence null on dim pairs.
+  Thin passthrough to `GDSNavigator.find_density_gaps` with strict-JSON
+  sanitisation of `±inf` (gap ratio for zero-observed cells) to `null`.
+  Returns under-populated cells named in delta-space (z-score) ranges
+  with BH-corrected q-values. `sample_size` parameter (default
+  `100,000`) is passed directly to the Lance reader; pass `0` to scan
+  the full population. Surface keywords for smart-mode dispatch:
+  *missing segment*, *density gap*, *dark matter*, *under-represented*,
+  *missing combination*.
+
+### Changed
+- Event-pattern responses (`find_anomalies`, `find_similar_entities`,
+  `find_clusters`, etc.) on spheres rebuilt with the new
+  `edge_dimensions:` YAML block transparently include up to five
+  additional dimensions per event in the polygon `delta` vector and
+  derived metrics. No tool-level API change — the new dims appear in
+  the same fields existing primitives already expose. Spheres without
+  the YAML block are byte-identical to the prior response shape.
+
+### Added
+- `compare_calibrations` MCP tool — per-dimension μ/σ/θ drift between two
+  calibration epochs of one pattern; thin passthrough to
+  `GDSNavigator.compare_calibrations`.
+- `decompose_drift` MCP tool — per-entity intrinsic vs extrinsic decomposition
+  of geometric drift between two temporal slices viewed across two calibration
+  epochs; thin passthrough to `GDSNavigator.decompose_drift`. The tool body
+  imports `asdict` locally next to its other per-call imports — every prior
+  smoke-test path fired one of the ValueError gates BEFORE the asdict call,
+  so the missing import only surfaced on the first real ≥2-epoch sphere;
+  regression test `test_decompose_drift_mcp.py` rounds-trips the full MCP
+  serialisation path on a real fixture and skips cleanly when the on-disk
+  sphere has only one epoch.
+- `find_drifting_entities` per-entity dict gains 3 additive scalar fields:
+  `intrinsic_displacement`, `extrinsic_displacement`, `intrinsic_fraction`.
+  Auto-defaults to `(oldest retained, current)` calibration epochs; resolves
+  to `null` per-entity when decomposition isn't computable (storage backend
+  without multi-epoch retention, `<2` retained epochs, schema mismatch, or
+  `<2` slices for the entity).
+- `find_calibration_influencers` MCP tool — per-entity influence on coordinate
+  system calibration with 4-cell classification matrix; thin passthrough to
+  `GDSNavigator.find_calibration_influencers`. The tool body imports `asdict`
+  locally next to its other per-call imports (per
+  feedback_mcp_serializer_imports_local.md). Regression test
+  `test_calibration_influencers_mcp.py` rounds-trips the full MCP
+  serialisation path on a real fixture (rebuilt Berka format 2.4).
+- `find_group_influence` MCP tool — caller-supplied leave-set-out impact +
+  reinforcing/canceling factor; thin passthrough to
+  `GDSNavigator.find_group_influence`.
+- `find_anomalies` MCP per-entity polygon dict gains 2 additive scalar fields:
+  `total_impact`, `classification`. Auto-defaults; resolves to `null`
+  per-entity when not computable.
+- `find_lead_lag` MCP tool — cross-pattern temporal lead-lag in
+  population-relative coordinates. Thin passthrough to
+  `GDSNavigator.find_lead_lag` with strict-JSON sanitisation of ±inf/NaN to
+  `null`. Three modes through one parameter set: population-aggregated
+  centroid drift cross-correlation (default), per-dim D_A × D_B FDR-corrected
+  matrix (`top_dim_pairs` always; full matrix in `per_dim_pairs` when
+  `verbose=True`), per-entity drill-down via `entity_key`. Surfaces
+  `agreement` (`"strong"` / `"weak"` / `"divergent"` between centroid and
+  volatility series), `is_significant` (Bonferroni-adjusted peak),
+  `reliability` (high/medium/low based on `N - 1`), `degenerate_signal`
+  (forced `agreement="divergent"` when either centroid drift series has
+  zero variance — typical on disjoint-entity-space `cohort="all"` runs).
+
 ## [0.5.2] — 2026-04-28
 
 ### Added

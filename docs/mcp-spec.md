@@ -43,7 +43,7 @@ unlocking the full manual toolset based on the sphere's capabilities:
 
 | Capability | Condition | Tools added |
 |------------|-----------|-------------|
-| **base** | Always after sphere_overview | 37 tools: navigation, geometry, basic analysis |
+| **base** | Always after sphere_overview | 49 tools: navigation, geometry, basic analysis |
 | **temporal** | `temporal/` directory exists for any anchor pattern | dive_solid, get_solid, hub_history, find_drifting_entities, compare_time_windows, find_regime_changes |
 | **multi_pattern** | 2+ patterns cover same entity (any key type: direct, sibling, event_edge, composite, chain) | cross_pattern_profile, passive_scan, composite_risk, composite_risk_batch, detect_cross_pattern_discrepancy |
 | **trajectory_index** | Trajectory ANN index exists in `_gds_meta/trajectory/` | find_drifting_similar, detect_trajectory_anomaly |
@@ -56,11 +56,11 @@ Server start → Phase 1 (3 tools: always)
 open_sphere(path) → Phase 2 (18 tools: always + gateway + edge)
     ↓
   ├─ detect_pattern(query) → smart mode (no extra tools)
-  └─ sphere_overview()     → Phase 3 (55-68 tools: full manual mode)
+  └─ sphere_overview()     → Phase 3 (67-80 tools: full manual mode)
     ↓
 close_sphere() → Phase 1 (3 tools)
     ↓
-open_sphere(other_path) → Phase 2 (17 tools, different sphere)
+open_sphere(other_path) → Phase 2 (18 tools, different sphere)
 ```
 
 ### open_sphere response

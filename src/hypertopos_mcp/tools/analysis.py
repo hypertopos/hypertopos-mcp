@@ -121,6 +121,383 @@ def compare_entities(
 
 @mcp.tool(annotations={"readOnlyHint": True})
 @timed
+def compare_calibrations(
+    pattern_id: str,
+    v_from: int | None = None,
+    v_to: int | None = None,
+    top_n: int = 10,
+    verbose: bool = False,
+) -> str:
+    """Per-dimension μ/σ/θ drift between two calibration epochs of one pattern.
+
+    Diagnostic for: 'how did this pattern's calibration shift between epoch
+    N and M?'. Use after a builder rebuild to inspect what re-fitted
+    population statistics moved.
+
+    Args:
+      pattern_id: which pattern to inspect.
+      v_from: starting epoch (None → second-to-last on disk).
+      v_to: ending epoch (None → latest on disk).
+      top_n: number of top-drifted dimensions to return (default 10).
+      verbose: when True, also include the full per-dimension breakdown.
+
+    Returns: JSON-encoded CalibrationDriftReport.
+
+    Raises ValueError on v_from == v_to, schema_hash mismatch, or single-epoch
+    auto-resolve. CalibrationNotFoundError bubbles up from missing versions.
+    """
+    from dataclasses import asdict
+
+    _require_navigator()
+    nav = _state["navigator"]
+    report = nav.compare_calibrations(
+        pattern_id, v_from=v_from, v_to=v_to, top_n=top_n, verbose=verbose,
+    )
+    return json.dumps(asdict(report), indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def decompose_drift(
+    entity_key: str,
+    pattern_id: str,
+    v_from: int | None = None,
+    v_to: int | None = None,
+    timestamp_from: float | None = None,
+    timestamp_to: float | None = None,
+    top_n: int = 10,
+    verbose: bool = False,
+) -> str:
+    """Decompose an entity's drift between two temporal slices into intrinsic
+    (entity-driven) and extrinsic (population-recalibration-driven) components.
+
+    Uses raw shape from temporal slices and per-epoch (μ, σ) from multi-epoch
+    calibration retention. No on-disk format change.
+
+    Args:
+      entity_key: which entity to decompose.
+      pattern_id: anchor pattern with temporal data.
+      v_from: starting calibration epoch (None → oldest retained on disk).
+      v_to: ending calibration epoch (None → latest on disk).
+      timestamp_from: Unix-seconds lower bound for slice window (None → first slice).
+      timestamp_to: Unix-seconds upper bound for slice window (None → last slice).
+      top_n: number of top dimensions (by |total|) to return (default 10).
+      verbose: when True, also include the full per-dimension breakdown.
+
+    Returns: JSON-encoded IntrinsicExtrinsicReport.
+
+    Raises ValueError on:
+      - <2 retained calibration epochs (auto-resolve)
+      - v_from == v_to
+      - schema_hash mismatch
+      - <2 slices in the window
+      - event pattern (M3 requires anchor)
+    CalibrationNotFoundError bubbles up if a requested version was GC'd.
+    """
+    from dataclasses import asdict
+    from datetime import datetime, timezone
+
+    _require_navigator()
+    nav = _state["navigator"]
+
+    ts_from = (
+        datetime.fromtimestamp(timestamp_from, tz=timezone.utc)
+        if timestamp_from is not None
+        else None
+    )
+    ts_to = (
+        datetime.fromtimestamp(timestamp_to, tz=timezone.utc)
+        if timestamp_to is not None
+        else None
+    )
+
+    report = nav.decompose_drift(
+        entity_key=entity_key, pattern_id=pattern_id,
+        v_from=v_from, v_to=v_to,
+        timestamp_from=ts_from, timestamp_to=ts_to,
+        top_n=top_n, verbose=verbose,
+    )
+    return json.dumps(asdict(report), indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def find_calibration_influencers(
+    pattern_id: str,
+    top_n: int = 10,
+    classify: str = "hidden",
+    high_threshold_pct: float = 90.0,
+    sample_size: int | None = None,
+    verbose: bool = False,
+) -> str:
+    """Find entities with high influence on coordinate system calibration.
+
+    Detects entities whose presence disproportionately shapes the population-
+    relative coordinate (μ, σ). Classification by 4-cell influence × anomaly
+    matrix:
+      - "hidden" — high impact + low anomaly (defines normal without being detected)
+      - "distorter" — high impact + high anomaly (likely should be excluded)
+      - "standard_anomaly" — low impact + high anomaly (regular outlier)
+      - "normal" — low impact + low anomaly
+
+    Args:
+      pattern_id: anchor pattern (event patterns have no population stats).
+      top_n: max results (hard cap 50).
+      classify: filter — one of "hidden" (default), "distorter", "standard_anomaly",
+                "normal", "all" (returns top_n by total_impact across all cells).
+      high_threshold_pct: percentile cutoff for "high impact" classification (default 90).
+      sample_size: subsample N entities before leave-one-out scan.
+      verbose: when True, each entry gains cascading_flip_count
+               (extra O(top_n × N × D) recompute cost).
+
+    Returns: JSON-encoded InfluenceReport with cell_counts + entries.
+
+    Raises ValueError on event pattern, N<2, invalid threshold/classify/top_n.
+    """
+    from dataclasses import asdict
+
+    _require_navigator()
+    nav = _state["navigator"]
+    report = nav.find_calibration_influencers(
+        pattern_id=pattern_id,
+        top_n=top_n,
+        classify=classify,
+        high_threshold_pct=high_threshold_pct,
+        sample_size=sample_size,
+        verbose=verbose,
+    )
+    return json.dumps(asdict(report), indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def find_group_influence(
+    pattern_id: str,
+    groups: list[list[str]],
+) -> str:
+    """Per-group leave-set-out impact (caller-supplied form).
+
+    For each input group of entity_keys, computes the group's collective
+    impact on coordinate system calibration plus reinforcing_factor =
+    total_impact_set / Σ total_impact(individuals).
+
+      reinforcing_factor > 1.0 → reinforcing (group together moves μ/σ
+        more than sum of individuals — coordinated pull, e.g. duplicates
+        or coordinated injection)
+      reinforcing_factor < 1.0 → canceling (group members pull in opposite
+        directions; aggregate effect is smaller than sum)
+
+    Args:
+      pattern_id: anchor pattern (event patterns have no population stats).
+      groups: list of lists of entity_keys; each group must have ≥2 distinct
+              members and len(group) < N.
+
+    Returns: JSON-encoded list[GroupInfluenceReport] (input order preserved).
+
+    Raises ValueError on event pattern, N<3, empty groups, group<2 members,
+    group≥N, missing entity_key, duplicate entity in group, undefined
+    reinforcing factor (Σ_individual=0).
+    """
+    from dataclasses import asdict
+
+    _require_navigator()
+    nav = _state["navigator"]
+    reports = nav.find_group_influence(pattern_id=pattern_id, groups=groups)
+    return json.dumps([asdict(r) for r in reports], indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def find_lead_lag(
+    pattern_a: str,
+    pattern_b: str,
+    timestamp_from: str | None = None,
+    timestamp_to: str | None = None,
+    cohort: str = "fixed",
+    min_epochs: int = 8,
+    max_lag: int | None = None,
+    fdr_alpha: float = 0.05,
+    fdr_method: str = "storey",
+    verbose: bool = False,
+    entity_key: str | None = None,
+) -> str:
+    """Cross-pattern temporal lead-lag in population-relative coordinates.
+
+    Headline: cross-correlates the differenced population centroid drift
+    series of pattern_a vs pattern_b at lags [-max_lag, +max_lag], reports
+    the peak lag and correlation. Positive lag means pattern_a leads
+    pattern_b. Per-dim drill-down: top-10 (dim_a, dim_b) pairs by ascending
+    BH/Storey-adjusted q-value (full D_A × D_B matrix when verbose=True).
+    Per-entity drill-down: pass entity_key to replace population centroid
+    by that entity's own delta trajectory.
+
+    Args:
+      pattern_a, pattern_b: two distinct anchor patterns. Event patterns
+        have no temporal data and raise ValueError.
+      timestamp_from, timestamp_to: ISO-8601 window bounds (predicate
+        pushdown via Lance).
+      cohort: "fixed" (default — entities present at every common epoch
+        in both patterns; clean panel signal) or "all" (per-epoch present
+        entities; larger but contaminated by compositional turnover).
+      min_epochs: hard floor on the timestamp intersection (default 8).
+        Raises with explanatory message when patterns have misaligned grids.
+      max_lag: lag range; default = (N-1)//4 where N is intersection size.
+      fdr_alpha: FDR level for the per-dim D_A × D_B matrix (default 0.05).
+      fdr_method: "bh" or "storey" (default — recovers power on rich-signal
+        regimes via π₀-adaptive scaling).
+      verbose: when True, full D_A × D_B matrix in per_dim_pairs.
+      entity_key: per-entity drill-down mode.
+
+    Returns: JSON LeadLagReport with `lag`, `correlation`, `agreement`,
+    `is_significant`, `bartlett_ci_95`, `max_corr_threshold`, `reliability`
+    ("high"/"medium"/"low" — N-based), top_dim_pairs, raw centroid + volatility
+    series for downstream agent analysis. Sanitised for strict JSON
+    (±inf/NaN → null).
+
+    Raises ValueError on: event pattern, pattern_a==pattern_b, disjoint
+    entity_lines (patterns track different entity populations — no shared
+    cohort is possible), intersection below min_epochs, empty fixed cohort,
+    entity_key not present in both patterns over the window.
+    """
+    from dataclasses import asdict
+
+    _require_navigator()
+    nav = _state["navigator"]
+    report = nav.find_lead_lag(
+        pattern_a=pattern_a,
+        pattern_b=pattern_b,
+        timestamp_from=timestamp_from,
+        timestamp_to=timestamp_to,
+        cohort=cohort,
+        min_epochs=min_epochs,
+        max_lag=max_lag,
+        fdr_alpha=fdr_alpha,
+        fdr_method=fdr_method,
+        verbose=verbose,
+        entity_key=entity_key,
+    )
+    payload = _sanitize_for_json(asdict(report))
+    return json.dumps(payload, indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def find_density_gaps(
+    pattern_id: str,
+    top_n: int = 10,
+    dim_pairs: list[list[str]] | None = None,
+    bins: int = 10,
+    alpha: float = 0.05,
+    r_min: float = 0.1,
+    r_max: float = 0.7,
+    sample_size: int = 100_000,
+) -> str:
+    """Detect under-populated joint regions under independence null.
+
+    For each selected dim pair build a uniform-marginal 2D histogram
+    (probability integral transform normalises every dim kind) and flag
+    bins whose observed count is significantly below the uniform-
+    independence expectation. Each flagged bin maps back to a named
+    raw-feature range (e.g. ``tx_count in [50, 200] AND amount_std in
+    [5012, 11930]``) plus a BH-corrected q-value.
+
+    Parameters:
+      pattern_id: anchor pattern to analyse.
+      top_n: max number of gap cells to return, sorted by ratio desc.
+      dim_pairs: optional explicit pairs by name; otherwise auto-select
+                  top-20 most-correlated pairs in [r_min, r_max].
+      bins: histogram resolution per axis (4..50).
+      alpha: BH significance level.
+      r_min, r_max: correlation window for auto pair selection.
+      sample_size: max entities to read (random sample). Default 100,000.
+        Pass 0 to read all entities.
+
+    Smart-mode keywords: missing segment, density gap, dark matter,
+    under-represented, missing combination.
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+
+    pairs: list[tuple[str, str]] | None = None
+    if dim_pairs is not None:
+        pairs = [tuple(p) for p in dim_pairs]  # type: ignore[misc]
+
+    result = nav.find_density_gaps(
+        pattern_id=pattern_id,
+        top_n=top_n,
+        dim_pairs=pairs,
+        bins=bins,
+        alpha=alpha,
+        r_min=r_min,
+        r_max=r_max,
+        sample_size=None if sample_size == 0 else sample_size,
+    )
+    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def find_motif_by_hops(
+    pattern_id: str,
+    hops: list[dict],
+    seed_keys: list[str] | None = None,
+    max_results: int = 100,
+    score: bool = False,
+) -> str:
+    """Match motifs declaratively via per-hop ``HopPredicate``s.
+
+    Power-user escape hatch from the closed-vocab ``find_motif`` registry.
+    Each hop is a dict with optional ``amount_min``, ``amount_max``,
+    ``time_delta_max_hours``, ``direction`` (``"forward"`` /
+    ``"reverse"`` / ``"any"``), ``edge_dim_predicates``
+    (``{"dim_name": [op, value]}``). Walks the edge table looking for
+    chains of length ``len(hops)`` (1..6) seeded at ``seed_keys`` (or
+    all unique ``from_key``s when ``None``).
+
+    Bounded MVP — supports ``amount_min``/``amount_max``,
+    ``time_delta_max_hours``, ``direction``, ``edge_dim_predicates``.
+    ``amount_ratio_to_prev`` and ``require_anomalous_entity`` ship in
+    a follow-up release.
+
+    Smart-mode keywords: custom motif, hop predicate, edge dim filter
+    motif, motif by hops.
+    """
+    from dataclasses import asdict  # noqa: F401 — local-import safety
+
+    from hypertopos.model.sphere import HopPredicate
+
+    _require_navigator()
+    nav = _state["navigator"]
+
+    parsed_hops: list[HopPredicate] = []
+    for hop_dict in hops:
+        edge_dim_raw = hop_dict.get("edge_dim_predicates", {})
+        edge_dim: dict[str, tuple[str, float]] = {
+            dim: (op, float(val))
+            for dim, (op, val) in (
+                edge_dim_raw.items() if isinstance(edge_dim_raw, dict) else []
+            )
+        }
+        parsed_hops.append(HopPredicate(
+            amount_min=hop_dict.get("amount_min"),
+            amount_max=hop_dict.get("amount_max"),
+            time_delta_max_hours=hop_dict.get("time_delta_max_hours"),
+            direction=hop_dict.get("direction", "forward"),
+            edge_dim_predicates=edge_dim,
+        ))
+
+    result = nav.find_motif_by_hops(
+        pattern_id=pattern_id,
+        hops=parsed_hops,
+        seed_keys=seed_keys,
+        max_results=max_results,
+        score=score,
+    )
+    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
 def find_similar_entities(
     primary_key: str,
     pattern_id: str,
@@ -244,6 +621,9 @@ def search_entities_hybrid(
 ) -> str:
     """Hybrid search fusing ANN vector similarity with BM25 text relevance.
 
+    primary_key: the entity key to use as vector reference (e.g. "100428738").
+      Must be an actual entity key from walk_line or search_entities — NOT a
+      line name or pattern ID.
     alpha: weight of vector score (0.0=pure text, 1.0=pure vector, default 0.7).
     query: BM25 text query across all string attributes. Requires INVERTED index.
     filter_expr: optional Lance SQL predicate (e.g. "is_anomaly = true").
@@ -1212,7 +1592,7 @@ def find_drifting_entities(
     fdr_method: "bh" (default) or "storey" (LSL null-proportion estimator; recovers 10-15% more discoveries when combined with p_value_method="chi2" on spheres with genuine null mass).
     p_value_method: "rank" (default) or "chi2" (required for Storey to shrink q-values).
     select: "top_norm" (default, rank by score) or "diverse" (submodular facility location — K most diverse representatives with representativeness counts).
-    Returns: per-entity displacement, path_length, ratio, dimension_diffs, tac, reputation, gradient_alignment (radially-inward component of the drift vector in [-1, 1]), drift_direction ("normalizing" | "deteriorating" | "neutral" per ±0.3 cutoff).
+    Returns: per-entity displacement, path_length, ratio, dimension_diffs, tac, reputation, gradient_alignment (radially-inward component of the drift vector in [-1, 1]), drift_direction ("normalizing" | "deteriorating" | "neutral" per ±0.3 cutoff), and three M3 additive scalars — intrinsic_displacement, extrinsic_displacement, intrinsic_fraction (null when storage lacks multi-epoch retention, <2 retained epochs, schema mismatch, or <2 slices for the entity).
     """
     _require_navigator()
     capped_warning: str | None = None

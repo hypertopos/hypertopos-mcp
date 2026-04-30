@@ -299,6 +299,11 @@ def find_anomalies(
 
             ep["anomaly_dimensions"] = GDSEngine.anomaly_dimensions(ep["delta"], labels)
 
+    # M4 additive: attach total_impact + classification per entry. Resolves
+    # to None per-entry when pattern is event-type, N<2, or storage backend
+    # lacks shape-reconstruction prerequisites.
+    enriched = nav._attach_influence_fields_to_anomaly_entries(enriched, pattern_id)
+
     clusters = nav.classify_anomalies(polygons, pattern_id)
     result = {
         "pattern_id": pattern_id,

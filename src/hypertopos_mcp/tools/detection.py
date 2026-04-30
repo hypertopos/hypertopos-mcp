@@ -86,12 +86,13 @@ def detect_trajectory_anomaly(
     pattern_id: str,
     displacement_ranks: list[int] | None = None,
     top_n_per_range: int = 5,
-    sample_size: int | None = None,
+    sample_size: int = 10_000,
 ) -> str:
     """Detect entities with non-linear temporal trajectories (arch, V-shape, spike-recovery).
 
     Anchor patterns with temporal data only. top_n_per_range: max results (default 5).
-    sample_size: cap the number of entities streamed (None = all; use ~500–2000 on large patterns).
+    sample_size: max distinct entities to stream before stopping (default 10,000).
+      Pass 0 to scan the full population (may be slow on large patterns).
     Returns: entities with trajectory_shape, displacement, path_length, cohort_size/keys.
     """
     _require_navigator()
@@ -101,7 +102,7 @@ def detect_trajectory_anomaly(
             pattern_id,
             displacement_ranks=displacement_ranks,
             top_n_per_range=top_n_per_range,
-            sample_size=sample_size,
+            sample_size=None if sample_size == 0 else sample_size,
         )
     except ValueError as exc:
         return json.dumps({"error": str(exc)}, indent=2)
