@@ -716,23 +716,24 @@ Per-group leave-set-out impact + reinforcing/canceling factor (caller-supplied f
 
 ### `find_motif_by_hops`
 
-Declarative motif API — escape hatch from the closed-vocab `find_motif` registry. Caller passes a list of dicts describing per-hop constraints (`amount_min`, `amount_max`, `time_delta_max_hours`, `direction` (`"forward"` / `"reverse"` / `"any"`), `edge_dim_predicates: {dim: [op, value]}`) and the navigator walks the edge table for matching chains of length 1..6.
+Declarative motif API — escape hatch from the closed-vocab `find_motif` registry. Caller passes a list of dicts describing per-hop constraints (`amount_min`, `amount_max`, `time_delta_max_hours`, `amount_ratio_to_prev`, `direction` (`"forward"` / `"reverse"` / `"any"`), `edge_dim_predicates: {dim: [op, value]}`) and the navigator walks the edge table via level-synchronous BFS for matching chains of length 1..8.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `pattern_id` | string | required | Event pattern with edge_table |
-| `hops` | list of dict | required | 1..6 per-hop predicate dicts |
+| `hops` | list of dict | required | 1..8 per-hop predicate dicts |
 | `seed_keys` | list of string | `null` | Restrict to these seeds; `null` = all `from_key`s |
 | `max_results` | int | `100` | Cap on returned motif instances |
-| `score` | bool | `true` | Apply `_score_motif_from_edges`; silently skipped on event patterns (anchor-companion scoring is follow-up) |
+| `score` | bool | `false` | When set, score each motif as the product of event-aware edge_potential (`delta_distance × (1/effective_pair_count) × (1 + event_norm)`) across its edges using the resolved anchor-companion's per-entity geometry plus the event pattern's per-transaction polygons. Distinct transactions between the same accounts now produce distinct motif scores (no rank collapse on shared node sequences). Each scored motif gains `score`, `score_breakdown` (per-edge `event_factor` included), and `anchor_pattern_id` fields together. Output sorted descending on score, unscored motifs at tail. Raises when no anchor companion is configured for the queried event pattern. |
+| `time_window_hours` | float | `null` | Optional total-chain-span cap. When set, every hop after the first must satisfy `abs(current_edge_ts - first_edge_ts) <= time_window_hours`. Independent of per-hop `time_delta_max_hours`; both apply when both are set. Must be strictly positive when not `null` |
 
-**Per-hop dict fields:** `amount_min: float`, `amount_max: float`, `time_delta_max_hours: float`, `direction: "forward"|"reverse"|"any"`, `edge_dim_predicates: {dim_name: [op, value]}` where op is one of `<`, `<=`, `>`, `>=`, `==`.
+**Per-hop dict fields:** `amount_min: float`, `amount_max: float`, `time_delta_max_hours: float`, `amount_ratio_to_prev: float` (decreasing-chain ratio in `(0, 1.0]`; rejects edge unless `current_amount / prev_hop_amount ≤ ratio`; must be omitted on `hops[0]`), `direction: "forward"|"reverse"|"any"`, `edge_dim_predicates: {dim_name: [op, value]}` (op ∈ `<`, `<=`, `>`, `>=`, `==`), `require_anomalous_entity: bool` (when `true`, the hop's destination entity — `nodes[i+1]` of the motif — must satisfy `is_anomaly=true` in the resolved anchor companion's geometry; multiple hops AND together; raises if no anchor companion configured; `max_results` applies AFTER the filter).
 
-**Returns:** JSON object with `pattern_id`, `n_results`, `motifs` (each carrying `nodes`, `edges`, `timestamps`, `amounts`, optional `dim_values_per_hop`, optional `score` + `score_breakdown`).
+**Returns:** JSON object with `pattern_id`, `n_results`, `motifs` (each carrying `nodes`, `edges`, `timestamps`, `amounts`, optional `dim_values_per_hop`; when `score=true` succeeds for the motif, also `score`, `score_breakdown`, and `anchor_pattern_id` together).
 
-**Smart-mode keywords:** *custom motif*, *hop predicate*, *edge dim filter motif*, *motif by hops*.
+**Smart-mode keywords:** *custom motif*, *hop predicate*, *edge dim filter motif*, *motif by hops*, *decreasing chain*, *structuring chain*.
 
-**Use** when the closed-vocab motif library doesn't fit — express ad-hoc temporal-amount-edge_dim chains without a Python PR. Bounded MVP; `amount_ratio_to_prev` and `require_anomalous_entity` ship in follow-up release.
+**Use** when the closed-vocab motif library doesn't fit — express ad-hoc temporal-amount-edge_dim chains without a Python PR.
 
 ---
 

@@ -443,24 +443,54 @@ def find_motif_by_hops(
     seed_keys: list[str] | None = None,
     max_results: int = 100,
     score: bool = False,
+    time_window_hours: float | None = None,
 ) -> str:
     """Match motifs declaratively via per-hop ``HopPredicate``s.
 
     Power-user escape hatch from the closed-vocab ``find_motif`` registry.
     Each hop is a dict with optional ``amount_min``, ``amount_max``,
     ``time_delta_max_hours``, ``direction`` (``"forward"`` /
-    ``"reverse"`` / ``"any"``), ``edge_dim_predicates``
+    ``"reverse"`` / ``"any"``), ``amount_ratio_to_prev`` (decreasing-
+    chain ratio in (0, 1.0]; rejects edge unless
+    ``current_amount / prev_hop_amount <= ratio``; must be ``None`` on
+    ``hops[0]``), ``edge_dim_predicates``
     (``{"dim_name": [op, value]}``). Walks the edge table looking for
-    chains of length ``len(hops)`` (1..6) seeded at ``seed_keys`` (or
+    chains of length ``len(hops)`` (1..8) seeded at ``seed_keys`` (or
     all unique ``from_key``s when ``None``).
 
-    Bounded MVP — supports ``amount_min``/``amount_max``,
-    ``time_delta_max_hours``, ``direction``, ``edge_dim_predicates``.
-    ``amount_ratio_to_prev`` and ``require_anomalous_entity`` ship in
-    a follow-up release.
+    ``time_window_hours`` (optional, default ``None``): global total-
+    chain-span cap measured from the first hop's edge timestamp. When
+    set, every hop after the first must satisfy
+    ``abs(current_edge_ts - first_edge_ts) <= time_window_hours``.
+    Independent of per-hop ``time_delta_max_hours``; both apply when
+    both are set. Must be strictly positive when not ``None``.
+
+    Supports ``amount_min``/``amount_max``, ``time_delta_max_hours``,
+    ``direction``, ``amount_ratio_to_prev``, ``edge_dim_predicates``,
+    ``require_anomalous_entity``.
+
+    ``require_anomalous_entity`` (optional bool, default ``False``):
+    when ``True`` on hop ``i``, the destination entity (``nodes[i+1]`` of
+    the resulting motif) must satisfy ``is_anomaly=True`` in the resolved
+    anchor companion pattern. Multiple hops can set this independently
+    (constraints AND across hops). Raises when no anchor companion is
+    configured. ``max_results`` applies AFTER this filter.
+
+    ``score`` (optional bool, default ``False``): when ``True``, each
+    motif is scored as the product of event-aware ``edge_potential``
+    (``delta_distance × (1/effective_pair_count) × (1 + event_norm)``)
+    across its edges, using the resolved anchor companion's per-entity
+    geometry plus the event pattern's per-transaction polygons. Distinct
+    transactions between the same accounts produce distinct motif scores
+    (no rank collapse on shared node sequences). Each scored motif gains
+    ``score``, ``score_breakdown`` (per-edge entries carry ``event_factor``
+    among other fields), and ``anchor_pattern_id`` provenance fields
+    together; output is sorted descending on score with unscored motifs
+    at the tail. Raises when no anchor companion is configured for the
+    queried event pattern.
 
     Smart-mode keywords: custom motif, hop predicate, edge dim filter
-    motif, motif by hops.
+    motif, motif by hops, decreasing chain, structuring chain.
     """
     from dataclasses import asdict  # noqa: F401 — local-import safety
 
@@ -482,8 +512,12 @@ def find_motif_by_hops(
             amount_min=hop_dict.get("amount_min"),
             amount_max=hop_dict.get("amount_max"),
             time_delta_max_hours=hop_dict.get("time_delta_max_hours"),
+            amount_ratio_to_prev=hop_dict.get("amount_ratio_to_prev"),
             direction=hop_dict.get("direction", "forward"),
             edge_dim_predicates=edge_dim,
+            require_anomalous_entity=bool(
+                hop_dict.get("require_anomalous_entity", False),
+            ),
         ))
 
     result = nav.find_motif_by_hops(
@@ -492,6 +526,7 @@ def find_motif_by_hops(
         seed_keys=seed_keys,
         max_results=max_results,
         score=score,
+        time_window_hours=time_window_hours,
     )
     return json.dumps(_sanitize_for_json(result), indent=2, default=str)
 

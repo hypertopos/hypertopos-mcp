@@ -6,6 +6,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-05-01
+
+### Fixed
+- `find_motif_by_hops` MCP tool: `score=true` now returns scored motifs
+  (was a no-op since the declarative motif API shipped — the scoring
+  branch in the navigator was unreachable on the only patterns the tool
+  accepts). Scored motifs include `score`, `score_breakdown`, and a new
+  `anchor_pattern_id` provenance field together. Each per-edge entry in
+  `score_breakdown` now carries an `event_factor` reflecting the event
+  pattern's per-transaction polygon norm — distinct transactions between
+  the same `(from, to)` accounts now produce distinct motif scores
+  rather than collapsing to a tie. Raises when no anchor companion is
+  configured for the queried event pattern. Thin passthrough; no MCP
+  tool surface change beyond the new fields in the response payload
+  when `score=true`.
+
+### Added
+- `find_motif_by_hops` MCP tool: per-hop predicate dict accepts a new
+  optional `require_anomalous_entity: bool` field — see hypertopos
+  CHANGELOG for semantics (closes the X1 predicate set). Thin
+  passthrough; no MCP tool surface change.
+
+### Changed
+- `find_motif_by_hops` MCP tool: per-hop list now accepts up to 8 hops
+  (was 6). New optional `time_window_hours: float` top-level parameter
+  for total-chain-span cap (independent semantic from per-hop
+  `time_delta_max_hours`; both apply when both are set). Validation
+  fires before any sphere-state-dependent early-return so bad values
+  surface as errors on edge-table-less spheres rather than silent
+  empty results. Thin passthrough; no other MCP surface change.
+- `find_motif_by_hops` per-hop predicate dict accepts a new optional
+  `amount_ratio_to_prev: float` field — see hypertopos CHANGELOG for
+  semantics. Thin passthrough; no MCP tool surface change.
+- Anchor-pattern responses (`find_anomalies`, `find_similar_entities`,
+  `find_clusters`, `explain_anomaly`, `find_calibration_influencers`,
+  `decompose_drift`, etc.) on spheres rebuilt with the new
+  `edge_dim_aggregations:` YAML block on an anchor pattern transparently
+  include `<source_dim>_mean` / `<source_dim>_max` aggregates of the
+  per-edge sidecar dims in the polygon `delta` vector and derived
+  metrics. No tool-level API change — the new dims appear in the same
+  fields existing primitives already expose. Spheres without the YAML
+  block are byte-identical to the prior response shape.
+
 ## [0.6.0] — 2026-04-30
 
 ### Fixed
