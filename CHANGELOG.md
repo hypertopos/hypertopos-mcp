@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.2] — 2026-05-05
+
+### Changed
+- Anchor-pattern responses (`find_anomalies`, `find_similar_entities`,
+  `find_clusters`, `explain_anomaly`, `find_calibration_influencers`,
+  `decompose_drift`, etc.) on chain anchor patterns rebuilt with
+  `chain_lines.<id>.edge_dim_aggregations:` transparently include
+  `<source_dim>_mean` / `<source_dim>_max` aggregates of the per-edge
+  sidecar dims in the polygon `delta` vector and derived metrics. No
+  tool-level API change. Spheres without the new YAML hook are
+  byte-identical to the prior response shape.
+- Cold-call latency on motif tools (`score_motif`, `find_high_potential_motifs`,
+  `find_motif_by_hops`) drops materially due to the rewrite of
+  `AdjacencyIndex` load path in hypertopos-py. No tool surface change.
+  See hypertopos-py CHANGELOG for details.
+
 ## [0.6.1] — 2026-05-01
 
 ### Fixed
