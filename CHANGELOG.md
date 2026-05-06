@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.3] — 2026-05-06
+
+### Changed
+- `compare_calibrations` return payload gains a new `edge_dim_threshold_drift`
+  field — a per-source-dim `{from, to, delta}` map of the
+  `_count_above_threshold` cutoffs (population p95 per source dim)
+  persisted in the calibration epoch JSON. Populated when both compared
+  epochs declared `edge_dim_aggregations:` on the anchor pattern; `null`
+  when at least one of the compared epochs lacks the aggregations block,
+  preserving the prior shape for spheres without aggregations.
+- Anchor-pattern responses (`find_anomalies`, `find_similar_entities`,
+  `find_clusters`, `explain_anomaly`, `find_calibration_influencers`,
+  `decompose_drift`, etc.) on spheres rebuilt with the expanded
+  `edge_dim_aggregations:` block transparently include the new aggregated
+  dim columns (three additional canonical aggregates `_std` / `_p95` /
+  `_count_above_threshold`, k>2 composite anchor support, per-dim subset
+  selector) in the polygon `delta` vector and derived metrics. Spheres
+  without the YAML hook are byte-identical to the prior response shape.
+
 ## [0.6.2] — 2026-05-05
 
 ### Changed

@@ -632,7 +632,7 @@ Per-dimension μ/σ/θ drift between two calibration epochs of one pattern. Diag
 | `top_n` | int | `10` | Number of top-drifted dimensions to return |
 | `verbose` | bool | `false` | When true, also include the full per-dimension breakdown in `per_dimension` |
 
-**Returns:** JSON-encoded `CalibrationDriftReport` with `pattern_id`, `v_from`, `v_to`, `schema_hash`, `population_size_from`, `population_size_to`, `overall_drift_rms` (RMS in σ units, comparable across patterns), `top_drifted` (ranked list of `DimensionDrift`), and `per_dimension` (full list when `verbose=true`, else `null`). Each `DimensionDrift` carries `dim_index`, `dim_kind`, the from/to/delta triples for `mu`, `sigma`, `theta`, and `mu_delta_normalized` (z-score with sigma-safe guard for degenerate dims).
+**Returns:** JSON-encoded `CalibrationDriftReport` with `pattern_id`, `v_from`, `v_to`, `schema_hash`, `population_size_from`, `population_size_to`, `overall_drift_rms` (RMS in σ units, comparable across patterns), `top_drifted` (ranked list of `DimensionDrift`), `per_dimension` (full list when `verbose=true`, else `null`), and `edge_dim_threshold_drift` — per-source-dim `{from, to, delta}` map of `_count_above_threshold` cutoffs. Populated only when both compared epochs declared `edge_dim_aggregations:` on the anchor pattern; `null` otherwise. Each `DimensionDrift` carries `dim_index`, `dim_kind`, the from/to/delta triples for `mu`, `sigma`, `theta`, and `mu_delta_normalized` (z-score with sigma-safe guard for degenerate dims).
 
 **Errors:**
 - `ValueError` on `v_from == v_to`, single-epoch auto-resolve (only one epoch on disk), or schema_hash mismatch (cross-schema mu vectors are not dimensionally comparable).
