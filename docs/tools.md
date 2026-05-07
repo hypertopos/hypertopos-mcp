@@ -1117,6 +1117,73 @@ Finds which chains involve a specific entity — reverse lookup via chain keys.
 
 ---
 
+### `find_chains_with_coherent_anomaly`
+
+Find chains where ≥`min_hops` strictly consecutive entity-anchor positions are individually anomalous AND share the same dominant delta dimension. Surfaces *coherent anomaly cascades* — chains where consecutive hops go through entities that are all flagged for the same structural reason. Distinct from `find_anomalies` on a chain pattern, which scores chain-level features (hop count, time span, amount decay) — this primitive scores chain *composition*, not chain shape. The two are orthogonal detectors and should be used together for full coverage.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `pattern_id` | string | required | Chain anchor pattern id (built from `chain_lines:` block) |
+| `anchor_pattern_id` | string | required | Entity anchor pattern whose primary_keys match the chain hops (e.g. an account pattern when chains hop through accounts) |
+| `min_hops` | int | `3` | Strict consecutive run length; must be ≥ 2 |
+| `max_results` | int | `100` | Cap on returned runs |
+
+**Returns:** `chains[]` (`{chain_id, run_start_idx, run_length, top_dim, run_keys, max_delta_norm}`), `diagnostics` (`{n_chains_total, n_anomaly_entities, elapsed_ms}`). Sorting: `(run_length DESC, max_delta_norm DESC)`.
+
+**Notes:** Pure query-side. The `top_dim` returned for each run is the dimension on which all entities in the run show the largest absolute z-score (sigma-normalised |delta|). When a chain contains multiple qualifying runs, only the longest is returned (max_delta_norm as tiebreaker).
+
+---
+
+### `anomaly_propagation_in_chain`
+
+Per-hop anomaly progression for a single chain. Inspector primitive complementary to `find_chains_with_coherent_anomaly`: the latter sweeps the population of chains; this primitive takes one `chain_id` and returns its hop-by-hop anomaly trace. Use after a population sweep flags a chain to drill into how the anomaly accumulates and where it breaks.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `chain_id` | string | required | Primary key of the chain in the chain anchor pattern |
+| `pattern_id` | string | required | Chain anchor pattern id |
+| `anchor_pattern_id` | string | required | Entity anchor pattern whose primary_keys match the chain hops |
+
+**Returns:** `hops[]` (per-hop progression with `hop_idx, primary_key, is_anomaly, delta_norm, top_dim, delta_rank_pct`), `summary` (`n_hops, n_anomalous, max_run_length_same_top_dim, dominant_top_dim`).
+
+**Notes:** Raises `GDSNavigationError` when the chain_id resolves to multiple rows in the points table (defensive raise against the chain extraction's pre-fix id collision regression). Affected spheres need a chain pattern rebuild to restore primary_key uniqueness.
+
+---
+
+### `classify_chain_typology`
+
+Five-dimensional typology classification for a single chain. Wraps `anomaly_propagation_in_chain` and labels the chain along five operational axes — gives investigators a per-chain operational tag in one call instead of post-processing raw hops.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `chain_id` | string | required | Primary key of the chain in the chain anchor pattern |
+| `pattern_id` | string | required | Chain anchor pattern id |
+| `anchor_pattern_id` | string | required | Entity anchor pattern |
+
+**Returns:** `typology` block with `shape` (monotone-rising / monotone-falling / peak-in-middle / peak-at-start / peak-at-end / flat / single-hop / no-anomalous-run), `peak_position` (at-start / early / middle / late / at-end / single-hop / no-run), `position_in_chain` (leading / transit / terminal / full-chain / no-run), `extension_signals` (`forward` and `backward` booleans — whether the next-hop or pre-run hop is in an elevated rank band), `pre_run_rank_bucket`, `breakpoint_rank_bucket`, `dominant_top_dim`, plus the chain's longest-run summary.
+
+**Notes:** Inherits the defensive raise from `anomaly_propagation_in_chain`.
+
+---
+
+### `extend_chain`
+
+Suggest candidate extension entities at the boundary of a chain's anomalous run. Forward looks at entities that follow the run-end key in OTHER chains in the same chain pattern (via the chain reverse index); backward looks at predecessors. Use after the inspector to find "where to look next" in the surrounding entity network.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `chain_id` | string | required | Primary key of the chain to extend from |
+| `pattern_id` | string | required | Chain anchor pattern id |
+| `anchor_pattern_id` | string | required | Entity anchor pattern |
+| `direction` | string | `"forward"` | `"forward"` (extend past run-end) or `"backward"` (extend before run-start) |
+| `max_results` | int | `20` | Cap on returned candidates |
+
+**Returns:** `boundary_key`, `boundary_position` (`run-start` / `run-end`), `candidates[]` (`{entity_key, is_anomaly, delta_norm, delta_rank_pct, n_source_chains, source_chain_ids}`), `summary` (`{n_candidates, n_anomalous_candidates, n_unique_keys}`). Sorting: `(is_anomaly DESC, delta_norm DESC, n_source_chains DESC)`.
+
+**Notes:** Inherits the defensive raise. Reads the full chain points table for the reverse index on each call — for repeated extension queries in one session, expect ~700 ms warm; one-shot use is sub-1.5 s on a 290 k chain pattern.
+
+---
+
 ### `find_geometric_path`
 
 Find paths between two entities scored by geometric coherence. Uses bidirectional BFS on polygon edges, then ranks discovered paths by a configurable scoring function.

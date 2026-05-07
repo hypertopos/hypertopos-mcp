@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.4] — 2026-05-07
+
+### Added
+- `classify_chain_typology` MCP tool — exposes the new typology classifier. Args: `chain_id`, `pattern_id`, `anchor_pattern_id`. Returns the typology block (shape, peak_position, position_in_chain, extension_signals, pre_run / breakpoint rank buckets, dominant_top_dim, run summary).
+- `extend_chain` MCP tool — exposes the boundary-extension primitive. Args: `chain_id`, `pattern_id`, `anchor_pattern_id`, `direction` (`"forward"` or `"backward"`, default `"forward"`), `max_results` (default 20). Returns boundary key, candidate extension entities ranked by their own anchor anomaly status, and a summary.
+- `anomaly_propagation_in_chain` MCP tool — exposes the new navigator inspector primitive. Args: `chain_id`, `pattern_id` (chain anchor pattern id), `anchor_pattern_id` (entity anchor pattern). Returns JSON with `hops` (per-hop progression), `summary` (`n_hops`, `n_anomalous`, `max_run_length_same_top_dim`, `dominant_top_dim`), and `elapsed_ms`. Read-only.
+- `find_chains_with_coherent_anomaly` MCP tool — exposes the new navigator primitive. Args: `pattern_id` (chain anchor pattern id), `anchor_pattern_id` (entity anchor pattern whose primary keys match the chain hops), `min_hops` (default 3, must be >= 2), `max_results` (default 100). Returns JSON with `chains` (ranked runs) and `diagnostics` (`n_chains_total`, `n_anomaly_entities`, `elapsed_ms`). Read-only.
+
 ## [0.6.3] — 2026-05-06
 
 ### Changed

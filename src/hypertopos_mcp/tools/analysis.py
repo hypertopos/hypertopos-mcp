@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import math
+from datetime import UTC
 from typing import Any
 
 import numpy as np
@@ -195,18 +196,18 @@ def decompose_drift(
     CalibrationNotFoundError bubbles up if a requested version was GC'd.
     """
     from dataclasses import asdict
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     _require_navigator()
     nav = _state["navigator"]
 
     ts_from = (
-        datetime.fromtimestamp(timestamp_from, tz=timezone.utc)
+        datetime.fromtimestamp(timestamp_from, tz=UTC)
         if timestamp_from is not None
         else None
     )
     ts_to = (
-        datetime.fromtimestamp(timestamp_to, tz=timezone.utc)
+        datetime.fromtimestamp(timestamp_to, tz=UTC)
         if timestamp_to is not None
         else None
     )
@@ -1137,6 +1138,149 @@ def find_chains_for_entity(
         primary_key,
         pattern_id,
         top_n=top_n,
+    )
+    return json.dumps(result, indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def find_chains_with_coherent_anomaly(
+    pattern_id: str,
+    anchor_pattern_id: str,
+    min_hops: int = 3,
+    max_results: int = 100,
+) -> str:
+    """Find chains with coherent anomaly cascades.
+
+    A chain matches when >=min_hops consecutive entity-anchor positions
+    are individually anomalous AND share the same dominant delta dim.
+
+    Surfaces the coherent anomaly cascade signal (e.g. AML structuring chains
+    routed through accounts that all show high pass-through ratio or
+    fan-asymmetry). Distinct from find_anomalies(<chain_pattern>), which
+    scores chains on chain-level features — this primitive scores chain
+    composition, not chain shape.
+
+    Args:
+        pattern_id: chain anchor pattern id (built from chain_lines: block).
+        anchor_pattern_id: entity anchor pattern whose primary_keys match
+            the chain hops (e.g. account_pattern when chains hop through
+            accounts).
+        min_hops: strict consecutive run length; must be >= 2.
+        max_results: cap on returned runs; sorted by (run_length DESC,
+            max_delta_norm DESC).
+
+    Returns: chains list with chain_id, run_start_idx, run_length, top_dim,
+    run_keys, max_delta_norm; plus diagnostics (n_chains_total,
+    n_anomaly_entities, elapsed_ms).
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    result = nav.find_chains_with_coherent_anomaly(
+        pattern_id,
+        anchor_pattern_id=anchor_pattern_id,
+        min_hops=min_hops,
+        max_results=max_results,
+    )
+    return json.dumps(result, indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def anomaly_propagation_in_chain(
+    chain_id: str,
+    pattern_id: str,
+    anchor_pattern_id: str,
+) -> str:
+    """Per-hop anomaly progression for a single chain.
+
+    Inspector primitive complementary to find_chains_with_coherent_anomaly:
+    the latter sweeps the population of chains; this primitive takes one
+    chain_id and returns its hop-by-hop anomaly trace — for each entity in
+    the chain's keys sequence, returns is_anomaly + delta_norm + top
+    dominant dim + delta_rank_pct. Use after a population sweep to
+    drill into a specific flagged chain.
+
+    Args:
+        chain_id: primary_key of the chain in the chain anchor pattern.
+        pattern_id: chain anchor pattern id (built from chain_lines: block).
+        anchor_pattern_id: entity anchor pattern whose primary_keys match
+            the chain hops (e.g. account_pattern when chains hop through
+            accounts).
+
+    Returns: hops[] (per-hop progression with hop_idx, primary_key,
+    is_anomaly, delta_norm, top_dim, delta_rank_pct), plus summary
+    (n_hops, n_anomalous, max_run_length_same_top_dim, dominant_top_dim).
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    result = nav.anomaly_propagation_in_chain(
+        chain_id,
+        pattern_id,
+        anchor_pattern_id=anchor_pattern_id,
+    )
+    return json.dumps(result, indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def classify_chain_typology(
+    chain_id: str,
+    pattern_id: str,
+    anchor_pattern_id: str,
+) -> str:
+    """Five-dimensional typology classification for a single chain.
+
+    Wraps anomaly_propagation_in_chain and labels the chain along five
+    operational axes: shape (rising/falling/peak), peak_position,
+    position_in_chain (leading/transit/terminal/full-chain),
+    extension_signals (forward/backward — whether neighbouring hops are
+    in elevated rank bands), and dominant_top_dim across all anomalous
+    hops. Use to get a per-chain operational tag instead of computing
+    from raw hops.
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    result = nav.classify_chain_typology(
+        chain_id,
+        pattern_id,
+        anchor_pattern_id=anchor_pattern_id,
+    )
+    return json.dumps(result, indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def extend_chain(
+    chain_id: str,
+    pattern_id: str,
+    anchor_pattern_id: str,
+    direction: str = "forward",
+    max_results: int = 20,
+) -> str:
+    """Suggest extension entities at the boundary of a chain's anomalous run.
+
+    direction='forward': at the run's end, find entities that follow the
+    boundary entity in OTHER chains in the same chain pattern, ranked by
+    their own anchor anomaly status. Candidates for extending the
+    investigation forward into the laundering ring.
+
+    direction='backward': same logic at the run's start, returning entities
+    that PRECEDE the boundary entity in other chains.
+
+    Returns: boundary_key, boundary_position, candidates[] (entity_key,
+    is_anomaly, delta_norm, delta_rank_pct, n_source_chains,
+    source_chain_ids), summary (n_candidates, n_anomalous_candidates,
+    n_unique_keys).
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    result = nav.extend_chain(
+        chain_id,
+        pattern_id,
+        anchor_pattern_id=anchor_pattern_id,
+        direction=direction,
+        max_results=max_results,
     )
     return json.dumps(result, indent=2, default=str)
 
