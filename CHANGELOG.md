@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.5] — 2026-05-08
+
+No MCP-tool surface changes in this release. Tools remain identical to 0.6.4; underlying chain anchor pattern feature set expanded in `hypertopos` core (see `hypertopos-py` 0.6.5 changelog) and surfaces automatically through existing chain-coherent investigative loop tools after sphere rebuild.
+
 ## [0.6.4] — 2026-05-07
 
 ### Added
