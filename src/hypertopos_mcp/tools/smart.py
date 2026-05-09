@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 from typing import Any
 
 from mcp.server.fastmcp import Context
@@ -381,6 +382,59 @@ def _step_find_chains_for_entity(params: dict) -> dict:
     return {"total": len(chains), "results": chains[:10]}
 
 
+def _step_find_chains_with_coherent_anomaly(params: dict) -> dict:
+    """Run find_chains_with_coherent_anomaly — population sweep over chain
+    pattern, surfaces chains where consecutive entity-anchor positions are
+    individually anomalous AND share the same dominant delta dim."""
+    nav = _state["navigator"]
+    result = nav.find_chains_with_coherent_anomaly(
+        params.get("pattern_id", ""),
+        anchor_pattern_id=params.get("anchor_pattern_id", ""),
+        min_hops=params.get("min_hops", 3),
+        max_results=params.get("max_results", 100),
+    )
+    chains = result.get("chains", [])
+    return {"total": len(chains), "results": chains[:10]}
+
+
+def _step_anomaly_propagation_in_chain(params: dict) -> dict:
+    """Run anomaly_propagation_in_chain — per-hop trace for a single chain."""
+    nav = _state["navigator"]
+    result = nav.anomaly_propagation_in_chain(
+        chain_id=params.get("chain_id", ""),
+        pattern_id=params.get("pattern_id", ""),
+        anchor_pattern_id=params.get("anchor_pattern_id", ""),
+    )
+    hops = result.get("hops", [])
+    return {"total": len(hops), "results": hops, "summary": result.get("summary", {})}
+
+
+def _step_classify_chain_typology(params: dict) -> dict:
+    """Run classify_chain_typology — five-axis typology label for a single chain."""
+    nav = _state["navigator"]
+    result = nav.classify_chain_typology(
+        chain_id=params.get("chain_id", ""),
+        pattern_id=params.get("pattern_id", ""),
+        anchor_pattern_id=params.get("anchor_pattern_id", ""),
+    )
+    typology = result.get("typology", {})
+    return {"total": 1, "results": [typology]}
+
+
+def _step_extend_chain(params: dict) -> dict:
+    """Run extend_chain — boundary extension candidates for a single chain."""
+    nav = _state["navigator"]
+    result = nav.extend_chain(
+        chain_id=params.get("chain_id", ""),
+        pattern_id=params.get("pattern_id", ""),
+        anchor_pattern_id=params.get("anchor_pattern_id", ""),
+        direction=params.get("direction", "forward"),
+        max_results=params.get("max_results", 20),
+    )
+    candidates = result.get("candidates", [])
+    return {"total": len(candidates), "results": candidates[:10]}
+
+
 def _step_find_common_relations(params: dict) -> dict:
     """Run find_common_relations — shared edges between two entities."""
     nav = _state["navigator"]
@@ -586,6 +640,10 @@ _STEP_HANDLERS: dict[str, Any] = {
     "find_counterparties": _step_find_counterparties,
     "extract_chains": _step_extract_chains,
     "find_chains_for_entity": _step_find_chains_for_entity,
+    "find_chains_with_coherent_anomaly": _step_find_chains_with_coherent_anomaly,
+    "anomaly_propagation_in_chain": _step_anomaly_propagation_in_chain,
+    "classify_chain_typology": _step_classify_chain_typology,
+    "extend_chain": _step_extend_chain,
     "find_common_relations": _step_find_common_relations,
     # Phase 1G: Population Analytics
     "get_centroid_map": _step_get_centroid_map,
@@ -639,6 +697,10 @@ _STEP_CAPABILITIES: dict[str, str | None] = {
     "find_counterparties": None,
     "extract_chains": None,
     "find_chains_for_entity": None,
+    "find_chains_with_coherent_anomaly": None,
+    "anomaly_propagation_in_chain": None,
+    "classify_chain_typology": None,
+    "extend_chain": None,
     "find_common_relations": None,
     # Phase 1G: Population Analytics
     "get_centroid_map": None,
@@ -1092,6 +1154,66 @@ def _select_template(
     return None
 
 
+def _detect_chain_pattern_pair(
+    patterns_info: dict,
+) -> tuple[str, str] | None:
+    """Identify (chain_anchor_pattern_id, entity_anchor_pattern_id) pair.
+
+    Heuristic: the chain anchor pattern is the one whose entity_line
+    contains "chain" or "chains" (e.g. `tx_chains_pattern` over the
+    `tx_chains` line). The entity anchor pattern is the largest other
+    anchor pattern in the sphere — typically `account_pattern` or
+    similar. Returns None if no chain pattern is detected.
+    """
+    chain_pid: str | None = None
+    other_anchors: list[str] = []
+    for pid, info in patterns_info.items():
+        if info.get("type") != "anchor":
+            continue
+        entity_line = info.get("entity_line", "") or ""
+        if "chain" in entity_line.lower() or "chain" in pid.lower():
+            chain_pid = pid
+        else:
+            other_anchors.append(pid)
+    if chain_pid is None or not other_anchors:
+        return None
+    # Prefer an anchor that names accounts / entities the chain hops through.
+    # Otherwise default to the first non-chain anchor.
+    preferred = next(
+        (
+            pid for pid in other_anchors
+            if any(
+                kw in pid.lower() or kw in (patterns_info[pid].get("entity_line") or "").lower()
+                for kw in ("account", "entity", "node", "vertex", "actor")
+            )
+        ),
+        other_anchors[0],
+    )
+    return chain_pid, preferred
+
+
+# Match production chain_id format `CHAIN-NNNNNN` (digits after the dash).
+# Hypertopos chain extractor assigns digit-only chain ids post-merge dedup,
+# so the regex stays strict to avoid false positives on multi-word tokens
+# like "CHAIN-AML-2026" or "CHAIN-XYZ_001". If a sphere is built with a
+# different chain-id convention, the natural-language fallback won't
+# extract the id and the affected steps are skipped (per the explicit
+# `_NEEDS_CHAIN_ID` skip rule); LLM-based planning can still handle those.
+_CHAIN_ID_PATTERN = re.compile(r"\bCHAIN-\d+\b", re.IGNORECASE)
+
+
+def _extract_chain_id(query: str) -> str | None:
+    """Extract the first chain_id-shaped token from the query, e.g.
+    `CHAIN-109852`, `chain-001`. Returns None if no match.
+
+    Matches the canonical production format `CHAIN-<digits>`. Spheres
+    built with a different chain-id convention are not handled here;
+    LLM-based planning is the path for those.
+    """
+    m = _CHAIN_ID_PATTERN.search(query)
+    return m.group(0) if m else None
+
+
 def _match_patterns(
     query_lower: str,
     anchor_patterns: list[str],
@@ -1280,6 +1402,29 @@ def _fallback_plan(
         ("hub evolution", "hub over time", "hub history", "hub score evol"): "hub_history",
         # Network/Fraud
         ("counterpart", "trading partner", "transact"): "find_counterparties",
+        # Chain-coherent investigative loop intents (more specific keyword sets
+        # take precedence over the generic "chain"/"flow" → extract_chains
+        # routing below; matched first by ordered iteration).
+        (
+            "coherent anomaly", "consecutive anomalous", "cascade through",
+            "chains where consecutive", "anomaly cascade", "chain composition",
+        ): "find_chains_with_coherent_anomaly",
+        (
+            "extend chain", "extend the chain", "boundary candidates",
+            "next entities after", "what comes after chain", "follow chain",
+        ): "extend_chain",
+        (
+            "typology of chain", "classify chain", "shape of chain",
+            "chain typology", "chain shape", "chain class",
+        ): "classify_chain_typology",
+        (
+            "trace chain", "hop by hop", "hop-by-hop", "anomaly progression",
+            "per-hop", "chain trace", "drill into chain",
+        ): "anomaly_propagation_in_chain",
+        (
+            "chains for entity", "chains containing", "which chains contain",
+            "what chains is", "chains involving",
+        ): "find_chains_for_entity",
         ("chain", "flow", "launder", "layering"): "extract_chains",
         ("common relation", "shared relation", "in common"): "find_common_relations",
         # Population Analytics
@@ -1311,7 +1456,25 @@ def _fallback_plan(
         "find_counterparties", "extract_chains", "find_common_relations",
         "get_centroid_map", "assess_false_positive",
         "trace_root_cause", "detect_composite_subgroup_inflation",
-        "hub_history",
+        "hub_history", "find_chains_for_entity",
+    }
+    # Chain-coherent steps that need the chain anchor pattern as `pattern_id`
+    # AND the entity anchor pattern as `anchor_pattern_id`. The fallback path
+    # detects both via the heuristic in `_detect_chain_pattern_pair`.
+    _NEEDS_CHAIN_PATTERN_PAIR = {
+        "find_chains_with_coherent_anomaly",
+        "anomaly_propagation_in_chain",
+        "classify_chain_typology",
+        "extend_chain",
+    }
+    # Chain-coherent steps that ALSO need a chain_id extracted from the query
+    # (typically as a token like "CHAIN-NNNNNN"). Population-sweep
+    # `find_chains_with_coherent_anomaly` does NOT need chain_id; the other
+    # three do.
+    _NEEDS_CHAIN_ID = {
+        "anomaly_propagation_in_chain",
+        "classify_chain_typology",
+        "extend_chain",
     }
     # Steps that only work on event patterns (temporal event streams)
     _REQUIRES_EVENT_PATTERN = {
@@ -1326,12 +1489,29 @@ def _fallback_plan(
         "find_similar_entities", "find_clusters", "find_hubs",
         "contrast_populations", "compare_time_windows",
     }
+
+    chain_pair = _detect_chain_pattern_pair(patterns_info)
+    chain_id_from_query = _extract_chain_id(query)
     for keywords, step_name in _kw.items():
         if step_name not in available:
             continue
         if not any(w in query_lower for w in keywords):
             continue
         if step_name in _NEEDS_ENTITY_CONTEXT:
+            continue
+        if step_name in _NEEDS_CHAIN_PATTERN_PAIR:
+            if chain_pair is None:
+                continue
+            chain_pid, anchor_pid = chain_pair
+            params: dict[str, Any] = {
+                "pattern_id": chain_pid,
+                "anchor_pattern_id": anchor_pid,
+            }
+            if step_name in _NEEDS_CHAIN_ID:
+                if not chain_id_from_query:
+                    continue
+                params["chain_id"] = chain_id_from_query
+            steps.append({"name": step_name, "params": params})
             continue
         if step_name == "detect_cross_pattern_discrepancy":
             # Cross-pattern needs entity_line — use all matched patterns' lines

@@ -642,6 +642,27 @@ Per-dimension μ/σ/θ drift between two calibration epochs of one pattern. Diag
 
 ---
 
+### `theta_sensitivity`
+
+Calibration-quality diagnostic for one pattern: per-percentile sweep of the anomaly threshold (`theta`) plus the derived stable-band and cliff structure. Surfaces how stable the chosen `anomaly_percentile` is to perturbation — whether it sits in a region where adjacent recalibration moves shift `theta` by less than 30 % (stable band, smooth threshold scaling) or whether moving the percentile by one step would jump `theta` by 50 % or more (cliff, heavy-tail region of the underlying `delta_norm` distribution).
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `pattern_id` | string | required | Which pattern to inspect |
+| `version` | int | `null` | Calibration epoch. `null` resolves to latest epoch on disk |
+
+**Returns:** JSON-encoded `ThetaSensitivityReport` with `pattern_id`, `calibration_epoch`, `population_size`, `theta_sensitivity` (dict keyed `p90 .. p99`, each carrying `theta_mean`, `theta_std`, `anomaly_count_mean`, `anomaly_count_std`, `anomaly_rate`), `stable_band` (`{from, to, length}` — longest contiguous run of percentiles whose adjacent-pair `theta_mean` ratio stays below 1.30; `length` is the number of percentiles inclusive, `from`/`to` are `null` when no smooth transition exists), `cliffs[]` (`{from, to, ratio}` for every adjacent-pair whose `theta_mean` ratio is at or above 1.50, ordered by percentile boundary), `n_cliffs`, and `stable_band_length` convenience copy. Note: ratios are computed on `theta_mean` (distribution shape signal), not on `anomaly_count_mean` (which is mechanically determined by percentile arithmetic and identical across all distributions).
+
+The `theta_std` and `anomaly_count_std` fields are `0.0` when the calibration epoch was populated via the cheap build-time path (default) — bootstrap CI estimation is opt-in and not currently exposed via this tool.
+
+**Errors:**
+- `ValueError` when the calibration epoch lacks the `theta_sensitivity` field (pre-T2 spheres need a rebuild) or when no calibration epochs exist on disk for the pattern.
+- `CalibrationNotFoundError` from missing versions (trimmed by GC, schema bump wiped history).
+
+**Use to ask:** "is the chosen `anomaly_percentile` (typically p95) sitting near a cliff, or in a stable band?" When considering a recalibration to a different percentile, the stable_band tells you the safe range and the cliff list tells you the boundaries to avoid.
+
+---
+
 ### `decompose_drift`
 
 Per-entity intrinsic vs extrinsic decomposition of geometric drift between two temporal slices, viewed across two calibration epochs.

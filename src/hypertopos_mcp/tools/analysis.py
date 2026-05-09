@@ -159,6 +159,44 @@ def compare_calibrations(
 
 @mcp.tool(annotations={"readOnlyHint": True})
 @timed
+def theta_sensitivity(
+    pattern_id: str,
+    version: int | None = None,
+) -> str:
+    """Calibration-quality diagnostic for one pattern: per-percentile theta sweep
+    plus stable band + cliffs.
+
+    Use to ask 'is the chosen `anomaly_percentile` (typically p95) sitting
+    near a cliff, or in a stable band?'. The diagnostic surfaces
+    contiguous percentile ranges where adjacent-pair anomaly_count
+    ratios stay below 1.30 (safe recalibration zone) and percentile
+    boundaries where ratios are 1.50 or higher (cliffs — moving the
+    threshold here changes the anomaly population by 50 % or more).
+
+    Args:
+      pattern_id: which pattern to inspect.
+      version: calibration epoch (None → latest on disk).
+
+    Returns: JSON-encoded ThetaSensitivityReport with per-percentile
+    sweep (`theta_sensitivity` keyed `p90 .. p99`), `stable_band`
+    (`from`, `to`, `length`), `cliffs[]` (`from`, `to`, `ratio`), and
+    convenience counters `n_cliffs` + `stable_band_length`.
+
+    Raises ValueError when the calibration epoch lacks the
+    `theta_sensitivity` field — pre-T2 spheres need a rebuild before
+    the diagnostic is available. CalibrationNotFoundError bubbles up
+    from missing versions.
+    """
+    from dataclasses import asdict
+
+    _require_navigator()
+    nav = _state["navigator"]
+    report = nav.theta_sensitivity(pattern_id, version=version)
+    return json.dumps(asdict(report), indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
 def decompose_drift(
     entity_key: str,
     pattern_id: str,

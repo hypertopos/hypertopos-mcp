@@ -22,8 +22,18 @@ from hypertopos_mcp.server import (
 
 
 def _suggest_queries(sphere) -> list[str]:
-    """Generate suggested first queries from sphere structure."""
+    """Generate suggested first queries from sphere structure.
+
+    When the sphere has a chain anchor pattern (built from `chain_lines:`),
+    surface the chain-coherent investigative loop entry point as one of
+    the first-class suggestions — `detect_pattern` smart-mode routes the
+    natural-language form to `find_chains_with_coherent_anomaly` so
+    agents discover the chain-coherent loop without manually reading
+    sphere_overview's chain-anchor section.
+    """
     queries = []
+    chain_pid: str | None = None
+    entity_pid: str | None = None
     for pid, p in sphere.patterns.items():
         el = sphere.entity_line(pid)
         if p.pattern_type == "anchor" and p.relations:
@@ -31,12 +41,31 @@ def _suggest_queries(sphere) -> list[str]:
             queries.append(
                 f"find {el} with anomalous {dim} in {pid}"
             )
+        if p.pattern_type == "anchor":
+            entity_line = el or ""
+            if "chain" in entity_line.lower() or "chain" in pid.lower():
+                chain_pid = pid
+            elif entity_pid is None:
+                entity_pid = pid
+    # Chain-coherent investigative loop entry point. D1's keyword fallback
+    # routes the "consecutive <entity_line>" + "anomalous" phrasing to
+    # find_chains_with_coherent_anomaly with the chain pattern + entity
+    # anchor pattern auto-extracted. The first non-chain anchor in
+    # `sphere.patterns` iteration order becomes the entity_line reference;
+    # this is intentional and depends on Python 3.7+ dict insertion order
+    # being preserved.
+    if chain_pid and entity_pid:
+        chain_entity_line = sphere.entity_line(entity_pid) or "entities"
+        queries.append(
+            f"find chains where consecutive {chain_entity_line} are "
+            f"individually anomalous in {chain_pid}"
+        )
     if len(sphere.patterns) > 1:
         queries.append("find entities anomalous in one pattern but normal in another")
     if sphere.aliases:
         alias = next(iter(sphere.aliases))
         queries.append(f"find entities near the {alias} boundary")
-    return queries[:5]
+    return queries[:6]
 
 
 @mcp.tool()
