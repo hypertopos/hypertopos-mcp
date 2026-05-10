@@ -116,6 +116,7 @@ Population summary for all patterns (or one pattern). Returns anomaly rates, cal
 | `inactive_ratio` | Fraction of anchor entities at the dominant low-activity mode (only reported when >25% of population is below median). See below. |
 | `has_temporal` | `true` when the pattern has temporal slices |
 | `profiling_alerts[]` | Dimension-level outlier clusters detected at build time. Each entry: `{dimension, max, p99, ratio, alert}` where `alert` is `"extreme cluster"` (ratio > 3.0) or `"moderate cluster"` (ratio 1.5–3.0). Absent = no outlier concentration. |
+| `dim_quality_warnings[]` | Silent build-time failures of z-score / `delta_norm` semantics. Each entry: `{type, dim_label, reason, advice}`. Two `type` values: `"dead_dim"` (sigma_diag below 1e-10 — zero variance, z-score undefined, the dim contributes nothing meaningful and silently dilutes other dims' signal) and `"sparse_dim"` (median == 0 with p99 > 0 — mostly-zero with rare nonzero, gaussian z-score assumption is wrong; Bregman divergence with poisson / bernoulli kind tag is the correct distance). `reason` carries the offending value; `advice` is concrete remediation (drop the dim / fix data source for dead, switch to Bregman / split into is_active+value_when_active for sparse). Computed from cached pattern state, sub-millisecond, no storage scan. Absent = no failure mode detected. |
 | `trends[]` | Per-metric population forecasts when pre-computed data exists: `{metric, current_value, forecast_value, direction, horizon, reliability}`. Metrics: `anomaly_rate`, `mean_delta_norm`, `entity_count`. Direction: `"rising"`, `"falling"`, `"stable"`. Uses Holt's double exponential smoothing (alpha=0.3). |
 | `temporal_quality` | (`detail="full"` only) `{signal_quality: "persistent"/"volatile"/"mixed"}` — persistence of anomaly signals across time slices |
 | `event_rate_divergence_alerts[]` | (`detail="full"`, anchor patterns only) Entities with high event anomaly rate (>15%) but below-theta static delta_norm — invisible to `find_anomalies`. Each entry: `{pattern_id, event_pattern_id, entity_key, event_anomaly_rate, delta_norm, theta_norm, alert}`. Top 20 by rate. Absent = no divergence detected. |
@@ -462,6 +463,7 @@ Finds the most anomalous polygons in a pattern, ranked by `delta_norm` descendin
 | `select` | string | `"top_norm"` | `"top_norm"` ranks by score descending. `"diverse"` applies submodular facility location to pick the K most geometrically diverse representatives — each result includes a `representativeness` count. |
 | `metric` | string | `"L2"` | `"L2"` (pre-computed delta_norm, fast), `"Linf"` (max single-dimension \|delta\|, runtime scan), or `"bregman"` (distribution-aware Bregman divergence, runtime scan). Linf catches single-dimension spikes that L2 dilutes. Bregman uses per-dimension kind-aware scoring (poisson KL for counts, bernoulli KL for binary, gaussian for continuous) — can improve ranking on mixed-type patterns. |
 | `min_confidence` | float | `0.0` | Keep only entities with `anomaly_confidence >= min_confidence` (0–1). `0.0` = no filter. Has no effect when `anomaly_confidence` is `None` (bootstrap was skipped). |
+| `dimension_weights` | dict | `null` | Optional `{dim_name: float}` mapping. Each weight multiplies the corresponding dim's contribution to the rank score before computing `delta_norm`. Missing dims default to `1.0`; explicit `0.0` silences a dim. Requires `metric` in `"L2"` or `"Linf"` (Bregman is precomputed and cannot be reweighted). Use to discount dims that fail a stratified correlation gate (NOISE → `0.0`, HEAVY-TAIL → `0.5`). Validates dim names against the pattern's labels and rejects negative / non-finite / non-numeric weights. |
 
 **Returns:** `polygons[]`, `total_found` (total above threshold), `capped_warning` when top_n was reduced.
 
@@ -1202,6 +1204,89 @@ Suggest candidate extension entities at the boundary of a chain's anomalous run.
 **Returns:** `boundary_key`, `boundary_position` (`run-start` / `run-end`), `candidates[]` (`{entity_key, is_anomaly, delta_norm, delta_rank_pct, n_source_chains, source_chain_ids}`), `summary` (`{n_candidates, n_anomalous_candidates, n_unique_keys}`). Sorting: `(is_anomaly DESC, delta_norm DESC, n_source_chains DESC)`.
 
 **Notes:** Inherits the defensive raise. Reads the full chain points table for the reverse index on each call — for repeated extension queries in one session, expect ~700 ms warm; one-shot use is sub-1.5 s on a 290 k chain pattern.
+
+---
+
+### `chain_investigation_summary`
+
+Pre-investigation triage diagnostic for a chain pattern. Use as the FIRST call when entering a sphere with a chain anchor pattern: returns population-level metrics that let the agent decide whether to commit budget to the chain-coherent investigative loop before drilling into individual chains.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `chain_pattern_id` | string | required | Chain anchor pattern id (built from `chain_lines:`) |
+| `anchor_pattern_id` | string | required | Entity anchor pattern whose `primary_keys` match the chain hops |
+| `min_hops` | int | `2` | Minimum coherent-run length (must be >= 2). Default 2 = widest net for triage; raise to focus narrative |
+| `max_runs` | int | `10000` | Cap on coherent runs read for the top-dim aggregation |
+
+**Returns:**
+- `n_chains_total` — total chains in the chain pattern
+- `n_chains_with_coherent_anomaly_run` — chains with a coherent run >= `min_hops`
+- `coherent_run_rate` — ratio of coherent chains to total
+- `n_chains_with_shape_anomaly` — chains flagged anomalous on chain-level shape features (i.e. `find_anomalies(chain_pattern)` set)
+- `shape_anomaly_rate` — ratio of shape-anomalous chains to total
+- `cross_pattern_overlap` — `{n_both, n_coherent_only, n_shape_only, jaccard}` between the coherent-run set and the shape-anomalous set (low jaccard = the two surfaces catch different signal, triangulate)
+- `top_dims_in_coherent_runs` — top 10 dim labels by run count, sorted descending
+- `run_length_distribution` — `{min, p50, p90, max, mean}` of run lengths
+- `recommended_min_hops` — heuristic threshold (75th-pct of run lengths) to focus the loop on the strongest cases when the population has long runs
+- `elapsed_ms`
+
+**Triage rules:**
+- `coherent_run_rate < 0.005` AND `cross_pattern_overlap.jaccard < 0.05` → not worth the deep R9 loop on this sphere; fall back to `find_anomalies(chain_pattern)`.
+- `coherent_run_rate > 0.05` → expect a productive R9 loop; proceed.
+- `recommended_min_hops > min_hops` → re-run `find_chains_with_coherent_anomaly` at the recommended threshold to focus on the strongest cases.
+
+**Notes:** Cost is one `find_chains_with_coherent_anomaly` sweep + a chain geometry scan — roughly the same as a single coherent-anomaly call at `max_results=10000`. Surfaces aggregates that the agent would otherwise compute manually after running the four R9 primitives separately.
+
+---
+
+### `investigate_chain`
+
+One-shot orchestrator for the full R9 investigative loop on a single chain. Runs trace → typology → shape-anomaly lookup → forward extension → backward extension server-side and returns the aggregated investigation report with a SAR-ready summary block. Use as the SECOND call after `chain_investigation_summary` triage points at a specific chain.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `chain_id` | string | required | Primary key of the chain in the chain anchor pattern |
+| `pattern_id` | string | required | Chain anchor pattern id (built from `chain_lines:`) |
+| `anchor_pattern_id` | string | required | Entity anchor pattern (e.g. `account_pattern`) |
+| `extension_max_results` | int | `20` | Cap on each extension's candidate list |
+
+**Returns:**
+- `trace` — `{ok, data}` wrapper around `anomaly_propagation_in_chain` output (per-hop progression + run summary)
+- `typology` — `{ok, data}` wrapper around `classify_chain_typology` output (five-axis tag)
+- `shape_anomaly` — `{ok, data}` with `{chain_id, is_anomaly, delta_norm, delta_rank_pct}` for the chain in the chain pattern's geometry
+- `extension_forward` — `{ok, data}` wrapper around `extend_chain(direction='forward')`
+- `extension_backward` — `{ok, data}` wrapper around `extend_chain(direction='backward')`
+- `summary` — `{investigation_strength, recommended_action, score, rationale}`. Strength buckets: `score >= 3` → `strong` → `recommended_action="escalate to SAR"`; `score == 2` → `moderate` → `continue investigation`; `score 0-1` → `weak` → `false-positive candidate`. The four 0/1 chain-composition signals: coherent run length >= 3, typology position not "no-run", forward extension surfaces an anomalous candidate, backward extension surfaces an anomalous candidate. `chain_shape_anomaly` is intentionally NOT in the score — R9's value proposition is catching what `find_anomalies(<chain_pattern>)` misses, so composition-anomalous-but-shape-normal is the textbook R9 sweet spot; the shape block stays in the report as evidence and surfaces in the rationale when it agrees, but does not drive the verdict. Rationale concatenates the firing signals as a single paragraph for paste into investigator notes.
+- `elapsed_ms`
+
+**Per-step failure handling:** each per-step block is wrapped in `{ok: True, data: ...}` or `{ok: False, error: "<ExceptionType>: <message>"}` so a partial failure (e.g. extension lookup raises because the chain has no anomalous run, or the chain_id is unknown to the geometry) does not abort the whole report. Summary derivation skips `ok=False` blocks.
+
+**Notes:** Pure orchestration — no new core logic. Saves the round-trip cost of running the four R9 primitives sequentially when the investigator already knows which chain to drill into. The granular tools (`anomaly_propagation_in_chain`, `classify_chain_typology`, `extend_chain`, `find_chains_with_coherent_anomaly`) remain available when per-step control is needed.
+
+---
+
+### `generate_sar_rationale`
+
+Template-based composition (no LLM call) of a SAR-ready narrative from R9 evidence on a single chain. Use as the LAST call in the R9 loop, after `investigate_chain` has aggregated the evidence — produces a 3-5 paragraph draft narrative that the investigator edits and signs off, instead of starting from a blank page.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `chain_id` | string | required | Primary key of the chain in the chain anchor pattern |
+| `pattern_id` | string | required | Chain anchor pattern id |
+| `anchor_pattern_id` | string | required | Entity anchor pattern (e.g. `account_pattern`) |
+| `evidence` | dict | `null` | Optional `investigate_chain` return dict. When `null`, the tool runs the R9 loop server-side first; when supplied, the dict must match the `investigate_chain` return shape (cheaper for repeated narratives on the same chain — pass the prior call's return verbatim) |
+| `regulatory_template` | string | `"FinCEN SAR"` | Free-form passthrough hint echoed in the response as `regulatory_template_hint`. Tag the narrative for downstream filing systems (`"EU AMLR Annex II"`, internal template names, etc.). Does NOT change the narrative content today |
+
+**Returns:**
+- `sar_narrative` — 3-5 paragraph string, paragraph-separated. Covers chain identification + typology, per-hop trace evidence, boundary extension candidates, chain-shape corroboration, aggregated strength + recommended action.
+- `evidence_anchors` — structured pointers per narrative claim: `typology_axes`, `per_hop_trace`, `boundary_extensions` (`forward` + `backward`), `chain_shape_anomaly`, `summary`. Each pointer is `null` when the corresponding R9 surface failed; investigator can audit the narrative against the source data.
+- `regulatory_template_hint` — echoes the input parameter.
+- `confidence` — `high` / `moderate` / `low`. `high` requires `investigation_strength="strong"` AND all 5 R9 surfaces ok; `moderate` requires `strength="moderate"` AND ≥4 surfaces ok; `low` otherwise.
+- `chain_id`, `pattern_id`, `anchor_pattern_id`, `elapsed_ms`.
+
+**Honesty discipline:** Narrative language is "evidence indicates" / "the per-hop trace shows" / "corroborating evidence" — never "confirms". The narrative is positioned as a starting draft for the investigator, NOT a final verdict. Use the `evidence_anchors` block to audit every claim against the underlying R9 data.
+
+**Notes:** No LLM call — pure template composition. Composes from the `investigate_chain` output dict, so the narrative shape is deterministic given the evidence. Investigators get a starting draft (with placeholders filled from delta percentiles, top dim labels, hop counts, candidate counts) instead of writing from a blank page.
 
 ---
 

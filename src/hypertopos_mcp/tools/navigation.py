@@ -224,6 +224,7 @@ def find_anomalies(
     select: str = "top_norm",
     metric: str = "L2",
     min_confidence: float = 0.0,
+    dimension_weights: dict | None = None,
 ) -> str:
     """Find the most anomalous polygons in a pattern, ranked by delta_norm.
 
@@ -239,6 +240,7 @@ def find_anomalies(
     p_value_method: "rank" (default, uniform by construction) or "chi2" (upper-tail chi-squared survival on ||delta||², df=dimensionality). Pair with fdr_method="storey" for power recovery; with rank, Storey collapses to BH.
     select: "top_norm" (default, rank by score) or "diverse" (submodular facility location — K most diverse representatives with representativeness counts).
     min_confidence: filter by bootstrap confidence threshold (0.0 = no filter). Requires bregman_calibration=True on the sphere.
+    dimension_weights: optional {dim_name: float} mapping to multiply each dim's contribution before computing the rank score. Default None = no weighting. Missing dims default to 1.0; explicit 0.0 silences a dim; empty {} is equivalent to None. Requires metric in ('L2', 'Linf'). Connects stratified correlation gate verdicts to runtime ranking — discount NOISE-classified dims via 0.0, down-weight HEAVY-TAIL dims via 0.5. When weights are active, only `delta_norm` on the returned polygons is the weighted rank score; `delta`, `is_anomaly`, `bregman_divergence`, and `delta_rank_pct` come from storage and reflect unweighted calibration.
     Returns: anomalous polygons with anomaly_dimensions, clusters, total_found.
     """
     _require_navigator()
@@ -287,6 +289,7 @@ def find_anomalies(
         select=select,
         metric=metric,
         min_confidence=min_confidence,
+        dimension_weights=dimension_weights,
     )
 
     serialized = [_serialize_polygon(p) for p in polygons]

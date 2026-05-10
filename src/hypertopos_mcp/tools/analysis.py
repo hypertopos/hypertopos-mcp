@@ -1220,6 +1220,9 @@ def find_chains_with_coherent_anomaly(
         min_hops=min_hops,
         max_results=max_results,
     )
+    # Strip the internal-consumer set field; not JSON-serialisable cleanly
+    # and downstream MCP callers consume the per-chain entries in chains[].
+    result["diagnostics"].pop("all_coherent_chain_ids", None)
     return json.dumps(result, indent=2, default=str)
 
 
@@ -1283,6 +1286,168 @@ def classify_chain_typology(
         chain_id,
         pattern_id,
         anchor_pattern_id=anchor_pattern_id,
+    )
+    return json.dumps(result, indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def chain_investigation_summary(
+    chain_pattern_id: str,
+    anchor_pattern_id: str,
+    min_hops: int = 2,
+    max_runs: int = 10000,
+) -> str:
+    """Pre-investigation triage summary for a chain pattern.
+
+    Returns a population-level diagnostic that lets the agent decide whether
+    to commit budget to the chain-coherent investigative loop on this sphere
+    before drilling into individual chains. Aggregates one
+    find_chains_with_coherent_anomaly sweep + a chain-pattern geometry scan
+    — the cost is what triage would pay anyway as the first step.
+
+    Use as the FIRST call when entering a sphere with chain anchor patterns:
+    - low coherent_run_rate (<0.5%) and low jaccard with shape anomalies →
+      not worth deep R9 loop, fall back to find_anomalies(chain_pattern)
+    - high coherent_run_rate (>5%) → expect productive R9 loop
+    - low jaccard between coherent and shape anomalies → the two surfaces
+      catch different signal; triangulate
+    - recommended_min_hops > min_hops → the chain population has long
+      anomalous runs; raising the threshold focuses on the strongest cases
+
+    Args:
+        chain_pattern_id: chain anchor pattern id (built from chain_lines:).
+        anchor_pattern_id: entity anchor pattern whose primary_keys match
+            the chain hops (e.g. account_pattern when chains hop accounts).
+        min_hops: minimum coherent-run length (>= 2). Default 2 = widest
+            net for triage; raise to focus narrative.
+        max_runs: cap on coherent runs read for top-dim aggregation.
+
+    Returns: chain_pattern_id, anchor_pattern_id, n_chains_total,
+    n_chains_with_coherent_anomaly_run, coherent_run_rate,
+    n_chains_with_shape_anomaly, shape_anomaly_rate,
+    cross_pattern_overlap (n_both, n_coherent_only, n_shape_only, jaccard),
+    top_dims_in_coherent_runs (top 10 by run count),
+    run_length_distribution (min, p50, p75, p90, max, mean),
+    recommended_min_hops, elapsed_ms.
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    result = nav.chain_investigation_summary(
+        chain_pattern_id,
+        anchor_pattern_id=anchor_pattern_id,
+        min_hops=min_hops,
+        max_runs=max_runs,
+    )
+    return json.dumps(result, indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def investigate_chain(
+    chain_id: str,
+    pattern_id: str,
+    anchor_pattern_id: str,
+    extension_max_results: int = 20,
+) -> str:
+    """One-shot orchestrator for the full R9 investigative loop on a single chain.
+
+    Runs trace -> typology -> shape-anomaly -> forward extension -> backward extension
+    server-side and returns the aggregated investigation report with a SAR-ready
+    summary. Each per-step output is wrapped in `{ok, data}` or `{ok=False, error}`
+    so a partial failure does not abort the whole report.
+
+    Summary derives an `investigation_strength` (`strong` / `moderate` / `weak`) from
+    four 0/1 chain-composition signals: coherent run length >= 3, typology position
+    not "no-run", forward extension surfaces an anomalous candidate, backward
+    extension surfaces an anomalous candidate. `recommended_action`: `escalate to SAR`
+    (strong, score >= 3), `continue investigation` (moderate, score 2),
+    `false-positive candidate` (weak, score 0-1). `chain_shape_anomaly` is
+    intentionally NOT in the score — R9's value proposition is catching what
+    `find_anomalies(<chain_pattern>)` misses, so composition-anomalous-but-
+    shape-normal is the textbook R9 sweet spot. The shape block stays in the
+    report as evidence and surfaces in the rationale when it agrees, but does
+    not drive the verdict. `rationale` concatenates the firing signals as a
+    single paragraph for paste into investigator notes.
+
+    Use as the SECOND call after `chain_investigation_summary` triage points you at
+    a specific chain — saves the round-trip cost of running the four R9 primitives
+    sequentially. The granular tools remain available when per-step control is needed.
+
+    Args:
+        chain_id: primary_key of the chain in the chain anchor pattern.
+        pattern_id: chain anchor pattern id (built from chain_lines:).
+        anchor_pattern_id: entity anchor pattern (e.g. account_pattern).
+        extension_max_results: cap on each extension's candidate list (default 20).
+
+    Returns: chain_id, pattern_id, anchor_pattern_id, trace, typology,
+    shape_anomaly, extension_forward, extension_backward, summary
+    (investigation_strength, recommended_action, score, rationale), elapsed_ms.
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    result = nav.investigate_chain(
+        chain_id,
+        pattern_id,
+        anchor_pattern_id=anchor_pattern_id,
+        extension_max_results=extension_max_results,
+    )
+    return json.dumps(result, indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def generate_sar_rationale(
+    chain_id: str,
+    pattern_id: str,
+    anchor_pattern_id: str,
+    evidence: dict | None = None,
+    regulatory_template: str = "FinCEN SAR",
+) -> str:
+    """Compose a SAR-ready narrative from R9 evidence on a single chain.
+
+    Template-based composition (no LLM call) over the structured per-step
+    output of `investigate_chain`. Saves the manual narrative-drafting step
+    investigators today perform after the R9 loop completes — produces a
+    3-5 paragraph draft that the investigator edits and signs off, instead
+    of starting from a blank page.
+
+    Use as the LAST call in the R9 loop, after `investigate_chain` has
+    aggregated the evidence. When `evidence` is null, runs the R9 loop
+    server-side first; when supplied, the dict must match the
+    `investigate_chain` return shape (cheaper for repeated narratives on
+    the same chain — pass the prior call's return verbatim).
+
+    Honesty discipline: language is "evidence indicates" / "the per-hop
+    trace shows" — never "confirms". The narrative is a starting point
+    for the investigator's draft, not a final verdict.
+
+    Args:
+        chain_id: primary_key of the chain in the chain anchor pattern.
+        pattern_id: chain anchor pattern id.
+        anchor_pattern_id: entity anchor pattern.
+        evidence: optional `investigate_chain` return dict. When null,
+            the tool runs the R9 loop server-side first.
+        regulatory_template: free-form string echoed in the response as
+            `regulatory_template_hint`. Default `"FinCEN SAR"`. Use to
+            tag the narrative for downstream filing systems
+            (`"EU AMLR Annex II"`, internal template names, etc.). Does
+            not change the narrative content today — passthrough hint.
+
+    Returns: chain_id, pattern_id, anchor_pattern_id, sar_narrative
+    (3-5 paragraph string, paragraph-separated), evidence_anchors
+    (structured pointers per narrative claim — null fields when the
+    corresponding R9 surface failed), regulatory_template_hint,
+    confidence (`high` / `moderate` / `low`), elapsed_ms.
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    result = nav.generate_sar_rationale(
+        chain_id,
+        pattern_id,
+        anchor_pattern_id=anchor_pattern_id,
+        evidence=evidence,
+        regulatory_template=regulatory_template,
     )
     return json.dumps(result, indent=2, default=str)
 
