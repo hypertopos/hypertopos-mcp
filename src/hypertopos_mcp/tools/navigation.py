@@ -219,12 +219,17 @@ def find_anomalies(
     rank_by_property: str | None = None,
     property_filters: dict | None = None,
     fdr_alpha: float | None = None,
-    fdr_method: str = "bh",
-    p_value_method: str = "rank",
+    fdr_method: str | None = None,
+    p_value_method: str | None = None,
+    fdr_axis: str = "entity",
+    fdr_resolution: str | None = None,
+    fdr_temporal_resolution: str | None = None,
+    rank_by: str = "delta_norm",
     select: str = "top_norm",
     metric: str = "L2",
     min_confidence: float = 0.0,
     dimension_weights: dict | None = None,
+    summary: bool = False,
 ) -> str:
     """Find the most anomalous polygons in a pattern, ranked by delta_norm.
 
@@ -236,11 +241,17 @@ def find_anomalies(
     rank_by_property: re-rank by a raw entity property instead of delta_norm.
     property_filters: filter by entity properties before ranking ({"col": {"gt": X}}).
     fdr_alpha: apply Benjamini-Hochberg FDR control at this level. Returns only entities with q_value <= alpha. Default None = legacy behavior.
-    fdr_method: "bh" (default, Benjamini-Hochberg assumes pi0=1) or "storey" (LSL estimator of true null proportion — shrinks q-values by pi0, typically recovers 10-15% more discoveries when combined with p_value_method="chi2" on spheres that have a genuine null mass).
-    p_value_method: "rank" (default, uniform by construction) or "chi2" (upper-tail chi-squared survival on ||delta||², df=dimensionality). Pair with fdr_method="storey" for power recovery; with rank, Storey collapses to BH.
+    fdr_method: "bh" (Benjamini-Hochberg assumes pi0=1) or "storey" (LSL estimator of true null proportion — shrinks q-values by pi0, typically recovers 10-15% more discoveries when combined with p_value_method="chi2" on spheres that have a genuine null mass). Default None — resolves to "bh" normally, "storey" when fdr_resolution / fdr_temporal_resolution is set on the entity axis (see fdr_resolution).
+    p_value_method: "rank" (uniform by construction) or "chi2" (upper-tail chi-squared survival on ||delta||², df=dimensionality). Pair with fdr_method="storey" for power recovery; with rank, Storey collapses to BH. Default None — resolves to "rank" normally, "chi2" when fdr_resolution / fdr_temporal_resolution is set on the entity axis (see fdr_resolution).
+    fdr_axis: "entity" (default, current behaviour — flat FDR over per-entity p-values), "per_dim" (independent BH/Storey per dim using chi²(1) univariate per-cell p-values; keep entity iff any dim's q ≤ alpha), "both" (entity-level AND ≥1 dim survives per-dim FDR). Per-dim mode reduces inflation when one dim drives many anomalies; per-polygon q_values_per_dim, min_q_per_dim, dominant_q_dim_idx attached for investigator drill-down. Warning: chi²(1) is direction-agnostic — both extreme-positive and extreme-negative deviations produce small p-values; on spheres with anti-signal dims (high |delta| correlated with non-fraud per per-dim label AUROC), per-dim mode flags both wings — combine with dimension_weights to silence anti-signal dims when labels exist.
+    fdr_resolution: optional spatial-hierarchy level name declared on the pattern's fdr_hierarchy. When set, survivors are gated to those whose cell at this level clears per-level BH/Storey FDR via hypergeom upper-tail on is_anomaly per cell. Requires fdr_alpha. Survivors gain cell_q_spatial and cell_path on the polygon entry. Use to localise anomalies to a geographic / segment region instead of a flat entity ranking. When set on the entity axis (default fdr_axis='entity'), an unspecified p_value_method (None) resolves to 'chi2' instead of 'rank' and an unspecified fdr_method (None) resolves to 'storey' instead of 'bh' — rank-based p-values are uniform-by-construction so BH rejects nothing under the resolution gate. Pass p_value_method='rank' or fdr_method='bh' explicitly to keep those values (e.g. for reproducing pre-upgrade behaviour or benchmarking the degenerate path on purpose).
+    fdr_temporal_resolution: optional temporal-hierarchy level name declared on the pattern's fdr_temporal_hierarchy. Same semantics as fdr_resolution but for the temporal axis (e.g. hour / day / week). Same sentinel-None default rules apply. Requires fdr_alpha. Survivors gain cell_q_temporal and cell_path. When both fdr_resolution and fdr_temporal_resolution are set, intersection-FDR applies — an entity survives iff its cell clears every named spatial level AND every named temporal level, and both cell_q_spatial and cell_q_temporal carry the conservative joint q (element-wise max across the cell's projections at each level).
+    rank_by: "delta_norm" (default) or "min_q_per_dim" (sort survivors by smallest per-dim q-value ascending — requires fdr_alpha and fdr_axis in {"per_dim", "both"}; incompatible with select="diverse"). Use when you want the dimension-specific significance to drive the final ranking, not the joint Euclidean norm.
     select: "top_norm" (default, rank by score) or "diverse" (submodular facility location — K most diverse representatives with representativeness counts).
     min_confidence: filter by bootstrap confidence threshold (0.0 = no filter). Requires bregman_calibration=True on the sphere.
     dimension_weights: optional {dim_name: float} mapping to multiply each dim's contribution before computing the rank score. Default None = no weighting. Missing dims default to 1.0; explicit 0.0 silences a dim; empty {} is equivalent to None. Requires metric in ('L2', 'Linf'). Connects stratified correlation gate verdicts to runtime ranking — discount NOISE-classified dims via 0.0, down-weight HEAVY-TAIL dims via 0.5. When weights are active, only `delta_norm` on the returned polygons is the weighted rank score; `delta`, `is_anomaly`, `bregman_divergence`, and `delta_rank_pct` come from storage and reflect unweighted calibration.
+    summary: when True, drops the full delta array, edges list, and enriched properties from each polygon to keep the response compact for wide patterns (>20 dims). Retains primary_key, delta_norm, is_anomaly, delta_rank_pct, bregman_divergence, q_value family, reliability_flags, and anomaly_dimensions. Call get_polygon for full per-polygon detail.
+    The edges list (when present) is filtered to actual jumpable entity edges; degenerate dim-line edges with empty point_key are omitted for response size — call get_polygon to retrieve the full edge list including dim lines.
     Returns: anomalous polygons with anomaly_dimensions, clusters, total_found.
     """
     _require_navigator()
@@ -286,6 +297,10 @@ def find_anomalies(
         fdr_alpha=fdr_alpha,
         fdr_method=fdr_method,
         p_value_method=p_value_method,
+        fdr_axis=fdr_axis,
+        fdr_resolution=fdr_resolution,
+        fdr_temporal_resolution=fdr_temporal_resolution,
+        rank_by=rank_by,
         select=select,
         metric=metric,
         min_confidence=min_confidence,
@@ -307,6 +322,20 @@ def find_anomalies(
     # lacks shape-reconstruction prerequisites.
     enriched = nav._attach_influence_fields_to_anomaly_entries(enriched, pattern_id)
 
+    # F2a — trim degenerate edges (empty point_key = dim-line edges, not jumpable).
+    # Full edges available via get_polygon. Applied even in default (non-summary) mode.
+    for ep in enriched:
+        edges = ep.get("edges")
+        if edges:
+            ep["edges"] = [e for e in edges if e.get("point_key")]
+
+    # F2b — summary mode: drop heavy fields to keep response < 30% of full payload.
+    if summary:
+        _SUMMARY_DROP = ("delta", "edges", "total_edges", "alive_edges", "properties")
+        for ep in enriched:
+            for k in _SUMMARY_DROP:
+                ep.pop(k, None)
+
     clusters = nav.classify_anomalies(polygons, pattern_id)
     result = {
         "pattern_id": pattern_id,
@@ -314,7 +343,7 @@ def find_anomalies(
         "offset": offset,
         "total_found": total_found,
         "found": len(enriched),
-        "ranked_by": rank_by_property or "delta_norm",
+        "ranked_by": rank_by_property or rank_by,
         **(pi5_meta if pi5_meta else {}),
         "polygons": enriched,
         "clusters": clusters,

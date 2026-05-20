@@ -60,10 +60,32 @@ def _serialize_polygon(poly: Any) -> dict:
     q_value = getattr(poly, "q_value", None)
     if q_value is not None:
         result["q_value"] = round(float(q_value), 6)
+    # Per-dim FDR (set by navigator when fdr_axis in {"per_dim", "both"})
+    min_q_per_dim = getattr(poly, "min_q_per_dim", None)
+    if min_q_per_dim is not None:
+        result["min_q_per_dim"] = round(float(min_q_per_dim), 6)
+        result["dominant_q_dim_idx"] = int(poly.dominant_q_dim_idx)
+        result["q_values_per_dim"] = [
+            round(float(q), 6) for q in poly.q_values_per_dim
+        ]
     # Representativeness count (set by navigator when select="diverse")
     representativeness = getattr(poly, "representativeness", None)
     if representativeness is not None:
         result["representativeness"] = int(representativeness)
+    # Multi-resolution FDR cell fields (set by navigator when cell_axis is active)
+    cell_q_spatial = getattr(poly, "cell_q_spatial", None)
+    if cell_q_spatial is not None:
+        result["cell_q_spatial"] = round(float(cell_q_spatial), 6)
+    cell_q_temporal = getattr(poly, "cell_q_temporal", None)
+    if cell_q_temporal is not None:
+        result["cell_q_temporal"] = round(float(cell_q_temporal), 6)
+    cell_path = getattr(poly, "cell_path", None)
+    if cell_path is not None:
+        result["cell_path"] = [list(pair) for pair in cell_path]
+    # Reliability flags (set by navigator on every π5_attract_anomaly call)
+    reliability_flags = getattr(poly, "reliability_flags", None)
+    if reliability_flags is not None:
+        result["reliability_flags"] = reliability_flags
     return result
 
 

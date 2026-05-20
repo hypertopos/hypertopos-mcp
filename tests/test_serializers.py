@@ -189,6 +189,23 @@ class TestSerializePolygon:
         result = _serialize_polygon(poly)
         assert "delta_rank_pct" not in result
 
+    def test_per_dim_fdr_fields_emitted_when_attached(self) -> None:
+        poly = _make_polygon()
+        poly.q_values_per_dim = [0.001234, 0.500000]
+        poly.min_q_per_dim = 0.001234
+        poly.dominant_q_dim_idx = 0
+        result = _serialize_polygon(poly)
+        assert result["min_q_per_dim"] == 0.001234
+        assert result["dominant_q_dim_idx"] == 0
+        assert result["q_values_per_dim"] == [0.001234, 0.5]
+
+    def test_per_dim_fdr_fields_absent_when_not_set(self) -> None:
+        poly = _make_polygon()
+        result = _serialize_polygon(poly)
+        assert "min_q_per_dim" not in result
+        assert "dominant_q_dim_idx" not in result
+        assert "q_values_per_dim" not in result
+
 
 class TestSerializeSlice:
     def test_basic_fields(self) -> None:
@@ -343,6 +360,37 @@ class TestSerializePosition:
         solid = _make_solid()
         result = _serialize_position(solid)
         assert result["type"] == "Solid"
+
+
+class TestSerializeCellFields:
+    """find_anomalies polygons carry cell_q_spatial / cell_q_temporal / cell_path
+    when multi-resolution FDR ran. Absent otherwise."""
+
+    def test_no_cell_fields_when_axis_inactive(self) -> None:
+        poly = _make_polygon()
+        result = _serialize_polygon(poly)
+        assert "cell_q_spatial" not in result
+        assert "cell_q_temporal" not in result
+        assert "cell_path" not in result
+
+    def test_spatial_only_fields(self) -> None:
+        poly = _make_polygon()
+        poly.cell_q_spatial = 0.01
+        poly.cell_path = (("bank", "B1"), ("quarter", "Q1"))
+        result = _serialize_polygon(poly)
+        assert result["cell_q_spatial"] == 0.01
+        assert result["cell_path"] == [["bank", "B1"], ["quarter", "Q1"]]
+        assert "cell_q_temporal" not in result
+
+    def test_intersection_all_three(self) -> None:
+        poly = _make_polygon()
+        poly.cell_q_spatial = 0.01
+        poly.cell_q_temporal = 0.02
+        poly.cell_path = (("bank", "B1"), ("quarter", "Q1"))
+        result = _serialize_polygon(poly)
+        assert result["cell_q_spatial"] == 0.01
+        assert result["cell_q_temporal"] == 0.02
+        assert result["cell_path"] == [["bank", "B1"], ["quarter", "Q1"]]
 
 
 class TestSerializePolygonAnomalyConfidence:

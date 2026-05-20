@@ -1292,6 +1292,112 @@ def classify_chain_typology(
 
 @mcp.tool(annotations={"readOnlyHint": True})
 @timed
+def chain_witness_intersection(
+    chain_id: str,
+    chain_pattern: str,
+    member_pattern: str,
+    min_jaccard: float = 0.5,
+    top_k_witness: int = 5,
+) -> str:
+    """Intersect top witness dimensions across a chain's members.
+
+    Pure composition over explain_anomaly: resolves a chain anchor's
+    member keys via chain_keys, calls explain_anomaly per unique member
+    on member_pattern, then computes intersection / union / mean
+    pairwise Jaccard of their top-k witness dimension labels. Members
+    sharing >= min_jaccard witness sets imply a coordinated anomaly
+    mechanism — a single geometric diagnosis for the structural object.
+
+    Args:
+        chain_id: chain anchor primary key.
+        chain_pattern: anchor pattern id whose points carry chain_keys.
+        member_pattern: pattern id whose explain_anomaly is called per
+            member (typically the entity anchor whose primary_keys match
+            the chain hops).
+        min_jaccard: threshold for coordinated=True. Default 0.5.
+        top_k_witness: per-member top-k witness dims to intersect.
+            Default 5.
+
+    Returns: chain_id, chain_pattern, member_pattern, n_members,
+    n_members_explained, n_members_skipped, intersected_witness_dims
+    (alphabetical), union_witness_dims (alphabetical),
+    mean_pairwise_witness_jaccard (None when every pair has empty union),
+    coordinated (bool), interpretation (str), per_member_top_dims
+    (sorted by primary_key).
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    try:
+        result = nav.chain_witness_intersection(
+            chain_id,
+            chain_pattern=chain_pattern,
+            member_pattern=member_pattern,
+            min_jaccard=min_jaccard,
+            top_k_witness=top_k_witness,
+        )
+    except (GDSNavigationError, ValueError) as exc:
+        return json.dumps({"error": str(exc), "chain_id": chain_id})
+    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def chain_drift_trajectory(
+    chain_id: str,
+    chain_pattern: str,
+    member_pattern: str,
+    n_windows: int = 4,
+) -> str:
+    """Per-position member delta_norm trajectory over n_windows time slices.
+
+    For each unique member of chain_id (resolved via chain_keys on the
+    chain_pattern's points table), reads the member's temporal history
+    via build_solid on member_pattern, stride-samples the slices into
+    n_windows contiguous buckets (tail remainder dropped), computes
+    each window's mean delta_norm, fits a least-squares slope, and
+    labels per-member regime as normalizing / deteriorating / neutral
+    using 0.05 * member_pattern.theta_norm as the cutoff. Regime
+    vocabulary matches attract_drift's drift_direction. Sign
+    convention: positive slope means delta_norm grows over time
+    (drifting AWAY from null = deteriorating).
+
+    Members with insufficient slices (< n_windows) are soft-skipped
+    into n_members_short_history, members whose build_solid raises
+    are counted as n_members_skipped. Both surface as gaps in the
+    per_position_trajectory ordering (positions preserve original
+    deduped chain index).
+
+    Args:
+        chain_id: chain anchor primary key.
+        chain_pattern: anchor pattern id whose points carry chain_keys.
+        member_pattern: pattern id whose temporal history is consumed
+            per member.
+        n_windows: number of time slices per member. Default 4. Must
+            be >= 2.
+
+    Returns: chain_id, chain_pattern, member_pattern, n_members,
+    n_members_with_history, n_members_skipped, n_members_short_history,
+    n_windows, per_position_trajectory (list of {position, member_key,
+    delta_norms_over_time, slope, regime}), chain_level_regime
+    (neutral / normalizing / deteriorating / mixed), chain_drift_score
+    (None when no finite signal).
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    try:
+        result = nav.chain_drift_trajectory(
+            chain_id,
+            chain_pattern=chain_pattern,
+            member_pattern=member_pattern,
+            n_windows=n_windows,
+        )
+    except (GDSNavigationError, ValueError) as exc:
+        return json.dumps({"error": str(exc), "chain_id": chain_id})
+    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
 def chain_investigation_summary(
     chain_pattern_id: str,
     anchor_pattern_id: str,
@@ -1617,6 +1723,325 @@ def find_novel_entities(
 
 @mcp.tool(annotations={"readOnlyHint": True})
 @timed
+def find_topological_anomalies(
+    pattern_id: str,
+    top_n: int = 20,
+    force: bool = False,
+    sample_size: int = 50000,
+    k_neighbors: int = 50,
+    pca_dim: int = 10,
+) -> str:
+    """Rank entities by local persistent-homology H_1 cycle persistence.
+
+    Surfaces entities whose k-NN neighborhood carries a cycle signature that
+    population-level delta_norm ranking misses (orthogonal to standard anomaly).
+    Per-pattern-version sidecar Lance cache keeps warm calls cheap; pass
+    force=true to recompute.
+
+    Requires n_entities >= 1000 in the loaded sample; warns below 10_000.
+    Output sorted by topo_score descending. Fields: primary_key, topo_score,
+    h1_max_persistence, h0_mean_death, n_h1_features, computed_at.
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    try:
+        result = nav.find_topological_anomalies(
+            pattern_id,
+            top_n=top_n,
+            force=force,
+            sample_size=sample_size,
+            k_neighbors=k_neighbors,
+            pca_dim=pca_dim,
+        )
+    except GDSNavigationError as exc:
+        return json.dumps({"error": str(exc), "pattern_id": pattern_id})
+    except ValueError as exc:
+        return json.dumps({
+            "error": str(exc),
+            "pattern_id": pattern_id,
+            "hint": "PH requires n_entities >= 1000 in the scored sample",
+        })
+    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def investigate_entity(
+    primary_key: str,
+    pattern_id: str,
+    line_id: str,
+    chain_pattern_id: str | None = None,
+    include_polygon: bool = True,
+    include_explain: bool = True,
+    include_witness_cohort: bool = True,
+    include_chains: bool = True,
+    include_root_cause: bool = True,
+    include_graph_geometry_tension: bool = True,
+    include_per_edge_counterfactual: bool = False,
+    top_n_witnesses: int = 5,
+    top_n_chains: int = 3,
+    top_n_edges: int = 5,
+) -> str:
+    """One-call entity investigation orchestrator.
+
+    Chains entity-side primitives (polygon shape, explain_anomaly, witness
+    cohort, chain membership, root-cause trace, graph-geometry tension cross-tab)
+    into one aggregated report. Each step is safe-wrapped — partial failure on
+    one primitive does not abort the call; the response surfaces the failure
+    via `steps_status[step].ok = False`.
+
+    Entity-side analog of `investigate_chain` (0.6.7). Returns a structured
+    dict per step plus `steps_status` and `elapsed_ms`.
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    try:
+        result = nav.investigate_entity(
+            primary_key,
+            pattern_id=pattern_id,
+            line_id=line_id,
+            chain_pattern_id=chain_pattern_id,
+            include_polygon=include_polygon,
+            include_explain=include_explain,
+            include_witness_cohort=include_witness_cohort,
+            include_chains=include_chains,
+            include_root_cause=include_root_cause,
+            include_graph_geometry_tension=include_graph_geometry_tension,
+            include_per_edge_counterfactual=include_per_edge_counterfactual,
+            top_n_witnesses=top_n_witnesses,
+            top_n_chains=top_n_chains,
+            top_n_edges=top_n_edges,
+        )
+    except GDSNavigationError as exc:
+        return json.dumps({"error": str(exc), "primary_key": primary_key})
+    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def simulate_edge_removal(
+    primary_key: str,
+    pattern_id: str,
+    line_id: str,
+    top_n: int = 5,
+    edge_ids: list[str] | None = None,
+) -> str:
+    """Per-edge counterfactual: rank an entity's edges by their contribution
+    to its delta_norm.
+
+    For each candidate edge in the entity's adjacency, simulate removal and
+    report the new delta_norm, the percent drop, and the dominant dim that
+    changed. Sorted by |drop_pct| descending.
+
+    Covers two dim classes: `relations` (closed-form count-based math) and
+    `edge_dim_aggregations` (aggregation rescan across mean / max / std /
+    p95). The `count_above_threshold` aggregation requires a population-level
+    threshold lookup and is held constant — reported in `dimensions_skipped`.
+    `event_dimensions` and `prop_columns` are unchanged-by-design (no
+    per-edge contribution by construction).
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    try:
+        result = nav.simulate_edge_removal(
+            primary_key,
+            pattern_id=pattern_id,
+            line_id=line_id,
+            top_n=top_n,
+            edge_ids=edge_ids,
+        )
+    except GDSNavigationError as exc:
+        return json.dumps({"error": str(exc), "primary_key": primary_key})
+    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def simulate_dimension_change(
+    primary_key: str,
+    pattern_id: str,
+    line_id: str,
+    set_dimension: dict[str, float],
+    top_n: int = 5,
+) -> str:
+    """What-if dimension override: re-compute delta_norm under a hypothetical
+    raw shape-vector value for one or more dimensions on a given entity.
+
+    `set_dimension` keys are dim_labels (as listed in pattern.dim_labels); values
+    are raw shape-vector units (post-edge-normalisation for relations dims, raw
+    aggregation output for edge_dim_aggregations dims). Call explain_anomaly
+    first to identify candidate dim_labels.
+
+    Use to answer questions like "would this account still be anomalous if its
+    sum_out were at the population mean?" — the counterpart to simulate_edge_removal
+    for non-edge dimensions. Pure recomputation over the stored polygon — no
+    storage scan, sub-millisecond per call.
+
+    Args:
+        primary_key: entity id whose polygon to perturb.
+        pattern_id: pattern owning the entity.
+        line_id: kept for signature parity with simulate_edge_removal; not consumed.
+        set_dimension: {dim_label: new_value} — raw shape-vector units.
+        top_n: per-call cap on top_witness_dims_after entries. Default 5.
+
+    Returns: primary_key, pattern_id, set_dimension (echo), delta_norm_before,
+    delta_norm_after, delta_norm_pct_change (may be null when before is 0),
+    is_anomaly_before, is_anomaly_after, is_anomaly_change, top_witness_dims_after
+    (list of {dim_label, dim_index, contribution_pct, delta}), dimensions_overridden
+    (list of {dim_label, dim_index, old_value, new_value, old_delta, new_delta}).
+    Invalid input returned as {"error": ..., "primary_key": ...} JSON.
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    try:
+        result = nav.simulate_dimension_change(
+            primary_key,
+            pattern_id=pattern_id,
+            line_id=line_id,
+            set_dimension=set_dimension,
+            top_n=top_n,
+        )
+    except (GDSNavigationError, ValueError) as exc:
+        return json.dumps({"error": str(exc), "primary_key": primary_key})
+    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def select_minimal_joint_edge_removal(
+    primary_key: str,
+    pattern_id: str,
+    line_id: str,
+    target_drop_pct: float = 50.0,
+    k_max: int = 10,
+    max_candidates: int = 500,
+) -> str:
+    """Greedy joint counterfactual: find the smallest set of edges whose
+    joint removal drops the entity's delta_norm by at least
+    target_drop_pct percent.
+
+    Reveals coordinated edge groups (AML laundering rings, structuring
+    motifs) that single-edge counterfactuals cannot detect — when a
+    pattern's contribution is non-decomposable across individual edges,
+    per-edge drop_pct stays near zero while joint removal of the
+    coordinated set produces large drops.
+
+    ``max_candidates`` caps the number of candidate edges examined by
+    the greedy search (default 500). Hub entities with thousands of
+    edges otherwise push per-call latency past several minutes. When
+    truncated, the result carries ``candidates_truncated=true`` plus
+    ``n_candidates_seen`` and ``n_candidates_used``.
+
+    Returns: ``{primary_key, selected_edge_ids, selected_partner_keys,
+    achieved_drop_pct, selection_sequence, target_reached, k_max_reached,
+    delta_norm_before, candidates_truncated, n_candidates_seen,
+    n_candidates_used}``. ``selection_sequence`` is a per-step record
+    with picked edge id + cumulative joint_drop_pct, so the investigator
+    sees the order in which edges were added.
+
+    Cost: greedy is ``O(k_max × n_candidates_used)`` engine evaluations.
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    try:
+        result = nav.select_minimal_joint_edge_removal(
+            primary_key,
+            pattern_id=pattern_id,
+            line_id=line_id,
+            target_drop_pct=target_drop_pct,
+            k_max=k_max,
+            max_candidates=max_candidates,
+        )
+    except GDSNavigationError as exc:
+        return json.dumps({"error": str(exc), "primary_key": primary_key})
+    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def simulate_counterparty_removal(
+    primary_key: str,
+    pattern_id: str,
+    line_id: str,
+    top_n: int = 5,
+    edge_top_n: int | None = 500,
+) -> str:
+    """Per-counterparty rollup of per-edge counterfactual contributions.
+
+    AML / fraud analysts think per-counterparty, not per-transaction. This
+    tool runs the per-edge counterfactual over the entity's adjacency
+    (capped at ``edge_top_n`` edges), then groups by counterparty
+    (``edge_partner_key``) and ranks partners by collective anomaly
+    contribution.
+
+    Returns a ranked list with one entry per counterparty:
+    ``partner_key``, ``n_edges``, ``sum_drop_pct``, ``sum_abs_drop_pct``,
+    ``max_abs_drop_pct``, ``dominant_dim_label``, ``edge_ids``. Sorted by
+    ``sum_abs_drop_pct`` descending.
+
+    ``edge_top_n`` defaults to 500 — the per-edge counterfactual scans the
+    entity's full adjacency to find the top-N contributors, so values >> 500
+    on hub entities (>1 k counterparties) push per-call latency past several
+    minutes. Pass an explicit higher value when exhaustive coverage on a
+    specific hub is required and you can budget the wall clock.
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    try:
+        result = nav.simulate_counterparty_removal(
+            primary_key,
+            pattern_id=pattern_id,
+            line_id=line_id,
+            top_n=top_n,
+            edge_top_n=edge_top_n,
+        )
+    except GDSNavigationError as exc:
+        return json.dumps({"error": str(exc), "primary_key": primary_key})
+    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def find_graph_geometry_tension(
+    primary_key: str,
+    pattern_id: str,
+    line_id: str,
+    k_geometric: int = 20,
+    top_n_hidden: int = 5,
+    top_n_suspicious: int = 5,
+) -> str:
+    """Cross-tabulate behavioural k-NN with graph adjacency for one entity.
+
+    Surfaces two cells of the 2×2 contingency table that scalar anomaly
+    detectors cannot separate:
+    - hidden_cluster: entities behaviourally similar but with NO edge — the
+      "lookalike fraud cohort never seen together" signature.
+    - suspicious_links: entities with an edge but behaviourally distant —
+      "transacts outside its peer group".
+
+    Returns: {primary_key, hidden_cluster, suspicious_links, tension_score}
+    where tension_score = (|hidden_cluster| + |suspicious_links|) / k_geometric.
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    try:
+        result = nav.find_graph_geometry_tension(
+            primary_key,
+            pattern_id=pattern_id,
+            line_id=line_id,
+            k_geometric=k_geometric,
+            top_n_hidden=top_n_hidden,
+            top_n_suspicious=top_n_suspicious,
+        )
+    except GDSNavigationError as exc:
+        return json.dumps({"error": str(exc), "primary_key": primary_key})
+    except (KeyError, ValueError) as exc:
+        return json.dumps({"error": str(exc), "primary_key": primary_key})
+    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
 def contrast_populations(
     pattern_id: str,
     group_a: dict,
@@ -1777,21 +2202,48 @@ def hub_history(primary_key: str, pattern_id: str) -> str:
 @timed
 def get_centroid_map(
     pattern_id: str,
-    group_by_line: str,
+    group_by_line: str | None = None,
     group_by_property: str | None = None,
     include_distances: bool = True,
     top_n_distances: int | None = 20,
     sample_size: int | None = None,
     sample_pct: float | None = None,
+    max_groups: int = 100,
 ) -> str:
     """Compute centroids (mean delta vectors) for entity groups within a pattern.
 
     group_by_line: line whose edges define groups. group_by_property: "line_id:property_name" for property-level grouping.
+    At least one of group_by_line or group_by_property must be provided. When only group_by_property is supplied,
+    the line is derived from its "line_id:" prefix.
     include_distances: include inter-centroid pairwise distances (default true). top_n_distances: limit pairs (default 20).
     sample_size/sample_pct: subsample for large patterns (>100K entities).
+    max_groups: hard cap on returned ``group_centroids`` (default 100). Truncated by member count
+        descending; the ``structural_outlier`` from the full grouping is always retained even when
+        outside the top-N. When truncated, ``groups_truncated_warning`` reports the dropped count and
+        the agent should retry with a lower-cardinality grouping property.
     Returns: global centroid, per-group centroids with radius/spread/count/centroid_drift, structural outlier.
     """
     _require_navigator()
+    if group_by_line is None and group_by_property is None:
+        return json.dumps(
+            {
+                "error": "either group_by_line or group_by_property must be provided",
+                "pattern_id": pattern_id,
+            }
+        )
+    if group_by_line is None and group_by_property is not None:
+        if ":" not in group_by_property:
+            return json.dumps(
+                {
+                    "error": (
+                        "group_by_property must be formatted as 'line_id:property_name' "
+                        "when group_by_line is omitted"
+                    ),
+                    "pattern_id": pattern_id,
+                    "group_by_property": group_by_property,
+                }
+            )
+        group_by_line = group_by_property.split(":", 1)[0]
     _effective_sample = sample_size
     if sample_pct is not None and _effective_sample is None:
         sphere = _state["sphere"]._sphere
@@ -1856,6 +2308,33 @@ def get_centroid_map(
                 "error": "No geometry or no entities with edges to group_by_line.",
             }
         )
+
+    # Hard cap on group_centroids — high-cardinality groupings (e.g. bank_id with
+    # tens of thousands of unique values) blow the per-tool token cap. Keep the
+    # top-N by count plus the structural outlier (which can sit outside top-N).
+    all_groups = result.get("group_centroids", []) or []
+    n_total_groups = len(all_groups)
+    if n_total_groups > max_groups:
+        outlier_key = (result.get("structural_outlier") or {}).get("key")
+        sorted_groups = sorted(
+            all_groups,
+            key=lambda g: int(g.get("count", 0) or 0),
+            reverse=True,
+        )
+        kept = sorted_groups[:max_groups]
+        kept_keys = {g["key"] for g in kept}
+        if outlier_key and outlier_key not in kept_keys:
+            kept = kept[:max_groups - 1] + [
+                g for g in all_groups if g["key"] == outlier_key
+            ]
+        result["group_centroids"] = kept
+        result["groups_truncated_warning"] = (
+            f"group cardinality {n_total_groups} exceeded max_groups={max_groups} — "
+            f"returned top {len(kept)} by member count (plus structural outlier). "
+            "Re-run with a lower-cardinality grouping property or raise max_groups."
+        )
+        result["n_groups_total"] = n_total_groups
+        result["n_groups_returned"] = len(kept)
 
     # Enrich group keys with human-readable properties
     reader = _state["session"]._reader
@@ -2049,11 +2528,13 @@ def find_clusters(
     n_clusters: int = 5,
     top_n: int = 10,
     sample_size: int | None = None,
+    summary: bool = False,
 ) -> str:
     """Discover intrinsic geometric archetypes via k-means++ clustering in delta-space.
 
     n_clusters: number of clusters (default 5). Set 0 for automatic k detection (slower).
     sample_size: recommended for >100K entities. Hard bound: n_clusters x top_n <= 100 members.
+    summary: when True, drops the per-cluster centroid_delta vector, dim_profile, and member-property dicts to keep the response compact for wide patterns (>20 dims). Retains cluster_id, size, anomaly_rate, delta_norm_mean/std, representative_key, and member keys. Call get_polygon on a representative_key for full geometric detail.
     Returns: clusters sorted by size desc, each with centroid, dim_profile, anomaly_rate, members.
     """
     _require_navigator()
@@ -2135,6 +2616,15 @@ def find_clusters(
                 f"exceeded {_MAX_CLUSTER_TOTAL_MEMBERS}. Truncated to {post_cap} "
                 "members per cluster to avoid token overflow."
             )
+
+    # F2b — summary mode: drop heavy fields (per-cluster delta vector, dim_profile,
+    # per-member property dicts) to keep response compact for wide patterns.
+    if summary:
+        for c in enriched_clusters:
+            c.pop("centroid_delta", None)
+            c.pop("dim_profile", None)
+            c.pop("representative_properties", None)
+            c["members"] = [{"key": m["key"]} for m in c.get("members", [])]
 
     _response: dict = {
         "pattern_id": pattern_id,
@@ -2453,14 +2943,17 @@ def composite_risk(
     primary_key: str,
     line_id: str | None = None,
 ) -> str:
-    """Composite anomaly risk via Fisher's method on conformal p-values across all patterns.
+    """Composite anomaly risk via Wilson harmonic-mean p-value on conformal p-values across all patterns.
 
-    Returns: combined_p (low = multi-pattern anomaly), per-pattern p-values.
+    HMP is robust to positive dependence between patterns (multiple patterns
+    firing on the same entity), which Fisher's method incorrectly assumed independent.
+
+    Returns: combined_p (low = multi-pattern anomaly), n_patterns, per_pattern{}.
     """
     _require_navigator()
     nav = _state["navigator"]
     result = nav.composite_risk(primary_key, line_id)
-    return json.dumps(result, indent=2)
+    return json.dumps(_sanitize_for_json(result), indent=2)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -2469,14 +2962,147 @@ def composite_risk_batch(
     primary_keys: list[str],
     line_id: str | None = None,
 ) -> str:
-    """Batch composite risk (Fisher's method) for multiple entities. Hard cap 200 keys.
+    """Batch composite risk (harmonic-mean p-value) for multiple entities. Hard cap 200 keys.
 
     Returns: per-key combined_p and summary counts.
     """
     _require_navigator()
     nav = _state["navigator"]
     result = nav.composite_risk_batch(primary_keys, line_id)
-    return json.dumps(result, indent=2)
+    return json.dumps(_sanitize_for_json(result), indent=2)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def combine_anomaly_pvalues(
+    pattern_id: str,
+    detectors: list[str] | None = None,
+    weights: dict[str, float] | None = None,
+    sample_size: int | None = 10_000,
+    top_n: int = 50,
+) -> str:
+    """Multi-detector anomaly consensus via Wilson harmonic-mean p-value.
+
+    Calibrates each enabled detector to a per-entity p-value and combines
+    them via harmonic-mean p (Wilson 2019), robust under positive dependence
+    between detectors. Returns the ranked list ascending by HMP.
+
+    Available detectors:
+
+    * ``delta_norm`` — population-relative geometry deviation (always available)
+    * ``neighbor_contamination`` — graph-neighbour anomaly density
+    * ``segment_shift`` — categorical-segment anomaly rate shift (Fisher exact)
+    * ``trajectory_continuous`` — DTW distance vs population-median trajectory
+    * ``density_gap`` — local density-gap detector (currently aggregate-only;
+      contributes no per-entity p-value because findings describe missing
+      population, not per-entity attribution)
+
+    Detectors that fail to produce a p-value for a given entity (no temporal
+    solid for ``trajectory_continuous``, no string columns for
+    ``segment_shift``, structurally aggregate ``density_gap``) are silently
+    skipped per entity — HMP is computed across the detectors that did fire.
+
+    Args:
+        pattern_id: Pattern to score.
+        detectors: Subset of detector names to include. ``None`` enables all
+            five (the navigator default).
+        weights: Per-detector weight; defaults to uniform across detectors
+            that produced a p-value for the given entity.
+        sample_size: Cap on geometry rows used per detector. Default 10_000.
+        top_n: Maximum entries returned in the ranked list. Default 50.
+
+    Returns:
+        List of ``{primary_key, hmp, p_per_detector, rank}`` ascending by
+        ``hmp``. ``p_per_detector`` only contains detectors that produced a
+        valid p-value for the entity.
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    kwargs: dict[str, Any] = {
+        "sample_size": sample_size,
+        "top_n": top_n,
+    }
+    if detectors is not None:
+        kwargs["detectors"] = tuple(detectors)
+    if weights is not None:
+        kwargs["weights"] = weights
+    try:
+        result = nav.combine_anomaly_pvalues(pattern_id, **kwargs)
+    except GDSNavigationError as exc:
+        return json.dumps({"error": str(exc)}, indent=2)
+    return json.dumps(_sanitize_for_json(result), indent=2)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def classify_detector_consensus(
+    pattern_id: str,
+    detectors: list[str] | None = None,
+    sample_size: int | None = 10_000,
+    top_n: int = 50,
+    anomaly_threshold: float = 0.01,
+    normal_threshold: float = 0.5,
+) -> str:
+    """Categorical multi-detector consensus typology — investigator-actionable
+    alternative to the scalar HMP ranking from ``combine_anomaly_pvalues``.
+
+    Where ``combine_anomaly_pvalues`` collapses per-detector evidence to a single
+    HMP score, this surfaces the *pattern of agreement* between detectors as a
+    categorical label. Two detectors firing in opposite directions ("anomalous
+    globally but normal in segment") reveals something the combined HMP score
+    hides.
+
+    Each detector's per-entity p-value is thresholded at ``anomaly_threshold``
+    (default 0.05) — ``p < threshold`` flags "anomalous", ``p >= threshold``
+    flags "normal". Per-entity classification:
+
+    * ``mixed_signal`` — at least one detector flags anomaly AND at least one
+      flags normal. **Most actionable**: this is the hidden-mule /
+      legitimate-but-extreme surface where detectors disagree on the same entity.
+    * ``anomalous_consensus`` — at least two detectors agree on anomaly, no
+      detector disagrees. Clear investigation target.
+    * ``single_detector_signal`` — exactly one detector fires (in either
+      direction). Needs corroboration before acting.
+    * ``normal_consensus`` — at least two detectors agree on normal. Deprioritise.
+    * ``insufficient_data`` — zero detectors fire on this entity.
+
+    Sort priority: ``mixed_signal`` > ``anomalous_consensus`` >
+    ``single_detector_signal`` > ``normal_consensus`` > ``insufficient_data``.
+    Within each class, entries are sorted by HMP ascending so the most-anomalous
+    mixed signals surface first.
+
+    Args:
+        pattern_id: Pattern to score.
+        detectors: Subset of detector names to include. ``None`` enables all
+            five (matches ``combine_anomaly_pvalues`` default).
+        sample_size: Cap on geometry rows scored. Default 10_000.
+        top_n: Maximum entries returned. Default 50.
+        anomaly_threshold: lower band edge. ``p < anomaly_threshold`` flags
+            clear anomaly. Default 0.01.
+        normal_threshold: upper band edge. ``p > normal_threshold`` flags clear
+            normal. Default 0.5. Must be > anomaly_threshold.
+
+    Returns:
+        Ranked list of ``{primary_key, classification, anomalous_detectors,
+        normal_detectors, n_detectors_fired, hmp, p_per_detector, rank}``.
+        ``rank`` is position in the returned list (priority + HMP combined),
+        not raw HMP rank.
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    kwargs: dict[str, Any] = {
+        "sample_size": sample_size,
+        "top_n": top_n,
+        "anomaly_threshold": anomaly_threshold,
+        "normal_threshold": normal_threshold,
+    }
+    if detectors is not None:
+        kwargs["detectors"] = tuple(detectors)
+    try:
+        result = nav.classify_detector_consensus(pattern_id, **kwargs)
+    except GDSNavigationError as exc:
+        return json.dumps({"error": str(exc)}, indent=2)
+    return json.dumps(_sanitize_for_json(result), indent=2)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -2554,6 +3180,120 @@ def explain_anomaly(
     nav = _state["navigator"]
     result = nav.explain_anomaly(primary_key, pattern_id)
     return json.dumps(result, indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def find_diverse_explanations(
+    primary_key: str,
+    pattern_id: str,
+    n_hypotheses: int = 3,
+    min_contribution_pct: float = 0.10,
+    validate: bool = False,
+) -> str:
+    """K diverse hypotheses for why an entity is anomalous.
+
+    Hypotheses are strict disjoint — each dim appears in at most one
+    hypothesis. The greedy adds dims to a hypothesis until joint
+    contribution meets `min_contribution_pct`, then moves to the next.
+    When remaining mass can't meet the floor, fewer hypotheses are
+    emitted with `degraded_reason="insufficient_diverse_mass"` — the
+    correct semantic for single-dim-driven entities (no alternative
+    diverse explanation exists).
+
+    Use after `explain_anomaly` to broaden investigation paths when the
+    single ranking is not enough — e.g. when
+    `reliability_flags.single_dim_driven` is True and you want to know
+    "what else is going on" beyond the dominant dim. `validate=True`
+    opt-in: each hypothesis is confirmed by overriding its dims to their
+    population mean via `simulate_dimension_change` and checking whether
+    `delta_norm` drops below `theta_norm`.
+
+    Args:
+        primary_key: entity id to explain.
+        pattern_id: pattern the entity belongs to.
+        n_hypotheses: requested K diverse hypotheses. Default 3.
+        min_contribution_pct: per-hypothesis joint share floor
+            (0.0-1.0). Hypotheses below this floor are dropped, which
+            drives the graceful degradation. Default 0.10.
+        validate: when True, each hypothesis is validated by
+            `simulate_dimension_change` (override dims to mu, check
+            delta_norm_after < theta_norm). Default False.
+
+    Returns: `{primary_key, pattern_id, delta_norm, theta_norm,
+    n_hypotheses_requested, n_hypotheses_returned, hypotheses (list of
+    {hypothesis_id, dim_labels, joint_contribution_pct, narrative,
+    validation?}), diversity_score (float or null), degraded_reason
+    (str or null)}`. `diversity_score` is the mean pairwise
+    `(1 - Jaccard)` over hypothesis dim sets; null when fewer than two
+    hypotheses are returned (no pair to compare). Invalid input returned
+    as `{"error": ..., "primary_key": ...}` JSON.
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    try:
+        result = nav.find_diverse_explanations(
+            primary_key,
+            pattern_id=pattern_id,
+            n_hypotheses=n_hypotheses,
+            min_contribution_pct=min_contribution_pct,
+            validate=validate,
+        )
+    except (GDSNavigationError, ValueError) as exc:
+        return json.dumps({"error": str(exc), "primary_key": primary_key})
+    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def find_conformance_violations(
+    pattern_id: str,
+    rule_id: str | None = None,
+    severity_min: str = "low",
+    top_n: int = 100,
+) -> str:
+    """Find entities violating declarative compliance rules.
+
+    Reads the sidecar Lance dataset persisted by the builder when
+    `conformance_rules:` is declared on the pattern in sphere.yaml.
+    The rules are evaluated at build time vectorized through PyArrow
+    expressions; this tool is a read-only Lance scan with filter
+    pushdown — sub-second on real spheres.
+
+    Use to surface entities that broke human-authored expectations.
+    Conformance violations may or may not also be delta_norm anomalies
+    — the two surfaces are independent. Combine via investigate_entity
+    on top violators to drill into the geometric anomaly that may
+    accompany the rule break.
+
+    Returns {"error": ..., "pattern_id": ...} JSON when the
+    pattern_id is unknown.
+
+    Args:
+        pattern_id: pattern declaring the conformance_rules.
+        rule_id: filter to a single rule_id; null returns all rules.
+        severity_min: filter to rules at this severity or higher;
+            ranks are "low" < "medium" < "high" < "critical".
+        top_n: cap on returned violations. Default 100.
+
+    Returns: {pattern_id, n_violations, violations (list of
+    {primary_key, rule_id, severity}), rules_evaluated, manifest
+    (with rule_set_hash + evaluated_at + n_rules), warnings (e.g.
+    rule_set_hash_mismatch if the sidecar was built against a
+    different ruleset), follow_up}.
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    try:
+        result = nav.find_conformance_violations(
+            pattern_id,
+            rule_id=rule_id,
+            severity_min=severity_min,
+            top_n=top_n,
+        )
+    except (GDSNavigationError, ValueError) as exc:
+        return json.dumps({"error": str(exc), "pattern_id": pattern_id})
+    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})

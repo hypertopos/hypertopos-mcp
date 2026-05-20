@@ -6,6 +6,54 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-05-18
+
+Non-finite floats (`±inf`, `NaN`) on new tools sanitised to `null` on the wire per the strict-JSON convention.
+
+### Added
+
+#### Sphere format 3.0 + detector composition refresh (breaking)
+- Sphere format bumped 2.4 → 3.0 (breaking). `open_sphere` rejects 2.4 spheres with a structured error pointing to the rebuild path; no MCP tool surface, parameter, or return-shape changes.
+- `composite_risk` and `composite_risk_batch` now combine cross-pattern p-values via the Wilson harmonic-mean p-value (HMP); `combined_p`, `n_patterns`, `per_pattern{}` retained, `chi2` and `df` removed.
+
+#### Entity-side investigation orchestrator + counterfactual suite
+- `investigate_entity(primary_key, pattern_id, line_id, chain_pattern_id=null, include_polygon=true, include_explain=true, include_witness_cohort=true, include_chains=true, include_root_cause=true, include_graph_geometry_tension=true, include_per_edge_counterfactual=false, top_n_witnesses=5, top_n_chains=3, top_n_edges=5)` — one-call entity investigation orchestrator returning per-step blocks plus `steps_status`; tier `base`.
+- `simulate_edge_removal(primary_key, pattern_id, line_id, top_n=5, edge_ids=null)` — per-edge counterfactual ranking returning `(edge_id, delta_norm_before, delta_norm_after, drop_pct, dominant_dim_label, source_value_pvalues, min_pvalue, dominant_significance_dim, dimensions_skipped)`; tier `edge`.
+- `simulate_counterparty_removal(primary_key, pattern_id, line_id, top_n=5, edge_top_n=null)` — per-counterparty rollup returning `{partner_key, n_edges, sum_drop_pct, sum_abs_drop_pct, max_abs_drop_pct, dominant_dim_label, edge_ids}` sorted by `sum_abs_drop_pct`; tier `edge`.
+- `select_minimal_joint_edge_removal(primary_key, pattern_id, line_id, target_drop_pct=50.0, k_max=10)` — greedy joint counterfactual returning `{selected_edge_ids, selected_partner_keys, achieved_drop_pct, selection_sequence, target_reached, k_max_reached}`; tier `edge`.
+- `simulate_dimension_change(primary_key, pattern_id, line_id, set_dimension, top_n=5)` — what-if dimension override reporting `delta_norm_before/after`, anomaly flip, top witness dims, audit trail; tier `edge`.
+
+#### Detector composition + multi-hypothesis explanation
+- `combine_anomaly_pvalues(pattern_id, detectors=null, weights=null, sample_size=10000, top_n=50)` — multi-detector anomaly consensus across `delta_norm`, `neighbor_contamination`, `segment_shift`, `trajectory_continuous`, and `density_gap` (skipped silently); returns ranked `{primary_key, hmp, p_per_detector, rank}`; tier `multi_pattern`.
+- `classify_detector_consensus(pattern_id, detectors=null, sample_size=10000, top_n=50, anomaly_threshold=0.01, normal_threshold=0.5)` — categorical detector-agreement typology returning `{primary_key, classification, anomalous_detectors, normal_detectors, borderline_detectors, n_detectors_fired, hmp, p_per_detector, rank}`; tier `multi_pattern`.
+- `find_diverse_explanations(primary_key, pattern_id, n_hypotheses=3, min_contribution_pct=0.10, validate=False)` — K diverse disjoint hypotheses for an anomaly returning `hypotheses`, `diversity_score`, `degraded_reason`; tier `base`.
+
+#### FDR upgrades + reliability triage + sphere-validation
+- `find_anomalies` gains `fdr_resolution: str | null` and `fdr_temporal_resolution: str | null`; survivors carry `cell_q_spatial`, `cell_q_temporal`, `cell_path` when the corresponding axis ran. When a resolution is set, unspecified `p_value_method` defaults to `"chi2"` and unspecified `fdr_method` defaults to `"storey"`.
+- `find_anomalies` gains `fdr_axis: "entity" | "per_dim" | "both"` and `rank_by: "delta_norm" | "min_q_per_dim"`; per-dim mode attaches `min_q_per_dim`, `q_values_per_dim`, `dominant_q_dim_idx` to each survivor.
+- `reliability_flags` field surfaced on `find_anomalies`, `explain_anomaly`, `composite_risk`, `combine_anomaly_pvalues`, and `investigate_entity`; shape `{single_dim_driven, dominant_dim, dominant_dim_share, low_confidence_bucket, confidence, flags}`.
+- `sphere_overview` per-pattern `dim_quality_warnings` gains `dominant_dim_mass` and `negative_space` auditor types alongside the existing `dead_dim` and `sparse_dim`.
+
+#### Chain extensions + graph-geometry + persistent-homology + declarative compliance
+- `chain_witness_intersection(chain_id, chain_pattern, member_pattern, min_jaccard=0.5, top_k_witness=5)` — coordinated-witness diagnosis returning `intersected_witness_dims`, `union_witness_dims`, `mean_pairwise_witness_jaccard`, `coordinated`, `interpretation`; tier `base`.
+- `chain_drift_trajectory(chain_id, chain_pattern, member_pattern, n_windows=4)` — per-member regime + chain-level drift returning `per_position_trajectory`, `chain_level_regime`, `chain_drift_score`; tier `base`.
+- `find_graph_geometry_tension(primary_key, pattern_id, line_id, k_geometric=20, top_n_hidden=5, top_n_suspicious=5)` — behavioural k-NN vs graph adjacency cross-tab returning `hidden_cluster`, `suspicious_links`, `tension_score`; tier `edge`.
+- `find_topological_anomalies(pattern_id, top_n=20, force=false, sample_size=50000, k_neighbors=50, pca_dim=10)` — rank entities by local persistent-homology H_1 cycle persistence returning `primary_key`, `topo_score`, `h1_max_persistence`, `h0_mean_death`, `n_h1_features`, `computed_at`; tier `base`.
+- `find_conformance_violations(pattern_id, rule_id=null, severity_min="low", top_n=100)` — read-only query over declarative-rule violations returning `{pattern_id, n_violations, violations, rules_evaluated, manifest, warnings, follow_up}`; tier `base`.
+
+### Changed
+
+#### Stress-test follow-up hardening
+- `simulate_counterparty_removal` default for `edge_top_n` is now 500 (was unbounded). Hub entities with thousands of counterparties no longer push per-call latency past several minutes by default; pass an explicit larger value when exhaustive coverage on a known hub is required.
+- `select_minimal_joint_edge_removal` accepts a new `max_candidates` parameter (default 500) that caps the greedy search input before the joint-removal loop. Response carries `n_candidates_seen`, `n_candidates_used`, and `candidates_truncated`.
+- `get_centroid_map` accepts a new `max_groups` parameter (default 100) capping the returned `group_centroids` list by member count descending. The `structural_outlier` is always preserved even when outside the top-N. Truncation surfaces `groups_truncated_warning`, `n_groups_total`, and `n_groups_returned`.
+- `score_edge` / `score_motif` / `anomalous_edges` error message for "entity not found in pattern geometry" now identifies the pattern type and the expected key shape, and points the agent at `search_entities` for valid keys.
+
+### Fixed
+- `find_hubs` and `hub_history` no longer crash with a numpy broadcast error on anchor patterns whose geometry dim count exceeds the relation count (the underlying navigator paths slice the shape matrix to `len(pattern.edge_max)` before the per-relation multiply). The `line_id_filter` agent-side workaround is no longer required.
+- `classify_detector_consensus` ranking is deterministic on the HMP-saturation case (per-detector p-values collapsed at the float floor) — `delta_norm` from the underlying combiner's reliability flags is used as a final tiebreaker.
+- `find_high_potential_motifs` and `score_motif` reject event `pattern_id` early with a clear error pointing at the anchor companion. Calling these with an event pattern previously burned the full enumeration cost and returned an empty list.
+
 ## [0.6.7] — 2026-05-10
 
 ### Added

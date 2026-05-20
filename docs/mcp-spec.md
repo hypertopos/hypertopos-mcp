@@ -30,8 +30,8 @@ Gateway tools (tier: `gateway`):
 - `detect_pattern` — smart meta-tool: LLM plans + executes detection server-side
 - `sphere_overview` — population overview, anomaly rates, health checks
 
-Edge table tools (tier: `edge`, 13 tools):
-- `find_geometric_path`, `discover_chains`, `edge_stats`, `entity_flow`, `contagion_score`, `contagion_score_batch`, `degree_velocity`, `investigation_coverage`, `propagate_influence`, `cluster_bridges`, `anomalous_edges`, `find_witness_cohort`, `find_novel_entities`
+Edge table tools (tier: `edge`, 18 tools):
+- `find_geometric_path`, `discover_chains`, `edge_stats`, `entity_flow`, `contagion_score`, `contagion_score_batch`, `degree_velocity`, `investigation_coverage`, `propagate_influence`, `cluster_bridges`, `anomalous_edges`, `find_witness_cohort`, `find_novel_entities`, `find_graph_geometry_tension`, `simulate_edge_removal`, `simulate_dimension_change`, `simulate_counterparty_removal`, `select_minimal_joint_edge_removal`
 
 The agent faces a simple binary choice: use `detect_pattern` for automatic detection,
 or call `sphere_overview` to enter manual exploration mode.
@@ -43,9 +43,9 @@ unlocking the full manual toolset based on the sphere's capabilities:
 
 | Capability | Condition | Tools added |
 |------------|-----------|-------------|
-| **base** | Always after sphere_overview | 49 tools: navigation, geometry, basic analysis |
+| **base** | Always after sphere_overview | 63 tools: navigation, geometry, basic analysis |
 | **temporal** | `temporal/` directory exists for any anchor pattern | dive_solid, get_solid, hub_history, find_drifting_entities, compare_time_windows, find_regime_changes |
-| **multi_pattern** | 2+ patterns cover same entity (any key type: direct, sibling, event_edge, composite, chain) | cross_pattern_profile, passive_scan, composite_risk, composite_risk_batch, detect_cross_pattern_discrepancy |
+| **multi_pattern** | 2+ patterns cover same entity (any key type: direct, sibling, event_edge, composite, chain) | cross_pattern_profile, passive_scan, composite_risk, composite_risk_batch, detect_cross_pattern_discrepancy, combine_anomaly_pvalues, classify_detector_consensus |
 | **trajectory_index** | Trajectory ANN index exists in `_gds_meta/trajectory/` | find_drifting_similar, detect_trajectory_anomaly |
 
 ### Lifecycle
@@ -53,14 +53,14 @@ unlocking the full manual toolset based on the sphere's capabilities:
 ```
 Server start → Phase 1 (3 tools: always)
     ↓
-open_sphere(path) → Phase 2 (18 tools: always + gateway + edge)
+open_sphere(path) → Phase 2 (23 tools: always + gateway + edge)
     ↓
   ├─ detect_pattern(query) → smart mode (no extra tools)
-  └─ sphere_overview()     → Phase 3 (67-80 tools: full manual mode)
+  └─ sphere_overview()     → Phase 3 (91-101 tools: full manual mode)
     ↓
 close_sphere() → Phase 1 (3 tools)
     ↓
-open_sphere(other_path) → Phase 2 (18 tools, different sphere)
+open_sphere(other_path) → Phase 2 (23 tools, different sphere)
 ```
 
 ### open_sphere response
@@ -87,7 +87,7 @@ After `open_sphere`, two operation modes are available via the gateway (Phase 2)
 | Mode | Entry point | Tools visible | Tokens/turn | When to use |
 |------|-------------|--------------|-------------|-------------|
 | **Smart** | `detect_pattern` | 1 meta-tool (no Phase 3 unlock) | ~400 tk | Agent describes intent in natural language; server plans steps via MCP sampling, executes internally, filters + interprets results |
-| **Manual** | `sphere_overview` | 55-68 (unlocked in Phase 3) | ~6-8k tk | Debugging, exploration, custom investigation sequences, follow-up on smart mode findings |
+| **Manual** | `sphere_overview` | 66-88 (unlocked in Phase 3) | ~6-8k tk | Debugging, exploration, custom investigation sequences, follow-up on smart mode findings |
 
 Modes are **not exclusive** — an agent can use `detect_pattern` for overview, then call
 `sphere_overview` to unlock granular tools for drill-down.
@@ -215,11 +215,11 @@ doesn't support elicitation (`hasattr(ctx, "elicit")` + `try/except`).
 | Phase | Tools visible | Estimated token cost |
 |-------|:------------:|---------------------|
 | Phase 1 — before open_sphere | 3 | ~200 tk |
-| Phase 2 — after open_sphere | 18 | ~850 tk |
-| Phase 3 — full sphere (all capabilities) | ~68 | ~7k tk (filtered + trimmed docstrings) |
-| Phase 3 — simple sphere (base only) | ~55 | ~5k tk |
+| Phase 2 — after open_sphere | 23 | ~850 tk |
+| Phase 3 — full sphere (all capabilities) | ~101 | ~7k tk (filtered + trimmed docstrings) |
+| Phase 3 — simple sphere (base only) | ~67 | ~5k tk |
 
-Without 3-phase loading, all 68 tool schemas would be in context from the start (~22k tk).
+Without 3-phase loading, all 101 tool schemas would be in context from the start (~22k tk).
 
 ## Adding New Tools
 

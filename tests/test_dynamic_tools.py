@@ -36,6 +36,10 @@ _EDGE = {
     "contagion_score", "contagion_score_batch", "degree_velocity",
     "investigation_coverage", "propagate_influence", "cluster_bridges",
     "anomalous_edges", "find_witness_cohort", "find_novel_entities",
+    "find_graph_geometry_tension", "simulate_edge_removal",
+    "simulate_dimension_change",
+    "simulate_counterparty_removal",
+    "select_minimal_joint_edge_removal",
 }
 
 
