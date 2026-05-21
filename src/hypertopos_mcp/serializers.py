@@ -86,6 +86,28 @@ def _serialize_polygon(poly: Any) -> dict:
     reliability_flags = getattr(poly, "reliability_flags", None)
     if reliability_flags is not None:
         result["reliability_flags"] = reliability_flags
+    # Signed-confidence triad (set by navigator when
+    # rank_by="signed_confidence"). Sanitises ±inf/NaN to null per the
+    # strict-JSON convention.
+    signed_confidence_score = getattr(poly, "signed_confidence_score", None)
+    if signed_confidence_score is not None:
+        import math as _math
+        result["signed_confidence_score"] = (
+            None if not _math.isfinite(float(signed_confidence_score))
+            else round(float(signed_confidence_score), 6)
+        )
+        lda_alignment = getattr(poly, "lda_alignment", None)
+        if lda_alignment is not None:
+            result["lda_alignment"] = (
+                None if not _math.isfinite(float(lda_alignment))
+                else round(float(lda_alignment), 6)
+            )
+        reliability_penalty = getattr(poly, "reliability_penalty", None)
+        if reliability_penalty is not None:
+            result["reliability_penalty"] = (
+                None if not _math.isfinite(float(reliability_penalty))
+                else round(float(reliability_penalty), 6)
+            )
     return result
 
 
@@ -103,6 +125,13 @@ def _serialize_slice(sl: Any, pattern: Any | None = None) -> dict:
         result["prop_column_states"] = sl.prop_column_states(pattern)
     else:
         result["delta_snapshot"] = [round(float(x), 4) for x in sl.delta_snapshot]
+    frozen = getattr(sl, "delta_norm_frozen_pop", None)
+    if frozen is not None:
+        import math as _math
+        result["delta_norm_frozen_pop"] = (
+            None if not _math.isfinite(float(frozen))
+            else round(float(frozen), 4)
+        )
     return result
 
 

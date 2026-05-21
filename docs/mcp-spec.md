@@ -43,7 +43,7 @@ unlocking the full manual toolset based on the sphere's capabilities:
 
 | Capability | Condition | Tools added |
 |------------|-----------|-------------|
-| **base** | Always after sphere_overview | 64 tools: navigation, geometry, basic analysis |
+| **base** | Always after sphere_overview | 66 tools: navigation, geometry, basic analysis |
 | **temporal** | `temporal/` directory exists for any anchor pattern | dive_solid, get_solid, hub_history, find_drifting_entities, compare_time_windows, find_regime_changes |
 | **multi_pattern** | 2+ patterns cover same entity (any key type: direct, sibling, event_edge, composite, chain) | cross_pattern_profile, passive_scan, composite_risk, composite_risk_batch, detect_cross_pattern_discrepancy, combine_anomaly_pvalues, classify_detector_consensus |
 | **trajectory_index** | Trajectory ANN index exists in `_gds_meta/trajectory/` | find_drifting_similar, detect_trajectory_anomaly |
@@ -56,7 +56,7 @@ Server start → Phase 1 (3 tools: always)
 open_sphere(path) → Phase 2 (23 tools: always + gateway + edge)
     ↓
   ├─ detect_pattern(query) → smart mode (no extra tools)
-  └─ sphere_overview()     → Phase 3 (87-102 tools: full manual mode)
+  └─ sphere_overview()     → Phase 3 (89-104 tools: full manual mode)
     ↓
 close_sphere() → Phase 1 (3 tools)
     ↓
@@ -208,7 +208,7 @@ doesn't support elicitation (`hasattr(ctx, "elicit")` + `try/except`).
 | **Progress** | `ctx.report_progress(i, total)` during step execution | Silently skip |
 | **Logging** | `ctx.info(step_name)` for structured diagnostics | No-op |
 | **Instructions** | `FastMCP(instructions=...)` — mentions `detect_pattern` as entry point | N/A |
-| **Tool Annotations** | `readOnlyHint=True` on 64 read-only tools | Host assumes worst case |
+| **Tool Annotations** | `readOnlyHint=True` on 66 read-only tools | Host assumes worst case |
 
 ## Token Cost per Phase
 
@@ -216,10 +216,10 @@ doesn't support elicitation (`hasattr(ctx, "elicit")` + `try/except`).
 |-------|:------------:|---------------------|
 | Phase 1 — before open_sphere | 3 | ~200 tk |
 | Phase 2 — after open_sphere | 23 | ~850 tk |
-| Phase 3 — full sphere (all capabilities) | ~102 | ~7k tk (filtered + trimmed docstrings) |
-| Phase 3 — simple sphere (base only) | ~87 | ~5k tk |
+| Phase 3 — full sphere (all capabilities) | ~104 | ~7k tk (filtered + trimmed docstrings) |
+| Phase 3 — simple sphere (base only) | ~89 | ~5k tk |
 
-Without 3-phase loading, all 102 tool schemas would be in context from the start (~22k tk).
+Without 3-phase loading, all 104 tool schemas would be in context from the start (~22k tk).
 
 ## Adding New Tools
 

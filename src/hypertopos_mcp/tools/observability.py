@@ -364,6 +364,13 @@ def audit_pattern_dims(pattern_id: str, top_k: int = 10) -> str:
 
     Decision tree (applied in order, first match wins):
 
+    - ``dimension_kinds[dim] == 'gaussian' AND |direction_component| < 0.05``
+      ``AND cohens_d_pos_neg >= 0.3`` → ``"kind_mismatch_review"`` — the
+      raw per-class moments separate but the Fisher LDA direction
+      assigns near-zero weight to this dim, meaning the dim's variance
+      is captured by another dim's axis. Re-declaring kind (bernoulli /
+      poisson) or splitting the dim is the right remediation. Highest
+      priority — preempts every other branch when the criteria fire.
     - ``cohens_d_pos_neg < 0.1`` → ``"drop_low_separation"`` — pos/neg
       classes overlap too much for the dim to separate them.
     - ``cohens_d_pos_neg >= 0.1 AND |direction_component| < 0.05`` →
@@ -438,6 +445,11 @@ def audit_pattern_dims(pattern_id: str, top_k: int = 10) -> str:
     mu_vec = np.asarray(pattern.mu, dtype=float)
     sigma_vec = np.asarray(pattern.sigma_diag, dtype=float)
     n_dims = len(dim_labels)
+    # ``dimension_kinds`` is positional vs ``dim_labels`` (same storage
+    # layout). Absent on legacy patterns built before the kind tag landed
+    # — fall back to ``None`` per slot in that case so the decision tree
+    # silently bypasses the ``kind_mismatch_review`` branch.
+    dim_kinds = getattr(pattern, "dimension_kinds", None)
 
     # ``label_aware_calibration`` is set by the builder hook on patterns
     # listed in the sphere.yaml ``label_audit:`` block. Expected shape:
@@ -508,8 +520,20 @@ def audit_pattern_dims(pattern_id: str, top_k: int = 10) -> str:
 
         sigma_i = float(sigma_vec[i]) if i < len(sigma_vec) else 0.0
         max_class_sigma = max(sigma_pos, sigma_neg)
+        kind_i = (
+            dim_kinds[i] if dim_kinds is not None and i < len(dim_kinds)
+            else None
+        )
 
-        if cohens_d < 0.1:
+        if (
+            kind_i == "gaussian"
+            and abs(direction) < 0.05
+            and cohens_d >= 0.3
+        ):
+            # Kind-tag mismatch — raw moments separate but the Fisher
+            # axis ignores this dim. Re-declare kind or split.
+            action = "kind_mismatch_review"
+        elif cohens_d < 0.1:
             action = "drop_low_separation"
         elif abs(direction) < 0.05:
             action = "investigate_drift"
@@ -550,4 +574,89 @@ def audit_pattern_dims(pattern_id: str, top_k: int = 10) -> str:
         "n_dims_returned": len(rows),
         "dims": rows,
     }
+    return json.dumps(_sanitize_for_json(result), indent=2)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def audit_label_alignment(pattern_id: str, top_n: int = 10) -> str:
+    """Fisher LDA direction alignment audit — AUROC against labelled classes.
+
+    Sibling to ``audit_pattern_dims``: where ``audit_pattern_dims`` describes
+    the per-dim moments and Fisher axis components, this tool answers the
+    orthogonal question — "does the projection of polygons onto that axis
+    actually separate the two labelled classes?" — by computing AUROC of
+    the ``delta_norm_signed`` Lance column against the binary label
+    declared in ``sphere.yaml``'s ``label_audit:`` block.
+
+    Returns ``{pattern_id, auroc, n_pos, n_neg, top_dims,
+    label_aware_available, elapsed_ms}`` where ``top_dims`` carries the
+    ``top_n`` most label-discriminating dims sorted by
+    ``|direction_component|`` desc, each row reporting ``{dim_label,
+    direction_component, abs_direction, cohens_d_pos_neg}``.
+
+    Fallback shape (``auroc: null``, ``label_aware_available: False``,
+    ``reason``) is returned when:
+
+    - the pattern was built without a ``label_audit:`` block, or
+    - the sphere lacks a top-level ``label_audit`` block, or
+    - the geometry's ``delta_norm_signed`` column is fully null, or
+    - the joined sample has zero positives or zero negatives.
+
+    Tier: ``base`` (manual-mode diagnostic).
+
+    Example invocation::
+
+        audit_label_alignment(pattern_id="account_pattern", top_n=5)
+
+    Example response (full-field path, abbreviated)::
+
+        {
+          "pattern_id": "account_pattern",
+          "auroc": 0.94,
+          "n_pos": 1820,
+          "n_neg": 18430,
+          "top_dims": [
+            {
+              "dim_label": "risk_score",
+              "direction_component": 0.62,
+              "abs_direction": 0.62,
+              "cohens_d_pos_neg": 3.42
+            }
+          ],
+          "label_aware_available": true,
+          "elapsed_ms": 18.4
+        }
+    """
+    _require_navigator()
+    if top_n < 1:
+        return json.dumps(
+            {
+                "error": "top_n must be >= 1",
+                "pattern_id": pattern_id,
+                "top_n": top_n,
+            },
+            indent=2,
+        )
+    sphere = _state["sphere"]._sphere
+    if sphere.patterns.get(pattern_id) is None:
+        return json.dumps(
+            {
+                "error": f"unknown pattern_id '{pattern_id}'",
+                "pattern_id": pattern_id,
+            },
+            indent=2,
+        )
+    try:
+        result = _state["navigator"].audit_label_alignment(
+            pattern_id, top_n=top_n,
+        )
+    except (KeyError, ValueError) as exc:
+        return json.dumps(
+            {
+                "error": str(exc),
+                "pattern_id": pattern_id,
+            },
+            indent=2,
+        )
     return json.dumps(_sanitize_for_json(result), indent=2)

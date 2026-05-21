@@ -124,10 +124,22 @@ def jump_polygon(target_line_id: str, edge_index: int = 0) -> str:
 
 @mcp.tool(annotations={"readOnlyHint": True})
 @timed
-def dive_solid(primary_key: str, pattern_id: str, timestamp: str | None = None) -> str:
+def dive_solid(
+    primary_key: str,
+    pattern_id: str,
+    timestamp: str | None = None,
+    counterfactual_frozen_population: bool = False,
+) -> str:
     """Dive into the temporal history of an entity as a Solid.
 
     timestamp: optional ISO-8601 cutoff — only slices at or before this time.
+    counterfactual_frozen_population: when True, every returned slice gains an
+        additional ``delta_norm_frozen_pop`` field — the per-slice L2 norm
+        recomputed against the FIRST slice's raw shape as the entity-relative
+        reference. Answers "is this entity moving, or is the population
+        drifting around a stationary entity?" — a stationary entity yields
+        ``delta_norm_frozen_pop = 0`` across all slices. Default ``False``
+        keeps the existing response shape.
     Returns: base polygon, temporal slices, reputation, and forecast (if >=3 slices).
     """
     _require_navigator()
@@ -138,7 +150,12 @@ def dive_solid(primary_key: str, pattern_id: str, timestamp: str | None = None) 
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=UTC)
     dive = nav.π3_dive_solid
-    dive(primary_key, pattern_id, timestamp=ts)
+    dive(
+        primary_key,
+        pattern_id,
+        timestamp=ts,
+        counterfactual_frozen_population=counterfactual_frozen_population,
+    )
     solid = nav.position
     reader = _state["session"]._reader
     sphere = _state["sphere"]._sphere
@@ -246,7 +263,7 @@ def find_anomalies(
     fdr_axis: "entity" (default, current behaviour — flat FDR over per-entity p-values), "per_dim" (independent BH/Storey per dim using chi²(1) univariate per-cell p-values; keep entity iff any dim's q ≤ alpha), "both" (entity-level AND ≥1 dim survives per-dim FDR). Per-dim mode reduces inflation when one dim drives many anomalies; per-polygon q_values_per_dim, min_q_per_dim, dominant_q_dim_idx attached for investigator drill-down. Warning: chi²(1) is direction-agnostic — both extreme-positive and extreme-negative deviations produce small p-values; on spheres with anti-signal dims (high |delta| correlated with non-fraud per per-dim label AUROC), per-dim mode flags both wings — combine with dimension_weights to silence anti-signal dims when labels exist.
     fdr_resolution: optional spatial-hierarchy level name declared on the pattern's fdr_hierarchy. When set, survivors are gated to those whose cell at this level clears per-level BH/Storey FDR via hypergeom upper-tail on is_anomaly per cell. Requires fdr_alpha. Survivors gain cell_q_spatial and cell_path on the polygon entry. Use to localise anomalies to a geographic / segment region instead of a flat entity ranking. When set on the entity axis (default fdr_axis='entity'), an unspecified p_value_method (None) resolves to 'chi2' instead of 'rank' and an unspecified fdr_method (None) resolves to 'storey' instead of 'bh' — rank-based p-values are uniform-by-construction so BH rejects nothing under the resolution gate. Pass p_value_method='rank' or fdr_method='bh' explicitly to keep those values (e.g. for reproducing pre-upgrade behaviour or benchmarking the degenerate path on purpose).
     fdr_temporal_resolution: optional temporal-hierarchy level name declared on the pattern's fdr_temporal_hierarchy. Same semantics as fdr_resolution but for the temporal axis (e.g. hour / day / week). Same sentinel-None default rules apply. Requires fdr_alpha. Survivors gain cell_q_temporal and cell_path. When both fdr_resolution and fdr_temporal_resolution are set, intersection-FDR applies — an entity survives iff its cell clears every named spatial level AND every named temporal level, and both cell_q_spatial and cell_q_temporal carry the conservative joint q (element-wise max across the cell's projections at each level).
-    rank_by: "delta_norm" (default) or "min_q_per_dim" (sort survivors by smallest per-dim q-value ascending — requires fdr_alpha and fdr_axis in {"per_dim", "both"}; incompatible with select="diverse"). Use when you want the dimension-specific significance to drive the final ranking, not the joint Euclidean norm.
+    rank_by: "delta_norm" (default), "min_q_per_dim" (sort survivors by smallest per-dim q-value ascending — requires fdr_alpha and fdr_axis in {"per_dim", "both"}; incompatible with select="diverse"), or "signed_confidence" (sort by delta_norm_signed × |lda_alignment| × (1 - reliability_penalty) descending where lda_alignment = (delta / ||delta||) · direction projects onto the Fisher LDA axis and reliability_penalty = 0.5 · single_dim_driven + 0.5 · low_confidence_bucket — requires a pattern rebuilt with sphere.yaml label_audit: enabled, fails with a structured error otherwise; incompatible with select="diverse"). Use signed_confidence to fuse delta_norm_signed, LDA direction alignment, and reliability_flags into one confidence-weighted ranking when labels are available.
     select: "top_norm" (default, rank by score) or "diverse" (submodular facility location — K most diverse representatives with representativeness counts).
     min_confidence: filter by bootstrap confidence threshold (0.0 = no filter). Requires bregman_calibration=True on the sphere.
     dimension_weights: optional {dim_name: float} mapping to multiply each dim's contribution before computing the rank score. Default None = no weighting. Missing dims default to 1.0; explicit 0.0 silences a dim; empty {} is equivalent to None. Requires metric in ('L2', 'Linf'). Connects stratified correlation gate verdicts to runtime ranking — discount NOISE-classified dims via 0.0, down-weight HEAVY-TAIL dims via 0.5. When weights are active, only `delta_norm` on the returned polygons is the weighted rank score; `delta`, `is_anomaly`, `bregman_divergence`, and `delta_rank_pct` come from storage and reflect unweighted calibration.

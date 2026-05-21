@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.2] — 2026-05-21
+
+### Added
+
+- `audit_label_alignment(pattern_id, top_n=10)` — Fisher LDA direction alignment audit. Reports `auroc` (label-discrimination power of `delta_norm_signed` against the binary label declared in `sphere.yaml`'s `label_audit:` block), `n_pos` / `n_neg` (class population sizes), and the `top_n` most label-discriminating dims by `|direction_component|`. Sibling to `audit_pattern_dims`. Returns fallback shape with `auroc: null` on patterns without label-aware calibration.
+- `chain_full_loop_summary(chain_id, chain_pattern_id, anchor_pattern_id, *, include_extension=True, include_drift=True, include_witness=True, include_sar_rationale=False, top_n_extensions=3)` — chain-side investigation orchestrator. Mirror of `investigate_entity` (entity-side). Composes `find_chains_with_coherent_anomaly`, `chain_witness_intersection`, `chain_drift_trajectory`, `classify_chain_typology`, `extend_chain` (forward + backward), `investigate_chain`, and optionally `generate_sar_rationale` into one MCP call with per-step `{ok, error}` envelopes. Top-level `summary` block reports `investigation_strength` ∈ {strong, moderate, weak}, `recommended_action` ∈ {escalate to SAR, continue investigation, false-positive candidate}, derived score, and a one-sentence rationale citing the load-bearing steps.
+
+### Changed
+
+- `find_anomalies` `rank_by` literal extended with `"signed_confidence"` — fuses `delta_norm_signed`, Fisher LDA direction alignment, and `reliability_flags` into one ranking: `score = delta_norm_signed × |lda_alignment| × (1 − reliability_penalty)`. Each surviving polygon carries `signed_confidence_score`, `lda_alignment`, `reliability_penalty`. Activates on patterns rebuilt with `label_audit:`-declared sphere.yaml. Fail-fast on patterns lacking label-aware calibration (structured `GDSNavigationError`, no silent fallback).
+- `audit_pattern_dims` `recommended_action` field gains new categorical value `"kind_mismatch_review"`. Fires per dim when `|direction_component| < 0.05` AND `cohens_d_pos_neg >= 0.3` on a gaussian-declared dim — the dim has raw separation but zero Fisher weight, suggesting confounding with another dim. Highest priority in the decision tree (preempts `keep` / `split` / `drop_low_separation` / `investigate_drift`).
+- `extract_chains` MCP tool gains an optional `anchor_pattern_id` parameter and a new per-chain `edge_potentials` field — Euclidean distance per consecutive-pair hop between endpoint delta vectors against the supplied anchor pattern. When `anchor_pattern_id` is null the field is a list of nulls per hop. Strict-JSON sanitised: `null` on missing polygon, mismatched delta shapes, or non-finite distance.
+- `dive_solid` MCP tool accepts `counterfactual_frozen_population: bool = False` — passes through to the navigator. When `True`, every returned slice gains a `delta_norm_frozen_pop` field reporting the per-slice L2 norm against the FIRST slice's raw shape as the entity-relative reference. Default `False` keeps the existing response shape.
+- README adds CI test workflow badge linking to the public-mirror Actions run.
+
 ## [0.7.1] — 2026-05-20
 
 ### Added

@@ -2671,13 +2671,18 @@ def extract_chains(
     max_chains: int = 100_000,
     seed_nodes: list[str] | None = None,
     bidirectional: bool = False,
+    anchor_pattern_id: str | None = None,
 ) -> str:
     """Extract transaction chains by following from_col->to_col links within a time window.
 
     from_col/to_col: source/destination entity key columns. category_col/amount_col: optional per-hop tracking.
     seed_nodes: restrict to specific starting entities. bidirectional: treat edges as undirected.
     max_chains: global cap (default 100K). sample_size: limit starting nodes for large datasets.
-    Returns: chains with hop_count, is_cyclic, keys, amount_decay. Sorted by sort_by.
+    anchor_pattern_id: optional anchor pattern over the entity line referenced by from_col/to_col.
+    When supplied, each chain carries a per-hop ``edge_potentials`` list — Euclidean distance
+    between consecutive entities' polygon delta vectors against that anchor pattern. When None,
+    ``edge_potentials`` is a list of nulls per hop. Strict-JSON sanitised (NaN / inf -> null).
+    Returns: chains with hop_count, is_cyclic, keys, amount_decay, edge_potentials. Sorted by sort_by.
     """
     _require_navigator()
     nav = _state["navigator"]
@@ -2767,8 +2772,41 @@ def extract_chains(
     elif sort_by == "amount_decay":
         chains.sort(key=lambda c: c.amount_decay)
 
+    # Pre-fetch delta vectors once across all unique keys in the top_n
+    # chains when an anchor pattern was supplied. Single batch read keeps
+    # this O(unique_keys) rather than O(hops * chains).
+    delta_by_key: dict[str, "np.ndarray"] | None = None
+    if anchor_pattern_id is not None and chains:
+        import numpy as np
+        if anchor_pattern_id not in sphere.patterns:
+            return json.dumps({
+                "error": (
+                    f"anchor_pattern_id='{anchor_pattern_id}' not found. "
+                    f"Available patterns: {sorted(sphere.patterns)}"
+                ),
+            })
+        unique_keys: set[str] = set()
+        for c in chains[:top_n]:
+            unique_keys.update(c.keys)
+        anchor_version = nav._resolve_version(anchor_pattern_id)
+        geo = reader.read_geometry(
+            anchor_pattern_id,
+            anchor_version,
+            point_keys=list(unique_keys),
+            columns=["primary_key", "delta"],
+        )
+        pks_col = geo["primary_key"].to_pylist()
+        delta_col = geo["delta"].to_pylist()
+        delta_by_key = {
+            pk: np.asarray(d, dtype=np.float32)
+            for pk, d in zip(pks_col, delta_col)
+            if pk is not None and d is not None
+        }
+
     # Convert to dicts and truncate
-    result_chains = [c.to_dict() for c in chains[:top_n]]
+    result_chains = [
+        c.to_dict(delta_by_key=delta_by_key) for c in chains[:top_n]
+    ]
 
     resp = {
         "event_pattern_id": event_pattern_id,
@@ -3676,3 +3714,348 @@ def find_high_potential_motifs(
     if capped_warning:
         output["capped_warning"] = capped_warning
     return json.dumps(_sanitize_for_json(output), indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def chain_full_loop_summary(
+    chain_id: str,
+    chain_pattern_id: str,
+    anchor_pattern_id: str,
+    *,
+    include_extension: bool = True,
+    include_drift: bool = True,
+    include_witness: bool = True,
+    include_sar_rationale: bool = False,
+    top_n_extensions: int = 3,
+) -> str:
+    """Chain-side investigation orchestrator — chain-side mirror of investigate_entity.
+
+    Aggregates the seven chain-side primitives into a single MCP call with
+    per-step ``{ok, data | error}`` envelopes so partial failure on one step
+    does not abort the others. The orchestration sequence is:
+
+      1. ``find_chains_with_coherent_anomaly`` — coherence-set membership
+         check (informational; chain not in set is NOT a precondition)
+      2. ``chain_witness_intersection`` — coordinated-anomaly mechanism
+         (gated on ``include_witness``)
+      3. ``chain_drift_trajectory`` — per-position temporal regime
+         (gated on ``include_drift``)
+      4. ``classify_chain_typology`` — five-axis operational tag (always)
+      5. ``extend_chain`` forward + backward — boundary candidates
+         (gated on ``include_extension``; combined into one ``{forward,
+         backward}`` block)
+      6. ``investigate_chain`` — the existing R9 loop, kept for backwards
+         compatibility (always); intentionally redundant with steps 4-5
+         when both gates are on
+      7. ``generate_sar_rationale`` — narrative draft
+         (gated on ``include_sar_rationale``; default False, expensive)
+
+    ``summary`` derives investigation strength from how many steps fired
+    successfully + per-step substance signals (coherent-set membership,
+    coordinated witness, non-trivial drift slope, non-default typology,
+    cyclic / multi-bank / anomalous R9 findings, extension candidate
+    count, SAR step success). Score in ``[0, 100]``; ``strong`` at
+    ``>= 70``, ``moderate`` at ``>= 40``, ``weak`` below 40 — mapped to
+    ``escalate to SAR`` / ``continue investigation`` /
+    ``false-positive candidate`` recommended actions.
+
+    Args:
+        chain_id: chain anchor primary key.
+        chain_pattern_id: chain anchor pattern id (built from chain_lines:).
+        anchor_pattern_id: entity anchor pattern whose primary_keys match
+            the chain hops (e.g. account_pattern).
+        include_extension: run forward+backward extend_chain. Default True.
+        include_drift: run chain_drift_trajectory. Default True.
+        include_witness: run chain_witness_intersection. Default True.
+        include_sar_rationale: run generate_sar_rationale. Default False
+            (expensive — runs the R9 loop server-side a second time).
+        top_n_extensions: ``max_results`` per direction for extend_chain.
+            Default 3.
+
+    Returns: chain_id, chain_pattern_id, anchor_pattern_id, one ``{ok,
+    data | error}`` block per step (``{ok: True, skipped: True}`` shape
+    when the step is gated off), summary (investigation_strength,
+    recommended_action, score, rationale), elapsed_ms.
+    """
+    import dataclasses as _dc
+    import time as _time
+
+    _require_navigator()
+    nav = _state["navigator"]
+    t0 = _time.perf_counter()
+
+    def _safe(fn):
+        try:
+            data = fn()
+            if _dc.is_dataclass(data) and not isinstance(data, type):
+                data = _dc.asdict(data)
+            return {"ok": True, "data": data}
+        except (GDSNavigationError, ValueError, KeyError, AttributeError,
+                NotImplementedError, RuntimeError) as exc:
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    _skipped = {"ok": True, "skipped": True}
+
+    # Step 1 — coherence-set membership (informational, never aborts)
+    def _coherent_lookup() -> dict[str, Any]:
+        full = nav.find_chains_with_coherent_anomaly(
+            chain_pattern_id, anchor_pattern_id=anchor_pattern_id,
+        )
+        match = next(
+            (c for c in full.get("chains", [])
+             if c.get("chain_id") == chain_id),
+            None,
+        )
+        if match is None:
+            return {
+                "in_coherent_set": False,
+                "note": "chain not in coherent-anomaly set",
+            }
+        return {"in_coherent_set": True, "entry": match}
+    coherent_block = _safe(_coherent_lookup)
+
+    # Step 2 — witness intersection
+    if include_witness:
+        witness_block = _safe(lambda: nav.chain_witness_intersection(
+            chain_id,
+            chain_pattern=chain_pattern_id,
+            member_pattern=anchor_pattern_id,
+        ))
+    else:
+        witness_block = _skipped
+
+    # Step 3 — drift trajectory
+    if include_drift:
+        drift_block = _safe(lambda: nav.chain_drift_trajectory(
+            chain_id,
+            chain_pattern=chain_pattern_id,
+            member_pattern=anchor_pattern_id,
+        ))
+    else:
+        drift_block = _skipped
+
+    # Step 4 — typology (always)
+    typology_block = _safe(lambda: nav.classify_chain_typology(
+        chain_id,
+        chain_pattern_id,
+        anchor_pattern_id=anchor_pattern_id,
+    ))
+
+    # Step 5 — extend_chain (forward + backward, combined)
+    if include_extension:
+        forward_block = _safe(lambda: nav.extend_chain(
+            chain_id,
+            chain_pattern_id,
+            anchor_pattern_id=anchor_pattern_id,
+            direction="forward",
+            max_results=top_n_extensions,
+        ))
+        backward_block = _safe(lambda: nav.extend_chain(
+            chain_id,
+            chain_pattern_id,
+            anchor_pattern_id=anchor_pattern_id,
+            direction="backward",
+            max_results=top_n_extensions,
+        ))
+        # Combine: each direction keeps its own ok/data — caller still
+        # sees per-direction failure granularity.
+        extension_block: dict[str, Any] = {
+            "ok": True,
+            "data": {
+                "forward": forward_block,
+                "backward": backward_block,
+            },
+        }
+    else:
+        extension_block = _skipped
+
+    # Step 6 — investigate_chain (always; full R9 loop)
+    investigate_block = _safe(lambda: nav.investigate_chain(
+        chain_id,
+        chain_pattern_id,
+        anchor_pattern_id=anchor_pattern_id,
+    ))
+
+    # Step 7 — SAR rationale (gated, expensive)
+    if include_sar_rationale:
+        sar_block = _safe(lambda: nav.generate_sar_rationale(
+            chain_id,
+            chain_pattern_id,
+            anchor_pattern_id=anchor_pattern_id,
+        ))
+    else:
+        sar_block = _skipped
+
+    # Score + classify
+    score = _score_chain_full_loop(
+        coherent=coherent_block,
+        witness=witness_block,
+        drift=drift_block,
+        typology=typology_block,
+        extension=extension_block,
+        investigate=investigate_block,
+        sar=sar_block,
+        include_sar_rationale=include_sar_rationale,
+        top_n_extensions=top_n_extensions,
+    )
+    summary = _classify_chain_full_loop_summary(score)
+
+    elapsed_ms = round((_time.perf_counter() - t0) * 1000.0, 2)
+    out: dict[str, Any] = {
+        "chain_id": chain_id,
+        "chain_pattern_id": chain_pattern_id,
+        "anchor_pattern_id": anchor_pattern_id,
+        "find_chains_with_coherent_anomaly": coherent_block,
+        "chain_witness_intersection": witness_block,
+        "chain_drift_trajectory": drift_block,
+        "classify_chain_typology": typology_block,
+        "extend_chain": extension_block,
+        "investigate_chain": investigate_block,
+        "generate_sar_rationale": sar_block,
+        "summary": summary,
+        "elapsed_ms": elapsed_ms,
+    }
+    return json.dumps(_sanitize_for_json(out), indent=2, default=str)
+
+
+def _score_chain_full_loop(
+    *,
+    coherent: dict[str, Any],
+    witness: dict[str, Any],
+    drift: dict[str, Any],
+    typology: dict[str, Any],
+    extension: dict[str, Any],
+    investigate: dict[str, Any],
+    sar: dict[str, Any],
+    include_sar_rationale: bool,
+    top_n_extensions: int,
+) -> dict[str, Any]:
+    """Compute the per-step score breakdown for the summary block.
+
+    Transparent additive rule (max 100):
+      +20 coherent-set membership hit
+      +15 witness coordinated=True
+      +15 drift trajectory has chain_drift_score > 0.3
+      +10 typology returns a non-default tag (not "no-anomalous-run" / "no-run")
+      +20 investigate_chain returns substantive findings
+          (n_anomalies > 0 OR is_cyclic OR cross_bank_count > 1)
+      +10 extension forward+backward returns >= top_n_extensions candidates total
+      +10 SAR step requested and ok
+    """
+    score = 0
+    fired: list[str] = []
+
+    # +20 coherent set hit
+    if (
+        coherent.get("ok")
+        and isinstance(coherent.get("data"), dict)
+        and coherent["data"].get("in_coherent_set")
+    ):
+        score += 20
+        fired.append("coherent-anomaly run")
+
+    # +15 witness coordinated
+    if witness.get("ok") and not witness.get("skipped"):
+        data = witness.get("data") or {}
+        if data.get("coordinated") is True:
+            score += 15
+            fired.append("coordinated witness mechanism")
+
+    # +15 non-trivial drift
+    if drift.get("ok") and not drift.get("skipped"):
+        data = drift.get("data") or {}
+        cds = data.get("chain_drift_score")
+        try:
+            if cds is not None and float(cds) > 0.3:
+                score += 15
+                fired.append("temporal drift")
+        except (TypeError, ValueError):
+            pass
+
+    # +10 non-default typology
+    if typology.get("ok"):
+        data = typology.get("data") or {}
+        shape = (data.get("shape") or "")
+        pos = (data.get("position_in_chain") or "")
+        # Non-default = at least one of shape / position is not the
+        # "no run" sentinel.
+        if shape not in ("", "no-anomalous-run") and pos not in ("", "no-run"):
+            score += 10
+            fired.append(f"typology={shape}")
+
+    # +20 investigate_chain substantive
+    if investigate.get("ok"):
+        data = investigate.get("data") or {}
+        trace = (data.get("trace") or {}).get("data") or {}
+        n_anom = trace.get("n_anomalies") or 0
+        is_cyclic = bool(trace.get("is_cyclic"))
+        cross_bank = trace.get("cross_bank_count") or 0
+        try:
+            substantive = (
+                int(n_anom) > 0
+                or is_cyclic
+                or int(cross_bank) > 1
+            )
+        except (TypeError, ValueError):
+            substantive = is_cyclic
+        if substantive:
+            score += 20
+            fired.append("R9 loop findings")
+
+    # +10 extension candidate count threshold
+    if extension.get("ok") and not extension.get("skipped"):
+        data = extension.get("data") or {}
+        fwd = data.get("forward") or {}
+        bwd = data.get("backward") or {}
+        fwd_cands = (fwd.get("data") or {}).get("candidates") or []
+        bwd_cands = (bwd.get("data") or {}).get("candidates") or []
+        if len(fwd_cands) + len(bwd_cands) >= top_n_extensions:
+            score += 10
+            fired.append("extension candidates")
+
+    # +10 SAR ok
+    if include_sar_rationale and sar.get("ok") and not sar.get("skipped"):
+        score += 10
+        fired.append("SAR narrative drafted")
+
+    return {"score": int(score), "fired": fired}
+
+
+def _classify_chain_full_loop_summary(
+    score_breakdown: dict[str, Any],
+) -> dict[str, Any]:
+    """Map (score, fired) into the summary block.
+
+    Boundaries: ``>= 70`` strong, ``>= 40`` moderate, otherwise weak.
+    """
+    score = int(score_breakdown.get("score", 0))
+    fired = score_breakdown.get("fired") or []
+
+    if score >= 70:
+        strength = "strong"
+        action = "escalate to SAR"
+    elif score >= 40:
+        strength = "moderate"
+        action = "continue investigation"
+    else:
+        strength = "weak"
+        action = "false-positive candidate"
+
+    if fired:
+        rationale = (
+            f"Investigation score {score}/100 with signals from: "
+            + ", ".join(fired) + "."
+        )
+    else:
+        rationale = (
+            f"Investigation score {score}/100; no load-bearing signals "
+            f"fired across the seven steps."
+        )
+
+    return {
+        "investigation_strength": strength,
+        "recommended_action": action,
+        "rationale": rationale,
+        "score": score,
+    }

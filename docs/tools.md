@@ -200,6 +200,7 @@ Per-dim calibration audit of a pattern. Reports raw population moments alongside
 
 | Predicate | Action |
 |-----------|--------|
+| `dimension_kinds[dim] == "gaussian"` AND `|direction_component| < 0.05` AND `cohens_d_pos_neg >= 0.3` | `"kind_mismatch_review"` |
 | `cohens_d_pos_neg < 0.1` | `"drop_low_separation"` |
 | `cohens_d_pos_neg >= 0.1` AND `|direction_component| < 0.05` | `"investigate_drift"` |
 | `cohens_d_pos_neg >= 0.5` AND `sigma > 2 * max(sigma_pos, sigma_neg)` | `"split"` |
@@ -233,6 +234,46 @@ Example response (full-field path, abbreviated):
       "recommended_action": "keep"
     }
   ]
+}
+```
+
+---
+
+### `audit_label_alignment`
+
+Fisher LDA direction alignment audit. Where `audit_pattern_dims` describes the per-dim moments and Fisher axis components, this tool answers the orthogonal question — "does the projection of polygons onto that axis actually separate the two labelled classes?" — by computing AUROC of `delta_norm_signed` against the binary label declared in `sphere.yaml`'s `label_audit:` block.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `pattern_id` | string | required | Pattern to audit |
+| `top_n` | int | `10` | Cap on returned `top_dims` rows, sorted by \|`direction_component`\| descending |
+
+**Returns:** `{pattern_id, auroc, n_pos, n_neg, top_dims[] ({dim_label, direction_component, abs_direction, cohens_d_pos_neg}), label_aware_available, elapsed_ms}`. Returns a fallback shape (`auroc: null`, `n_pos: null`, `n_neg: null`, `top_dims: []`, `label_aware_available: false`, top-level `reason`) when the pattern was built without a `label_audit:` block, the sphere lacks the top-level `label_audit` block, the geometry's `delta_norm_signed` column is fully null, or the joined sample has zero positives or zero negatives.
+
+**Notes:** AUROC is computed via the Mann-Whitney rank-sum identity with average-rank tie handling — equivalent to `sklearn.metrics.roc_auc_score(labels, scores)`. Sibling to `audit_pattern_dims`; call both for a complete label-aware audit (per-dim recommended actions + holistic AUROC).
+
+```python
+audit_label_alignment(pattern_id="account_pattern", top_n=5)
+```
+
+Example response (full-field path, abbreviated):
+
+```json
+{
+  "pattern_id": "account_pattern",
+  "auroc": 0.94,
+  "n_pos": 1820,
+  "n_neg": 18430,
+  "top_dims": [
+    {
+      "dim_label": "risk_score",
+      "direction_component": 0.62,
+      "abs_direction": 0.62,
+      "cohens_d_pos_neg": 3.42
+    }
+  ],
+  "label_aware_available": true,
+  "elapsed_ms": 18.4
 }
 ```
 
@@ -527,6 +568,7 @@ Finds the most anomalous polygons in a pattern, ranked by `delta_norm` descendin
 | `radius` | float | `1.0` | Multiplies `theta_norm` threshold. >1 = looser boundary. ≤0 treated as 1. |
 | `property_filters` | dict | `null` | Filter anomalous entities by property before ranking. Anchor/composite only. Syntax: `{"col": {"gt": X, "lt": Y}}` or `{"col": "value"}`. AND semantics. |
 | `rank_by_property` | string | `null` | Re-rank by raw property value (DESC) instead of delta_norm |
+| `rank_by` | string | `"delta_norm"` | `"delta_norm"` (default, sort by `||delta||` desc), `"min_q_per_dim"` (smallest per-dim q first; requires `fdr_alpha` and `fdr_axis ∈ {"per_dim", "both"}`; incompatible with `select="diverse"`), or `"signed_confidence"` (fuse `delta_norm_signed × \|lda_alignment\| × (1 − reliability_penalty)` descending; sign-preserving — anti-aligned polygons get negative scores and land at the bottom; requires a pattern rebuilt with `label_audit:` enabled, fails with a structured `GDSNavigationError` otherwise; incompatible with `select="diverse"`). |
 | `missing_edge_to` | string | `null` | Keep only anomalies with NO edge to this line (orphan detection) |
 | `include_emerging` | bool | `false` | Append `emerging[]`: non-anomalous entities whose forecast crosses the threshold. Scans up to 100 entities. Only evaluated when `offset=0`. |
 | `fdr_alpha` | float | `null` | Apply Benjamini-Hochberg FDR control at this level (0-1 exclusive). Returns only entities with `q_value <= alpha`. Each retained entity carries a `q_value` field. `null` = no FDR filtering (legacy behavior). |
@@ -548,6 +590,7 @@ Each polygon in `polygons[]` includes:
 | `total_impact` | M4 additive — aggregate L2 norm of leave-one-out impact on coordinate calibration. `null` when pattern is event-type, `N<2`, or storage backend lacks shape reconstruction prerequisites. Use `find_calibration_influencers` for the full per-dim breakdown + classification context. |
 | `classification` | M4 additive — one of `"hidden"` / `"distorter"` / `"standard_anomaly"` / `"normal"`. Same null rules as `total_impact`. Use `find_calibration_influencers` for ranked entries within a specific cell. |
 | `reliability_flags` | Per-polygon triage dict: `single_dim_driven` (bool — dominant dim contributes >70 % of total anomaly attribution, likely a data-quality artefact rather than a multi-dim fraud signal), `dominant_dim` (string label, agrees with `explain_anomaly.top_dimensions[0].dim` on the same polygon), `dominant_dim_share` (float), `low_confidence_bucket` (bool — bootstrap-derived `anomaly_confidence` is below 0.5, the anomaly flag is fragile to population resampling), `confidence` (float or `null` — sanitises `NaN`/`±inf` to `null`), `flags` (list of triggered flag names). |
+| `signed_confidence_score`, `lda_alignment`, `reliability_penalty` | Present only when `rank_by="signed_confidence"`. `signed_confidence_score` is `delta_norm_signed × \|lda_alignment\| × (1 − reliability_penalty)` (sign-preserved); `lda_alignment` ∈ `[-1, 1]` is the cosine on the LDA direction; `reliability_penalty` ∈ `[0, 1]` is `0.5 × single_dim_driven + 0.5 × low_confidence_bucket`. Non-finite values sanitised to `null`. |
 
 **Hard cap:** Adaptive — edge-count-based, typically 15–51. Use `offset` to paginate, `anomaly_summary` for counts, or `aggregate_anomalies` for distribution analysis.
 
@@ -1227,8 +1270,9 @@ Extracts chain patterns from an event line.
 | `max_chains` | int | `100000` | Global cap on chains produced by DFS — prevents hang/OOM on dense graphs |
 | `seed_nodes` | list[string] | `null` | Restrict BFS starting nodes to this list (targeted extraction from specific entities) |
 | `bidirectional` | bool | `false` | When true, each edge A→B also creates reverse edge B→A (for undirected relationship analysis) |
+| `anchor_pattern_id` | string | `null` | Anchor pattern over the entity line referenced by `from_col`/`to_col`. When set, each chain carries a per-hop `edge_potentials` list — Euclidean distance between consecutive entities' polygon delta vectors against that pattern. When null, `edge_potentials` is a list of nulls per hop. |
 
-**Returns:** `chains[]` with `{hop_count, is_cyclic, keys, n_distinct_categories, amount_decay}`, `total_chains`, `returned`, `summary` (`{total_chains, cyclic_chains, hop_count_mean, hop_count_max}`).
+**Returns:** `chains[]` with `{hop_count, is_cyclic, keys, n_distinct_categories, amount_decay, edge_potentials}`, `total_chains`, `returned`, `summary` (`{total_chains, cyclic_chains, hop_count_mean, hop_count_max}`). `edge_potentials` length equals `len(keys) - 1`; each element is `null` on missing polygon, mismatched delta shapes, or non-finite distance (NaN / inf strict-JSON sanitised).
 
 ---
 
@@ -1948,6 +1992,7 @@ Dives into an entity's temporal history and sets navigator position to Solid (π
 | `primary_key` | string | required | Entity key |
 | `pattern_id` | string | required | Anchor pattern |
 | `timestamp` | string | `null` | ISO-8601 upper bound — only slices at or before this time are returned |
+| `counterfactual_frozen_population` | bool | `false` | When `true`, each returned slice gains an additional `delta_norm_frozen_pop` field — the per-slice L2 norm recomputed against the FIRST slice's raw shape as the entity-relative reference (sigma stays at the current pattern's diagonal). Answers "is this entity moving, or is the population drifting around a stationary entity?" — a stationary entity yields `delta_norm_frozen_pop = 0` across all slices. Default `false` keeps the existing response shape. |
 
 **Returns:** `slices[]`, `num_slices`, `base_polygon`, `forecast` (same fields as `get_solid` when ≥3 slices), `stale_forecast_warning`, `base_polygon_note` (when temporal slices exist, reminds that `base_polygon.delta_norm` reflects first observation not current state), `reputation` (`{value: Bayesian posterior 0–1, anomaly_tenure: longest consecutive anomalous streak}`).
 

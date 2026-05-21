@@ -41,6 +41,7 @@ def _make_pattern(
     mu: list[float],
     sigma_diag: list[float],
     label_aware_calibration: dict | None = None,
+    dimension_kinds: list[str] | None = None,
 ):
     """Construct a minimal Pattern-shaped object the tool accepts.
 
@@ -56,6 +57,8 @@ def _make_pattern(
     )
     if label_aware_calibration is not None:
         pattern.label_aware_calibration = label_aware_calibration
+    if dimension_kinds is not None:
+        pattern.dimension_kinds = dimension_kinds
     return pattern
 
 
@@ -417,3 +420,152 @@ def test_zero_denominator_does_not_raise(fake_state):
     body = audit_pattern_dims(pattern_id="p1")
     parsed = json.loads(body)
     assert math.isfinite(parsed["dims"][0]["cohens_d_pos_neg"])
+
+
+def test_action_kind_mismatch_review_when_gaussian_high_d_low_direction(
+    fake_state,
+):
+    """Dim A: gaussian + ``cohens_d=0.5`` + ``|direction|=0.02`` →
+    ``kind_mismatch_review``. Preempts every other branch."""
+    lac = {
+        "dim_a": _dim_cal(
+            mu_pos=0.5, sigma_pos=1.0, mu_neg=0.0, sigma_neg=1.0, direction=0.02,
+        ),
+    }
+    fake_state(
+        "p1",
+        _make_pattern(
+            dim_labels=["dim_a"],
+            mu=[0.0],
+            sigma_diag=[1.0],
+            label_aware_calibration=lac,
+            dimension_kinds=["gaussian"],
+        ),
+    )
+    body = audit_pattern_dims(pattern_id="p1")
+    parsed = json.loads(body)
+    row = parsed["dims"][0]
+    assert row["cohens_d_pos_neg"] >= 0.3
+    assert abs(row["direction_component"]) < 0.05
+    assert row["recommended_action"] == "kind_mismatch_review"
+
+
+def test_action_kind_mismatch_review_silent_when_kind_not_gaussian(
+    fake_state,
+):
+    """Same numeric profile but kind='bernoulli' → falls through to
+    ``investigate_drift`` (cohens_d above 0.1 + low direction)."""
+    lac = {
+        "dim_a": _dim_cal(
+            mu_pos=0.5, sigma_pos=1.0, mu_neg=0.0, sigma_neg=1.0, direction=0.02,
+        ),
+    }
+    fake_state(
+        "p1",
+        _make_pattern(
+            dim_labels=["dim_a"],
+            mu=[0.0],
+            sigma_diag=[1.0],
+            label_aware_calibration=lac,
+            dimension_kinds=["bernoulli"],
+        ),
+    )
+    body = audit_pattern_dims(pattern_id="p1")
+    parsed = json.loads(body)
+    row = parsed["dims"][0]
+    assert row["recommended_action"] == "investigate_drift"
+
+
+def test_action_kind_mismatch_silent_when_cohens_d_below_threshold(
+    fake_state,
+):
+    """Below the cohens_d=0.3 gate the kind-mismatch branch does NOT
+    fire — falls through to ``investigate_drift`` (cohens_d still above
+    the 0.1 gate, direction still below 0.05)."""
+    # cohens_d = 0.2 / sqrt(1) = 0.2 — between 0.1 and 0.3.
+    lac = {
+        "dim_a": _dim_cal(
+            mu_pos=0.2, sigma_pos=1.0, mu_neg=0.0, sigma_neg=1.0, direction=0.02,
+        ),
+    }
+    fake_state(
+        "p1",
+        _make_pattern(
+            dim_labels=["dim_a"],
+            mu=[0.0],
+            sigma_diag=[1.0],
+            label_aware_calibration=lac,
+            dimension_kinds=["gaussian"],
+        ),
+    )
+    body = audit_pattern_dims(pattern_id="p1")
+    parsed = json.loads(body)
+    row = parsed["dims"][0]
+    assert row["cohens_d_pos_neg"] < 0.3
+    assert row["recommended_action"] == "investigate_drift"
+
+
+def test_action_kind_mismatch_silent_when_dimension_kinds_absent(fake_state):
+    """Legacy pattern with no ``dimension_kinds`` attribute → falls
+    through to ``investigate_drift`` (numeric profile of Dim A but kind
+    cannot be confirmed gaussian)."""
+    lac = {
+        "dim_a": _dim_cal(
+            mu_pos=0.5, sigma_pos=1.0, mu_neg=0.0, sigma_neg=1.0, direction=0.02,
+        ),
+    }
+    fake_state(
+        "p1",
+        _make_pattern(
+            dim_labels=["dim_a"],
+            mu=[0.0],
+            sigma_diag=[1.0],
+            label_aware_calibration=lac,
+            dimension_kinds=None,
+        ),
+    )
+    body = audit_pattern_dims(pattern_id="p1")
+    parsed = json.loads(body)
+    row = parsed["dims"][0]
+    assert row["recommended_action"] == "investigate_drift"
+
+
+def test_decision_tree_preserved_for_gaussian_below_kind_mismatch_gates(
+    fake_state,
+):
+    """Existing branches (``keep`` / ``split`` / ``drop_low_separation``
+    / ``investigate_drift``) still resolve correctly on gaussian dims
+    when the kind-mismatch criteria are not met simultaneously."""
+    lac = {
+        # keep: high cohens_d, high direction, narrow population sigma
+        "keep_dim": _dim_cal(
+            mu_pos=1.0, sigma_pos=1.0, mu_neg=-1.0, sigma_neg=1.0, direction=0.9,
+        ),
+        # split: high cohens_d, high direction, wide population sigma
+        "split_dim": _dim_cal(
+            mu_pos=1.0, sigma_pos=0.5, mu_neg=-1.0, sigma_neg=0.5, direction=0.9,
+        ),
+        # drop_low_separation: cohens_d ≈ 0.05 (below 0.1)
+        "drop_dim": _dim_cal(
+            mu_pos=0.05, sigma_pos=1.0, mu_neg=0.0, sigma_neg=1.0, direction=0.9,
+        ),
+    }
+    fake_state(
+        "p1",
+        _make_pattern(
+            dim_labels=["keep_dim", "split_dim", "drop_dim"],
+            mu=[0.0, 0.0, 0.0],
+            # keep_dim: sigma_i = 1.5 < 2 × 1.0; split_dim: sigma_i = 3 > 2 × 0.5
+            sigma_diag=[1.5, 3.0, 1.0],
+            label_aware_calibration=lac,
+            dimension_kinds=["gaussian", "gaussian", "gaussian"],
+        ),
+    )
+    body = audit_pattern_dims(pattern_id="p1", top_k=3)
+    parsed = json.loads(body)
+    rows_by_label = {row["dim_label"]: row for row in parsed["dims"]}
+    assert rows_by_label["keep_dim"]["recommended_action"] == "keep"
+    assert rows_by_label["split_dim"]["recommended_action"] == "split"
+    assert rows_by_label["drop_dim"]["recommended_action"] == (
+        "drop_low_separation"
+    )

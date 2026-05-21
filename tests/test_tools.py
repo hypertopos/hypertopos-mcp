@@ -2498,7 +2498,7 @@ class TestDiveSolid:
         nav_mock = MagicMock()
         nav_mock.position = solid
 
-        def fake_dive(bk, pid, timestamp=None):
+        def fake_dive(bk, pid, timestamp=None, **kwargs):
             # simulate timestamp truncation on the mock
             if timestamp is not None:
                 filtered = [s for s in solid.slices if s.timestamp <= timestamp]
