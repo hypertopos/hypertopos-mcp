@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-05-20
+
+### Added
+
+- `python -m hypertopos_mcp.main` accepts `--transport {stdio,http}` and `--port PORT` (default `stdio`, port `8080`). Selecting `--transport http` runs the server over the MCP streamable-HTTP transport on `127.0.0.1:<port>`; `stdio` behaviour is unchanged.
+- `get_sphere_info` returns an additional top-level boolean field `label_aware_available` — `true` when the open sphere carries a `label_audit` block (format 3.1+), `false` otherwise. Lets agents discover whether label-aware calibration data is available without probing patterns one by one.
+- `audit_pattern_dims(pattern_id, top_k=10)` — per-dim calibration audit. Reports raw `mu` / `sigma` alongside class-conditioned `mu_pos` / `sigma_pos` / `mu_neg` / `sigma_neg`, Cohen's d separation, and the per-dim component of the Fisher LDA direction vector when the pattern has label-aware calibration available. Each dim carries a categorical `recommended_action` ∈ {`"keep"`, `"split"`, `"drop_low_separation"`, `"investigate_drift"`}. Rows sorted by `|cohens_d_pos_neg|` descending, capped by `top_k`. Patterns without label-aware calibration return a fallback shape (raw stats + `recommended_action: "keep"` + top-level `reason`). The full-field path is now produced by the builder hook on spheres rebuilt with a `label_audit:` block in `sphere.yaml` and the `--label-aware-calibration` flag; previously the field stayed unpopulated and the tool always returned the fallback shape.
+- `sphere_overview` `dim_quality_warnings[]` gains a new pattern-level type `"heteroscedasticity"` — fires for patterns carrying `group_by_property` when a build-time Brown-Forsythe (median-centred Levene) test on `delta_norm` partitioned by the grouping column returns `p < 0.01`. The `dim_label` carries the grouping variable name (not a δ-dim); `evidence_value` is the p-value and `threshold` is 0.01. Means the global θ / pooled-σ / global-percentile assumptions are statistically violated for this pattern — agents can read the warning as confirmation that per-group θ calibration is statistically warranted on this grouping.
+- `sphere_overview` `dim_quality_warnings[]` gains a new per-dim type `"non_normal_dim"` — fires when a dim declared with `kind='gaussian'` has a build-time Shapiro-Wilk / KS normality `p < 0.01`. The `dim_label` is the δ-dim name; `evidence_value` is the p-value and `threshold` is 0.01. Suppressed for dims already flagged `negative_space` (the kind itself is the bug, not the empirical departure). Bernoulli and poisson dims are silently skipped — normality does not apply.
+
 ## [0.7.0] — 2026-05-18
 
 Non-finite floats (`±inf`, `NaN`) on new tools sanitised to `null` on the wire per the strict-JSON convention.

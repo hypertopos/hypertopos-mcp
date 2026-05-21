@@ -238,6 +238,7 @@ _TOOL_TIERS: dict[str, str] = {
     "find_anomalies": "base",
     "anomaly_summary": "base",
     "aggregate_anomalies": "base",
+    "audit_pattern_dims": "base",
     "attract_boundary": "base",
     "find_neighborhood": "base",
     "get_polygon": "base",

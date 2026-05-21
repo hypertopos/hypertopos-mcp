@@ -568,6 +568,56 @@ class TestGetSphereInfo:
         tx = patterns["tx_pattern"]
         assert tx.get("prop_columns", []) == []
 
+    def test_label_aware_available_false_when_no_block(self) -> None:
+        """No top-level label_audit block on the Sphere → label_aware_available False."""
+        from hypertopos_mcp.server import _state
+        from hypertopos_mcp.tools.session import get_sphere_info
+
+        mock_sphere_meta = MagicMock()
+        mock_sphere_meta.sphere_id = "test"
+        mock_sphere_meta.name = "Test"
+        mock_sphere_meta.lines = {}
+        mock_sphere_meta.patterns = {}
+        mock_sphere_meta.aliases = {}
+        mock_sphere_meta.label_audit = None
+        mock_sphere = MagicMock()
+        mock_sphere._sphere = mock_sphere_meta
+
+        _state["sphere"] = mock_sphere
+        _state["path"] = "/test"
+
+        result = json.loads(get_sphere_info())
+        assert result["label_aware_available"] is False
+        _state["sphere"] = None
+        _state["path"] = None
+
+    def test_label_aware_available_true_when_block_present(self) -> None:
+        """Sphere with a label_audit dict → label_aware_available True."""
+        from hypertopos_mcp.server import _state
+        from hypertopos_mcp.tools.session import get_sphere_info
+
+        mock_sphere_meta = MagicMock()
+        mock_sphere_meta.sphere_id = "test"
+        mock_sphere_meta.name = "Test"
+        mock_sphere_meta.lines = {}
+        mock_sphere_meta.patterns = {}
+        mock_sphere_meta.aliases = {}
+        mock_sphere_meta.label_audit = {
+            "label_column": "laundering",
+            "label_positive_value": True,
+            "patterns": ["account_pattern"],
+        }
+        mock_sphere = MagicMock()
+        mock_sphere._sphere = mock_sphere_meta
+
+        _state["sphere"] = mock_sphere
+        _state["path"] = "/test"
+
+        result = json.loads(get_sphere_info())
+        assert result["label_aware_available"] is True
+        _state["sphere"] = None
+        _state["path"] = None
+
 
 class TestFindCommonRelations:
     def test_no_common_relations(self) -> None:
@@ -3938,6 +3988,7 @@ class TestOpenSphereForceReload:
         monkeypatch.setattr(session_mod, "_do_open_sphere", lambda p: None)
         monkeypatch.setitem(server_mod._state, "sphere", self._make_sphere_state())
         monkeypatch.setitem(server_mod._state, "manifest", None)
+        monkeypatch.setitem(server_mod._state, "path", "examples/test")
 
         from hypertopos_mcp.tools.session import open_sphere
 
@@ -3957,6 +4008,7 @@ class TestOpenSphereForceReload:
         monkeypatch.setattr(session_mod, "_do_open_sphere", lambda p: None)
         monkeypatch.setitem(server_mod._state, "sphere", self._make_sphere_state())
         monkeypatch.setitem(server_mod._state, "manifest", None)
+        monkeypatch.setitem(server_mod._state, "path", "examples/test")
 
         from hypertopos_mcp.tools.session import open_sphere
 

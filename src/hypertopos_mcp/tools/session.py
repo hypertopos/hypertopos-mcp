@@ -172,7 +172,9 @@ def _get_line_row_count(reader: object, line_id: str, version: int) -> int | Non
 def get_sphere_info() -> str:
     """Return sphere schema: lines, patterns, aliases, active manifest.
 
-    Returns: per-line columns/has_fts_index, per-pattern relations, per-alias has_cutting_plane.
+    Returns: per-line columns/has_fts_index, per-pattern relations,
+    per-alias has_cutting_plane, plus top-level ``label_aware_available``
+    (True when the sphere carries a ``label_audit`` block).
     """
     _require_sphere()
     s = _state["sphere"]._sphere
@@ -183,6 +185,7 @@ def get_sphere_info() -> str:
         "sphere_id": s.sphere_id,
         "name": s.name,
         "path": _state["path"],
+        "label_aware_available": s.label_audit is not None,
         "lines": {
             lid: {
                 "role": line.line_role,

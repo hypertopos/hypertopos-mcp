@@ -8,6 +8,8 @@
 
 **Start:** `python -m hypertopos_mcp.main` (set `HYPERTOPOS_SPHERE_PATH` to your sphere directory)
 
+**Transport:** Defaults to `stdio` for local desktop MCP clients. Pass `--transport http --port 8080` to expose the server over the MCP streamable-HTTP transport on TCP port 8080 (host is `127.0.0.1`).
+
 **Concepts:** See [hypertopos core concepts](https://github.com/hypertopos/hypertopos-py/blob/main/docs/concepts.md) for Point, Edge, Polygon, Solid, Pattern, Alias, Manifest.
 
 All tool responses include `elapsed_ms` (float, milliseconds).
@@ -68,9 +70,9 @@ Returns full schema: lines, patterns, aliases, column schemas, and FTS index ava
 |-----------|------|---------|-------------|
 | _(none)_ | — | — | — |
 
-**Returns:** `lines[]` (with `columns[]` — `{name, type}` — and `total_rows`), `patterns[]` (with `relations[]`, `event_dimensions[]`), `aliases[]`
+**Returns:** `lines[]` (with `columns[]` — `{name, type}` — and `total_rows`), `patterns[]` (with `relations[]`, `event_dimensions[]`), `aliases[]`, `label_aware_available`
 
-**Notes:** `columns` per line lists all searchable entity properties. `total_rows` is the entity count. `has_fts_index` on each line indicates FTS availability. `relations[].edge_max > 0` means that relation uses continuous edges (see [Continuous Edges](#continuous-edges)).
+**Notes:** `columns` per line lists all searchable entity properties. `total_rows` is the entity count. `has_fts_index` on each line indicates FTS availability. `relations[].edge_max > 0` means that relation uses continuous edges (see [Continuous Edges](#continuous-edges)). `label_aware_available` is `true` when the sphere carries a top-level `label_audit` block (format 3.1+) and `false` otherwise.
 
 ---
 
@@ -116,7 +118,7 @@ Population summary for all patterns (or one pattern). Returns anomaly rates, cal
 | `inactive_ratio` | Fraction of anchor entities at the dominant low-activity mode (only reported when >25% of population is below median). See below. |
 | `has_temporal` | `true` when the pattern has temporal slices |
 | `profiling_alerts[]` | Dimension-level outlier clusters detected at build time. Each entry: `{dimension, max, p99, ratio, alert}` where `alert` is `"extreme cluster"` (ratio > 3.0) or `"moderate cluster"` (ratio 1.5–3.0). Absent = no outlier concentration. |
-| `dim_quality_warnings[]` | Silent build-time failures of z-score / `delta_norm` semantics. Each entry: `{type, dim_label, reason, advice}` (pattern-level auditors also carry `evidence_value` + `threshold`). Four `type` values: `"dead_dim"` (sigma_diag below 1e-10 — zero variance, z-score undefined, the dim contributes nothing meaningful and silently dilutes other dims' signal), `"sparse_dim"` (median == 0 with p99 > 0 — mostly-zero with rare nonzero, gaussian z-score assumption is wrong; Bregman divergence with poisson / bernoulli kind tag is the correct distance), `"dominant_dim_mass"` (pattern-level: one dim accounts for ≥70% of population p99-tail variance — the pattern is effectively a one-dim detector; cross-check per-polygon `reliability_flags.single_dim_driven` incidence on top-N anomalies), and `"negative_space"` (gaussian-declared dim with median == 0 — the gaussian z-score is wrong because the empirical distribution is point-mass-at-zero rather than centered on the mode; re-declare with `kind='bernoulli'` or `kind='poisson'`). `reason` carries the offending value; `advice` is concrete remediation. Use the pattern-level types (`dominant_dim_mass`, `negative_space`) to spot sphere-level calibration problems before drilling into per-entity anomalies. Computed from cached pattern state, sub-millisecond, no storage scan. Absent = no failure mode detected. |
+| `dim_quality_warnings[]` | Silent build-time failures of z-score / `delta_norm` semantics. Each entry: `{type, dim_label, reason, advice}` (pattern-level auditors also carry `evidence_value` + `threshold`). Five `type` values: `"dead_dim"` (sigma_diag below 1e-10 — zero variance, z-score undefined, the dim contributes nothing meaningful and silently dilutes other dims' signal), `"sparse_dim"` (median == 0 with p99 > 0 — mostly-zero with rare nonzero, gaussian z-score assumption is wrong; Bregman divergence with poisson / bernoulli kind tag is the correct distance), `"dominant_dim_mass"` (pattern-level: one dim accounts for ≥70% of population p99-tail variance — the pattern is effectively a one-dim detector; cross-check per-polygon `reliability_flags.single_dim_driven` incidence on top-N anomalies), `"negative_space"` (gaussian-declared dim with median == 0 — the gaussian z-score is wrong because the empirical distribution is point-mass-at-zero rather than centered on the mode; re-declare with `kind='bernoulli'` or `kind='poisson'`), and `"heteroscedasticity"` (pattern-level, fires only when the pattern carries `group_by_property`: Brown-Forsythe Levene `p < 0.01` on `delta_norm` partitioned by the grouping column — the global θ assumption is statistically violated for this pattern. `dim_label` is the grouping variable name, not a δ-dim. Per-group θ calibration is statistically warranted; consider variance-stabilizing transform `log1p` as alternative). `reason` carries the offending value; `advice` is concrete remediation. Use the pattern-level types (`dominant_dim_mass`, `negative_space`, `heteroscedasticity`) to spot sphere-level calibration problems before drilling into per-entity anomalies. Computed from cached pattern state, sub-millisecond, no storage scan. Absent = no failure mode detected. |
 | `trends[]` | Per-metric population forecasts when pre-computed data exists: `{metric, current_value, forecast_value, direction, horizon, reliability}`. Metrics: `anomaly_rate`, `mean_delta_norm`, `entity_count`. Direction: `"rising"`, `"falling"`, `"stable"`. Uses Holt's double exponential smoothing (alpha=0.3). |
 | `temporal_quality` | (`detail="full"` only) `{signal_quality: "persistent"/"volatile"/"mixed"}` — persistence of anomaly signals across time slices |
 | `event_rate_divergence_alerts[]` | (`detail="full"`, anchor patterns only) Entities with high event anomaly rate (>15%) but below-theta static delta_norm — invisible to `find_anomalies`. Each entry: `{pattern_id, event_pattern_id, entity_key, event_anomaly_rate, delta_norm, theta_norm, alert}`. Top 20 by rate. Absent = no divergence detected. |
@@ -180,6 +182,59 @@ Returns entities violating declarative compliance rules defined on a pattern. Re
 **Returns:** `{pattern_id, n_violations, violations[] ({primary_key, rule_id, severity}), rules_evaluated, manifest ({rule_set_hash, evaluated_at, n_rules}), warnings, follow_up}`.
 
 **Notes:** Conformance violations are independent from `delta_norm` anomalies — an entity can be one, the other, or both. High-value workflow: pick top violators → `investigate_entity(primary_key)` on each to drill into whether the rule break is also accompanied by geometric anomaly. Rule-set hash mismatch (sidecar built against a different ruleset) surfaces as a `warnings` entry without raising — the builder is the authoritative re-evaluator, this primitive is read-only. Invalid input returned as `{"error": ..., "pattern_id": ...}` JSON.
+
+---
+
+### `audit_pattern_dims`
+
+Per-dim calibration audit of a pattern. Reports raw population moments alongside positive/negative class moments, Cohen's d separation, and the per-dim component of the Fisher LDA direction vector when label-aware calibration is available. Each row carries a categorical `recommended_action` flagging whether the dim should be kept, split, dropped, or investigated further.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `pattern_id` | string | required | Pattern to audit |
+| `top_k` | int | `10` | Cap on returned rows, sorted by \|`cohens_d_pos_neg`\| descending |
+
+**Returns:** `{pattern_id, label_aware_available, n_dims_total, n_dims_returned, dims[] ({dim_label, mu, sigma, mu_pos, sigma_pos, mu_neg, sigma_neg, cohens_d_pos_neg, direction_component, recommended_action})}`. When label-aware calibration is unavailable, also emits a top-level `reason` and dim rows carry only `mu`, `sigma`, `recommended_action`.
+
+**Decision tree** for `recommended_action` (applied in order, first match wins):
+
+| Predicate | Action |
+|-----------|--------|
+| `cohens_d_pos_neg < 0.1` | `"drop_low_separation"` |
+| `cohens_d_pos_neg >= 0.1` AND `|direction_component| < 0.05` | `"investigate_drift"` |
+| `cohens_d_pos_neg >= 0.5` AND `sigma > 2 * max(sigma_pos, sigma_neg)` | `"split"` |
+| otherwise | `"keep"` |
+
+**Notes:** Label-aware calibration is populated by the builder when the sphere is built with the YAML `label_audit:` block. Spheres without that block return the fallback shape (raw `mu` / `sigma` only). Cohen's d uses the pooled-std formula `|mu_pos − mu_neg| / sqrt((sigma_pos² + sigma_neg²) / 2)`; zero pooled denominator clamps to `0.0`. Dims present in `dim_labels` but missing from the calibration map fall back to `"keep"` with `null` label-aware fields.
+
+```python
+audit_pattern_dims(pattern_id="account_pattern", top_k=5)
+```
+
+Example response (full-field path, abbreviated):
+
+```json
+{
+  "pattern_id": "account_pattern",
+  "label_aware_available": true,
+  "n_dims_total": 12,
+  "n_dims_returned": 5,
+  "dims": [
+    {
+      "dim_label": "risk_score",
+      "mu": 0.42,
+      "sigma": 0.31,
+      "mu_pos": 0.78,
+      "sigma_pos": 0.18,
+      "mu_neg": 0.21,
+      "sigma_neg": 0.15,
+      "cohens_d_pos_neg": 3.42,
+      "direction_component": 0.62,
+      "recommended_action": "keep"
+    }
+  ]
+}
+```
 
 ---
 
