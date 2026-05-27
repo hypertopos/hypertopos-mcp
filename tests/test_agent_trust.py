@@ -14,8 +14,8 @@ class TestInactiveRatio:
         from hypertopos_mcp.tools.observability import sphere_overview
 
         result = json.loads(sphere_overview(pattern_id="account_behavior_pattern"))
-        assert len(result) == 1
-        entry = result[0]
+        assert len(result["patterns"]) == 1
+        entry = result["patterns"][0]
         # inactive_ratio is only present when geometry_stats detects inactive entities
         if "inactive_ratio" in entry:
             assert 0.0 <= entry["inactive_ratio"] <= 1.0
@@ -24,7 +24,7 @@ class TestInactiveRatio:
         from hypertopos_mcp.tools.observability import sphere_overview
 
         result = json.loads(sphere_overview(pattern_id="tx_pattern"))
-        entry = result[0]
+        entry = result["patterns"][0]
         assert "inactive_ratio" not in entry
 
 

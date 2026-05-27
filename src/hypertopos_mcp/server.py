@@ -248,6 +248,7 @@ _TOOL_TIERS: dict[str, str] = {
     "compare_calibrations": "base",
     "decompose_drift": "base",
     "find_calibration_influencers": "base",
+    "calibration_influencer_history": "base",
     "find_group_influence": "base",
     "find_lead_lag": "base",
     "find_density_gaps": "base",
@@ -329,6 +330,7 @@ _TOOL_TIERS: dict[str, str] = {
     # trajectory_index — visible after sphere_overview IF trajectory ANN index exists
     "find_drifting_similar": "trajectory_index",
     "detect_trajectory_anomaly": "trajectory_index",
+    "classify_trajectory": "trajectory_index",
 }
 
 _tool_stash: dict[str, object] = {}

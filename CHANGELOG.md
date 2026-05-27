@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.3] — 2026-05-27
+
+### Added
+
+- `classify_trajectory(primary_key, pattern_id, sample_size=10000)` — new MCP tool in the `trajectory_index` tier. Categorises one entity's temporal trajectory as `outlier` / `lagging` / `leading` / `typical` by combining DTW distance vs the population-median trajectory with a first-derivative slope comparison. Returns `{primary_key, pattern_id, dtw_distance, category, category_evidence}`. ±inf and NaN floats are sanitised to JSON `null`.
+
+### Changed
+
+- `audit_pattern_dims` — each per-dim row now carries `auroc_per_dim`, the closed-form Gaussian-approximation AUROC `Phi((mu_pos - mu_neg) / sqrt(sigma_pos^2 + sigma_neg^2))`; top-level response adds `intrinsic_displacement_mean` and `extrinsic_displacement_mean` — the per-polygon decomposition means along and orthogonal to the Fisher LDA direction. Both populated only when label-aware calibration is available; legacy spheres receive `null` for the pattern-level means.
+- `chain_full_loop_summary` `summary` block gains four chain-level reliability fields when the anchor pattern carries `label_aware_calibration`: `chain_mean_signed_confidence`, `chain_n_low_confidence_members`, `chain_n_single_dim_driven_members`, and `chain_confidence_verdict` ∈ {high, medium, low, label-aware-unavailable}. Derived from per-member `signed_confidence` ranking on the anchor pattern. Verdict "low" subtracts 10 from the overall investigation score. On patterns without label-aware calibration, all four fields are `null` and the verdict is `"label-aware-unavailable"` (no score change).
+- `sphere_overview` MCP response is now an object with `patterns` (the prior per-pattern list, preserved verbatim) and a new top-level `cross_pattern_discrepancy: dict | null` block populated when the sphere has at least two patterns sharing the same `entity_line`. Each `pairs[]` entry carries `pattern_a`, `pattern_b`, `shared_line`, the four anomaly-bucket counts (`n_anomalous_only_in_a`, `n_anomalous_only_in_b`, `n_anomalous_in_both`, `n_anomalous_in_neither`), and `jaccard_anomaly_overlap` (intersection-over-union of anomalous primary_keys, `null` when both anomaly sets are empty). Clients that previously indexed the response as a list must read `response["patterns"]` instead.
+- `aggregate` MCP tool per-row results carry `anomaly_rate: float | null` when `metric="count"` and the grouping is not composite (no `group_by_property` / `group_by_line_2` / `pivot_event_field` / `distinct`). Value is the share of the group's events flagged anomalous; `null` when the group has zero events.
+- `find_anomalies` MCP tool accepts `sample_size: int | None = None` and `boundary_aware: bool = False` — pass-through to the navigator. `boundary_aware=True` stratifies the sample budget around the decision threshold, surfacing more boundary cases for calibration audits.
+- `find_calibration_influencers` MCP tool accepts `auto_discover: bool` + `auto_k: int` — pass-through to navigator.
+- `calibration_influencer_history(primary_key, pattern_id)` — new MCP tool (`base` tier) returning per-epoch μ-impact history for a known influencer.
+- `passive_scan` hits gain an `interpretation` field on partial / full multi-source matches: `"anomalous in {source} only, normal in {others} — potential cross-pattern discrepancy"` when exactly one source flagged the entity and at least two sources participated, or `"anomalous across all {N} sources — coordinated multi-pattern anomaly"` when every participating source flagged the entity. The rule is invariant under `scoring="count"` vs `scoring="weighted"`.
+- `find_similar_entities` response gains top-level `neighbor_anomaly_rate` and `neighbor_anomaly_count` fields summarising the share of returned neighbours with `is_anomaly=true`. Each neighbour entry also carries an `is_anomaly` boolean.
+- `dive_solid` response gains a `trajectory_shape` field (`arch` / `V` / `linear` / `flat`) when the solid has at least three temporal slices. The shape is computed locally from the entity's own `delta_norm_snapshot` series and requires no population reference.
+
 ## [0.7.2] — 2026-05-21
 
 ### Added

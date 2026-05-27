@@ -101,6 +101,8 @@ Population summary for all patterns (or one pattern). Returns anomaly rates, cal
 | `pattern_id` | string | `null` | Scope to one pattern; omit for all |
 | `detail` | string | `"summary"` | `"summary"` = O(1), no I/O; `"full"` = adds temporal_quality and calibration staleness (**slow on large spheres**) |
 
+**Response shape:** `{"patterns": [...per-pattern entries...], "cross_pattern_discrepancy": dict | null}`. The `cross_pattern_discrepancy` field is populated only when `pattern_id` is omitted and the sphere has at least two patterns sharing the same `entity_line`; otherwise it is `null`. Each `pairs[]` entry carries `pattern_a`, `pattern_b`, `shared_line`, the four bucket counts (`n_anomalous_only_in_a`, `n_anomalous_only_in_b`, `n_anomalous_in_both`, `n_anomalous_in_neither`), and `jaccard_anomaly_overlap` (intersection-over-union of anomalous primary_keys, `null` when both anomaly sets are empty).
+
 **Returns per pattern:**
 
 | Field | Description |
@@ -578,6 +580,8 @@ Finds the most anomalous polygons in a pattern, ranked by `delta_norm` descendin
 | `metric` | string | `"L2"` | `"L2"` (pre-computed delta_norm, fast), `"Linf"` (max single-dimension \|delta\|, runtime scan), or `"bregman"` (distribution-aware Bregman divergence, runtime scan). Linf catches single-dimension spikes that L2 dilutes. Bregman uses per-dimension kind-aware scoring (poisson KL for counts, bernoulli KL for binary, gaussian for continuous) — can improve ranking on mixed-type patterns. |
 | `min_confidence` | float | `0.0` | Keep only entities with `anomaly_confidence >= min_confidence` (0–1). `0.0` = no filter. Has no effect when `anomaly_confidence` is `None` (bootstrap was skipped). |
 | `dimension_weights` | dict | `null` | Optional `{dim_name: float}` mapping. Each weight multiplies the corresponding dim's contribution to the rank score before computing `delta_norm`. Missing dims default to `1.0`; explicit `0.0` silences a dim. Requires `metric` in `"L2"` or `"Linf"` (Bregman is precomputed and cannot be reweighted). Use to discount dims that fail a stratified correlation gate (NOISE → `0.0`, HEAVY-TAIL → `0.5`). Validates dim names against the pattern's labels and rejects negative / non-finite / non-numeric weights. |
+| `sample_size` | int | `null` | Cap on geometry rows scanned. When set below the population size, a random sample is drawn before threshold filtering and ranking. Forces the in-process scan path. `null` = scan full population. |
+| `boundary_aware` | bool | `false` | Stratified sampling — when `true`, half of `sample_size` is drawn from entities within `[0.8 × theta_norm, 1.2 × theta_norm]` (boundary band), the rest from the complement. Requires `sample_size`. Surfaces boundary cases under-represented under uniform sampling — useful for calibration audits. |
 
 **Returns:** `polygons[]`, `total_found` (total above threshold), `capped_warning` when top_n was reduced.
 
@@ -749,7 +753,7 @@ Finds the top-N entities nearest to a given entity by geometric distance.
 | `dim_mask` | list[string] | `null` | Compute distance only on named dimensions (from `pattern.dim_labels`). Focuses similarity on specific aspects of geometry. |
 | `metric` | string | `"L2"` | `"L2"` (Euclidean, default) or `"cosine"` (1 - cos_sim — shape similarity ignoring magnitude) |
 
-**Returns:** `results[]` with `primary_key`, `distance`, `delta_norm`, `is_anomaly`. When >50% of results have `distance=0` (inactive entities), response includes `degenerate_warning` and `population_diversity_note` — ANN search is unreliable on patterns with high `inactive_ratio`.
+**Returns:** `reference` (the queried entity's metadata), `similar[]` with `primary_key`, `distance`, optional `properties`, and `is_anomaly` (stored anomaly flag for each neighbour), plus top-level `neighbor_anomaly_count` and `neighbor_anomaly_rate` (share of returned neighbours with `is_anomaly=true`; both fields are omitted when no neighbours were returned). When >50% of results have `distance=0` (inactive entities), response includes `degenerate_warning` and `population_diversity_note` — ANN search is unreliable on patterns with high `inactive_ratio`.
 
 ---
 
@@ -1035,6 +1039,8 @@ Aggregates event polygon data. Equivalent to SQL `SELECT metric FROM pattern GRO
 | `"count_distinct:<line_id>"` | Count unique entities on a related line per group. Cannot combine with `group_by_property`, `distinct`, `pivot_event_field`, or `event_filters`. |
 
 **Returns:** `results[]` (`{key, name, value, count}`), `total_groups`, `having_matched` (when `having` set), `sampled` / `sample_size` / `total_eligible` (when sampling).
+
+**Per-row `anomaly_rate`:** each result row carries `anomaly_rate: float | null` when `metric="count"` without `group_by_property` / `group_by_line_2` / `pivot_event_field` / `distinct` — the share of anomalous events for the group (`is_anomaly == True` polygons divided by the group's total count). `null` when the group has zero events. When `geometry_filters={"is_anomaly": true}` is already set, `anomaly_rate` retains its prior meaning (fraction of group's total events that matched the anomaly filter, computed against the unfiltered group total).
 
 **Two-dimensional grouping** (`group_by_line_2`): each row has `key` + `key_2`, `value`, `count`, `label` + `label_2`. Cannot combine with `group_by_property` or `pivot_event_field`. Both lines must be declared relations in the pattern.
 
@@ -1446,6 +1452,45 @@ One-shot orchestrator for the full R9 investigative loop on a single chain. Runs
 **Per-step failure handling:** each per-step block is wrapped in `{ok: True, data: ...}` or `{ok: False, error: "<ExceptionType>: <message>"}` so a partial failure (e.g. extension lookup raises because the chain has no anomalous run, or the chain_id is unknown to the geometry) does not abort the whole report. Summary derivation skips `ok=False` blocks.
 
 **Notes:** Pure orchestration — no new core logic. Saves the round-trip cost of running the four R9 primitives sequentially when the investigator already knows which chain to drill into. The granular tools (`anomaly_propagation_in_chain`, `classify_chain_typology`, `extend_chain`, `find_chains_with_coherent_anomaly`) remain available when per-step control is needed.
+
+---
+
+### `chain_full_loop_summary`
+
+Chain-side investigation orchestrator — chain-side mirror of `investigate_entity`. Aggregates seven chain-side primitives into a single MCP call with per-step `{ok, data | error}` envelopes so a partial failure on one step does not abort the others. Use when the agent needs every chain-side surface for one chain in one round-trip.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `chain_id` | string | required | Primary key of the chain in the chain anchor pattern |
+| `chain_pattern_id` | string | required | Chain anchor pattern id (built from `chain_lines:`) |
+| `anchor_pattern_id` | string | required | Entity anchor pattern whose `primary_keys` match the chain hops |
+| `include_extension` | bool | `true` | Run forward+backward `extend_chain` |
+| `include_drift` | bool | `true` | Run `chain_drift_trajectory` |
+| `include_witness` | bool | `true` | Run `chain_witness_intersection` |
+| `include_sar_rationale` | bool | `false` | Run `generate_sar_rationale` (expensive — re-runs the R9 loop server-side a second time) |
+| `top_n_extensions` | int | `3` | `max_results` per direction for `extend_chain` |
+
+**Returns:** one `{ok, data | error}` block per step (`{ok: True, skipped: True}` when gated off):
+- `find_chains_with_coherent_anomaly` — coherence-set membership check (informational)
+- `chain_witness_intersection` — coordinated-anomaly mechanism (gated on `include_witness`)
+- `chain_drift_trajectory` — per-position temporal regime (gated on `include_drift`)
+- `classify_chain_typology` — five-axis operational tag (always)
+- `extend_chain` — `{forward, backward}` blocks (gated on `include_extension`)
+- `investigate_chain` — full R9 loop (always)
+- `generate_sar_rationale` — narrative draft (gated on `include_sar_rationale`)
+
+Plus a `summary` block:
+- `investigation_strength` — `strong` / `moderate` / `weak`
+- `recommended_action` — `escalate to SAR` / `continue investigation` / `false-positive candidate`
+- `score` — investigation score `[0, 100]`; `strong` at `>= 70`, `moderate` at `>= 40`, `weak` below 40
+- `rationale` — concatenated string listing the firing signals
+- `chain_mean_signed_confidence` — mean of per-member `signed_confidence_score` across the chain's deduped members (null when anchor lacks `label_aware_calibration` OR when no members resolved)
+- `chain_n_low_confidence_members` — count of members where `reliability_penalty >= 0.5` (null when unavailable)
+- `chain_n_single_dim_driven_members` — count of members with `reliability_flags.single_dim_driven` (null when unavailable)
+- `chain_confidence_verdict` — `"high"` / `"medium"` / `"low"` / `"label-aware-unavailable"`. Threshold ladder: `"label-aware-unavailable"` when anchor lacks `label_aware_calibration`; `"low"` when `chain_n_low_confidence_members >= 0.5 * n_members`; `"medium"` when `chain_mean_signed_confidence < 1.0` and not `"low"`; `"high"` otherwise. Verdict `"low"` subtracts 10 from the overall `score` (no penalty for the other verdicts).
+- `elapsed_ms`
+
+**Notes:** Pure orchestration — no new core logic. Per-step `{ok, error}` envelope means an exception in one step (e.g. drift raising because members have no temporal history) does not abort the others; the summary block always renders. The chain-level reliability rollup is derived from per-member `signed_confidence` ranking on the anchor pattern (composes with the M2.1 ranking shipped on `find_anomalies`). On patterns without label-aware calibration, the four rollup fields are `null` and no score penalty is applied.
 
 ---
 
@@ -1994,7 +2039,7 @@ Dives into an entity's temporal history and sets navigator position to Solid (π
 | `timestamp` | string | `null` | ISO-8601 upper bound — only slices at or before this time are returned |
 | `counterfactual_frozen_population` | bool | `false` | When `true`, each returned slice gains an additional `delta_norm_frozen_pop` field — the per-slice L2 norm recomputed against the FIRST slice's raw shape as the entity-relative reference (sigma stays at the current pattern's diagonal). Answers "is this entity moving, or is the population drifting around a stationary entity?" — a stationary entity yields `delta_norm_frozen_pop = 0` across all slices. Default `false` keeps the existing response shape. |
 
-**Returns:** `slices[]`, `num_slices`, `base_polygon`, `forecast` (same fields as `get_solid` when ≥3 slices), `stale_forecast_warning`, `base_polygon_note` (when temporal slices exist, reminds that `base_polygon.delta_norm` reflects first observation not current state), `reputation` (`{value: Bayesian posterior 0–1, anomaly_tenure: longest consecutive anomalous streak}`).
+**Returns:** `slices[]`, `num_slices`, `base_polygon`, `forecast` (same fields as `get_solid` when ≥3 slices), `stale_forecast_warning`, `base_polygon_note` (when temporal slices exist, reminds that `base_polygon.delta_norm` reflects first observation not current state), `reputation` (`{value: Bayesian posterior 0–1, anomaly_tenure: longest consecutive anomalous streak}`), `trajectory_shape` (one of `arch` / `V` / `linear` / `flat`, emitted when the solid has ≥3 slices). The shape is computed locally from the entity's own `delta_norm_snapshot` series: `arch` when the series rises then falls (interior maximum), `V` when it falls then rises (interior minimum), `linear` when monotone within `1e-9` tolerance, and `flat` when the range is under 10% of the mean.
 
 **get_solid vs dive_solid:**
 - `get_solid` reads temporal data without changing navigator position
@@ -2186,7 +2231,7 @@ Screens an entire entity population across all geometric patterns in one call. F
 | `borderline_rank_threshold` | int | `80` | Rank percentile threshold for borderline sources (used with `include_borderline`) |
 | `top_n` | int | `100` | Max results, sorted by score descending |
 
-**Returns:** `total_flagged`, `sources_summary{}`, `hits[]` — each hit: `{primary_key, score, weighted_score, sources{}}`.
+**Returns:** `total_flagged`, `sources_summary{}`, `hits[]` — each hit: `{primary_key, score, weighted_score, sources{}, interpretation?}`. The `interpretation` field is emitted (scoring-mode-invariant) when the hit's flagged-source pattern is interpretable: `"anomalous in {source} only, normal in {others} — potential cross-pattern discrepancy"` when exactly one source flagged the entity and at least two sources participated, or `"anomalous across all {N} sources — coordinated multi-pattern anomaly"` when every participating source flagged the entity. Omitted for partial overlap in the middle (2 ≤ flagged < n_sources) or for single-source scans.
 
 **Source spec formats** (dispatched by `type` field — 4 source types):
 ```json
@@ -2278,6 +2323,24 @@ Detect entities with non-linear temporal trajectories (arch, V-shape, spike-reco
 > `displacement_ranks` parameter is deprecated and ignored.
 
 **Returns:** `pattern_id`, `top_n_per_range`, `sample_size`, `total_found`, `results[]` where each result has: `entity_key`, `trajectory_shape`, `displacement`, `path_length`, `num_slices`, `first_timestamp`, `last_timestamp`, `cohort_size`, `cohort_keys`, `interpretation`.
+
+Returns `{"error": "..."}` if pattern is event type or has no temporal data.
+
+---
+
+### `classify_trajectory`
+
+Categorise one entity's temporal trajectory vs the population (`outlier` / `lagging` / `leading` / `typical`).
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `primary_key` | string | required | Entity to classify |
+| `pattern_id` | string | required | Anchor pattern with temporal data |
+| `sample_size` | integer | 10000 | Cap on entities sampled for the median trajectory and DTW threshold |
+
+**How it works:** combines DTW distance against the population-median trajectory with a first-derivative slope comparison via `scipy.stats.linregress`. `outlier` fires when DTW exceeds the 99th percentile of the population; `lagging` / `leading` fires when the entity's slope deviates from the population-median slope by more than the slope MAD; otherwise `typical`. Returns `unknown` if the entity has no temporal data.
+
+**Returns:** `primary_key`, `pattern_id`, `dtw_distance`, `category`, `category_evidence` (signed deviation — DTW for `outlier`, slope delta for `lagging` / `leading`, `0.0` for `typical`).
 
 Returns `{"error": "..."}` if pattern is event type or has no temporal data.
 

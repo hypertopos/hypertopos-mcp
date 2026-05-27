@@ -9,6 +9,7 @@ import math
 from typing import Any
 
 import numpy as np
+from scipy.special import ndtr
 
 from hypertopos_mcp.server import (
     _register_manual_tools,
@@ -231,7 +232,17 @@ def sphere_overview(pattern_id: str | None = None, detail: str = "summary") -> s
     if not _state.get("manual_mode"):
         _register_manual_tools()
 
-    return json.dumps(result, indent=2, default=str)
+    # Sphere-level cross-pattern discrepancy (only when no pattern_id filter,
+    # i.e. response covers the whole sphere).
+    cross_pattern_discrepancy: dict | None = None
+    if pattern_id is None:
+        cross_pattern_discrepancy = _state["navigator"]._compute_cross_pattern_discrepancy()
+
+    response = {
+        "patterns": result,
+        "cross_pattern_discrepancy": _sanitize_for_json(cross_pattern_discrepancy),
+    }
+    return json.dumps(response, indent=2, default=str)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -358,9 +369,19 @@ def audit_pattern_dims(pattern_id: str, top_k: int = 10) -> str:
     For each dim of the pattern reports the raw population moments (``mu``,
     ``sigma``) plus — when label-aware calibration is available — the
     positive / negative class moments, the Cohen's d separation between
-    classes, and the per-dim component of the Fisher LDA direction vector.
-    A categorical ``recommended_action`` flags dims that look like they
-    should be split, dropped, or investigated further.
+    classes, the closed-form Gaussian-approximation AUROC
+    (``auroc_per_dim = Phi((mu_pos - mu_neg) / sqrt(sigma_pos^2 +
+    sigma_neg^2))``), and the per-dim component of the Fisher LDA
+    direction vector. A categorical ``recommended_action`` flags dims
+    that look like they should be split, dropped, or investigated
+    further.
+
+    The top-level response also carries pattern-level
+    ``intrinsic_displacement_mean`` and ``extrinsic_displacement_mean``
+    when label-aware calibration is available — the mean magnitude of
+    each polygon's delta along (``intrinsic``) and orthogonal to
+    (``extrinsic``) the Fisher LDA direction. Identity:
+    ``intrinsic^2 + extrinsic^2 == ||delta||^2`` per polygon.
 
     Decision tree (applied in order, first match wins):
 
@@ -518,6 +539,20 @@ def audit_pattern_dims(pattern_id: str, top_k: int = 10) -> str:
         else:
             cohens_d = abs(mu_pos - mu_neg) / math.sqrt(denom_sq)
 
+        # Closed-form Gaussian-approximation AUROC for the dim's
+        # univariate signal: AUROC = Phi((mu_pos - mu_neg) /
+        # sqrt(sigma_pos^2 + sigma_neg^2)). Pure function of the
+        # already-stored per-class moments — no row scan, sub-microsecond.
+        # Degenerate when both class sigmas are zero (no spread) — both
+        # tail under the same point; report AUROC = 0.5.
+        sum_sq = sigma_pos * sigma_pos + sigma_neg * sigma_neg
+        if sum_sq <= 0.0:
+            auroc_per_dim = 0.5
+        else:
+            auroc_per_dim = float(
+                ndtr((mu_pos - mu_neg) / math.sqrt(sum_sq)),
+            )
+
         sigma_i = float(sigma_vec[i]) if i < len(sigma_vec) else 0.0
         max_class_sigma = max(sigma_pos, sigma_neg)
         kind_i = (
@@ -551,6 +586,7 @@ def audit_pattern_dims(pattern_id: str, top_k: int = 10) -> str:
             "mu_neg": mu_neg,
             "sigma_neg": sigma_neg,
             "cohens_d_pos_neg": cohens_d,
+            "auroc_per_dim": auroc_per_dim,
             "direction_component": direction,
             "recommended_action": action,
         })
@@ -567,13 +603,29 @@ def audit_pattern_dims(pattern_id: str, top_k: int = 10) -> str:
     )
     rows = rows[:top_k]
 
-    result = {
+    result: dict[str, Any] = {
         "pattern_id": pattern_id,
         "label_aware_available": True,
         "n_dims_total": n_dims,
         "n_dims_returned": len(rows),
         "dims": rows,
     }
+    # Pattern-level label-axis displacement decomposition. Means over
+    # all polygons of the magnitude along the Fisher LDA direction
+    # (intrinsic) and the orthogonal residual (extrinsic). Persisted at
+    # build time; surfaced here when the pattern carries them so the
+    # caller can see how much of the population's geometry sits on the
+    # label-discriminating axis. ``None`` on legacy spheres rebuilt
+    # before this field was introduced — the keys are emitted regardless
+    # for shape stability.
+    intr_mean = getattr(pattern, "intrinsic_displacement_mean", None)
+    extr_mean = getattr(pattern, "extrinsic_displacement_mean", None)
+    result["intrinsic_displacement_mean"] = (
+        float(intr_mean) if intr_mean is not None else None
+    )
+    result["extrinsic_displacement_mean"] = (
+        float(extr_mean) if extr_mean is not None else None
+    )
     return json.dumps(_sanitize_for_json(result), indent=2)
 
 

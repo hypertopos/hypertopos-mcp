@@ -268,6 +268,8 @@ def find_calibration_influencers(
     high_threshold_pct: float = 90.0,
     sample_size: int | None = None,
     verbose: bool = False,
+    auto_discover: bool = False,
+    auto_k: int = 10,
 ) -> str:
     """Find entities with high influence on coordinate system calibration.
 
@@ -279,6 +281,20 @@ def find_calibration_influencers(
       - "standard_anomaly" — low impact + high anomaly (regular outlier)
       - "normal" — low impact + low anomaly
 
+    Two ranking strategies are supported. The default scans every entity in
+    the pattern. When ``auto_discover=True`` the population is first
+    partitioned by k-means++ into ``auto_k`` clusters, the entity nearest to
+    each cluster centroid is selected as the cluster representative, and
+    only those representatives are ranked — useful for large populations
+    where a global scan is too expensive and the caller wants one influencer
+    per population segment. Each entry then carries ``cluster_size`` and
+    ``cluster_centroid_distance``.
+
+    Side effect: every call writes a per-entity row into
+    ``_gds_meta/calibration_history/<pattern_id>/influencer_<pk>.json`` so
+    that ``calibration_influencer_history`` returns chronological history
+    without recomputing the leave-one-out scan.
+
     Args:
       pattern_id: anchor pattern (event patterns have no population stats).
       top_n: max results (hard cap 50).
@@ -288,10 +304,13 @@ def find_calibration_influencers(
       sample_size: subsample N entities before leave-one-out scan.
       verbose: when True, each entry gains cascading_flip_count
                (extra O(top_n × N × D) recompute cost).
+      auto_discover: when True, run k-means on the geometry and rank
+                     cluster representatives only.
+      auto_k: number of clusters when auto_discover=True (hard cap 50).
 
     Returns: JSON-encoded InfluenceReport with cell_counts + entries.
 
-    Raises ValueError on event pattern, N<2, invalid threshold/classify/top_n.
+    Raises ValueError on event pattern, N<2, invalid threshold/classify/top_n/auto_k.
     """
     from dataclasses import asdict
 
@@ -304,8 +323,46 @@ def find_calibration_influencers(
         high_threshold_pct=high_threshold_pct,
         sample_size=sample_size,
         verbose=verbose,
+        auto_discover=auto_discover,
+        auto_k=auto_k,
     )
-    return json.dumps(asdict(report), indent=2, default=str)
+    payload = _sanitize_for_json(asdict(report))
+    return json.dumps(payload, indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def calibration_influencer_history(
+    primary_key: str,
+    pattern_id: str,
+) -> str:
+    """Per-epoch μ-impact history for a known influencer.
+
+    Returns the chronological list of ``(epoch, calibrated_at, mu_impact,
+    delta_norm_impact)`` records previously written for ``primary_key`` in
+    ``pattern_id`` by ``find_calibration_influencers``. When the entity has
+    no recorded impact yet, returns an empty history together with a
+    ``hint`` explaining how to populate the cache.
+
+    Args:
+      primary_key: entity identifier.
+      pattern_id: anchor pattern whose calibration history to query.
+
+    Returns: JSON-encoded InfluencerHistoryReport with history list, n_epochs,
+    elapsed_ms, and an optional populate hint when the cache is empty.
+
+    Raises ValueError on unknown pattern_id.
+    """
+    from dataclasses import asdict
+
+    _require_navigator()
+    nav = _state["navigator"]
+    report = nav.calibration_influencer_history(
+        primary_key=primary_key,
+        pattern_id=pattern_id,
+    )
+    payload = _sanitize_for_json(asdict(report))
+    return json.dumps(payload, indent=2, default=str)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -616,6 +673,7 @@ def find_similar_entities(
         missing_edge_to=missing_edge_to,
         dim_mask=dim_mask,
         metric=metric,
+        with_neighbor_anomaly=True,
     )
 
     # Reference metadata from stored geometry (not recomputed — correct for continuous mode)
@@ -636,11 +694,16 @@ def find_similar_entities(
         p = entity_lookup.get(key, {})
         return {k: v for k, v in p.items() if v is not None} if p else {}
 
+    anomaly_map = getattr(similar_pairs, "is_anomaly_map", None) or {}
     similar_list = [
         {
             "primary_key": bk,
             **({} if not _props(bk) else {"properties": _props(bk)}),
             "distance": round(float(dist), 4),
+            **(
+                {"is_anomaly": bool(anomaly_map[bk])}
+                if bk in anomaly_map else {}
+            ),
         }
         for bk, dist in similar_pairs
     ]
@@ -655,6 +718,14 @@ def find_similar_entities(
         },
         "similar": similar_list,
     }
+    if similar_list:
+        neighbor_anomaly_count = sum(
+            1 for entry in similar_list if entry.get("is_anomaly") is True
+        )
+        result["neighbor_anomaly_count"] = neighbor_anomaly_count
+        result["neighbor_anomaly_rate"] = round(
+            neighbor_anomaly_count / len(similar_list), 4,
+        )
     if missing_edge_to and len(similar_list) < top_n:
         result["partial_results_warning"] = (
             f"Only {len(similar_list)} of {top_n} requested — "
@@ -2947,6 +3018,49 @@ def passive_scan(
         top_n=top_n,
     )
 
+    def _interpret_hit(h) -> str | None:
+        n_sources = len(h.sources)
+        if n_sources < 2:
+            return None
+        flagged: list[str] = [
+            name for name, v in h.sources.items() if v.anomalous_count > 0
+        ]
+        flagged_count = len(flagged)
+        if flagged_count == 1:
+            others = [name for name in h.sources if name not in flagged]
+            others_csv = ", ".join(others)
+            return (
+                f"anomalous in {flagged[0]} only, normal in {others_csv} — "
+                "potential cross-pattern discrepancy"
+            )
+        if flagged_count == n_sources:
+            return (
+                f"anomalous across all {n_sources} sources — "
+                "coordinated multi-pattern anomaly"
+            )
+        return None
+
+    hits_payload = []
+    for h in result.hits:
+        hit_dict: dict[str, object] = {
+            "primary_key": h.primary_key,
+            "score": h.score,
+            "weighted_score": h.weighted_score,
+            "sources": {
+                k: {
+                    "anomalous_count": v.anomalous_count,
+                    "related_count": v.related_count,
+                    "max_delta_norm": round(v.max_delta_norm, 4),
+                    "anomaly_intensity": round(v.anomaly_intensity, 4),
+                }
+                for k, v in h.sources.items()
+            },
+        }
+        interpretation = _interpret_hit(h)
+        if interpretation is not None:
+            hit_dict["interpretation"] = interpretation
+        hits_payload.append(hit_dict)
+
     resp = {
         "home_line_id": result.home_line_id,
         "scoring": scoring,
@@ -2954,23 +3068,7 @@ def passive_scan(
         "total_entities": result.total_entities,
         "total_flagged": result.total_flagged,
         "sources_summary": result.sources_summary,
-        "hits": [
-            {
-                "primary_key": h.primary_key,
-                "score": h.score,
-                "weighted_score": h.weighted_score,
-                "sources": {
-                    k: {
-                        "anomalous_count": v.anomalous_count,
-                        "related_count": v.related_count,
-                        "max_delta_norm": round(v.max_delta_norm, 4),
-                        "anomaly_intensity": round(v.anomaly_intensity, 4),
-                    }
-                    for k, v in h.sources.items()
-                },
-            }
-            for h in result.hits
-        ],
+        "hits": hits_payload,
     }
     return json.dumps(resp, indent=2, default=str)
 
@@ -3760,6 +3858,18 @@ def chain_full_loop_summary(
     ``escalate to SAR`` / ``continue investigation`` /
     ``false-positive candidate`` recommended actions.
 
+    ``summary`` also exposes a chain-level reliability rollup derived
+    from per-member ``signed_confidence`` ranking on the anchor pattern:
+    ``chain_mean_signed_confidence`` (mean signed-confidence score),
+    ``chain_n_low_confidence_members`` (count with
+    ``reliability_penalty >= 0.5``),
+    ``chain_n_single_dim_driven_members`` (count with single-dim driven
+    flag), and ``chain_confidence_verdict`` ∈ {``"high"``, ``"medium"``,
+    ``"low"``, ``"label-aware-unavailable"``}. When the anchor pattern
+    lacks ``label_aware_calibration`` the four fields are ``null`` and
+    the verdict is ``"label-aware-unavailable"``. A verdict of ``"low"``
+    subtracts 10 from the overall investigation score.
+
     Args:
         chain_id: chain anchor primary key.
         chain_pattern_id: chain anchor pattern id (built from chain_lines:).
@@ -3887,6 +3997,16 @@ def chain_full_loop_summary(
     else:
         sar_block = _skipped
 
+    # Chain-level reliability rollup — derived from per-member
+    # signed_confidence ranking on the anchor pattern. Soft-failure:
+    # any exception leaves rollup_block ok=False so the summary still
+    # produces, with the four rollup fields = None.
+    rollup_block = _safe(lambda: nav.chain_signed_confidence_rollup(
+        chain_id,
+        chain_pattern=chain_pattern_id,
+        anchor_pattern=anchor_pattern_id,
+    ))
+
     # Score + classify
     score = _score_chain_full_loop(
         coherent=coherent_block,
@@ -3899,7 +4019,21 @@ def chain_full_loop_summary(
         include_sar_rationale=include_sar_rationale,
         top_n_extensions=top_n_extensions,
     )
+    # Apply -10 score adjustment when the chain-level reliability
+    # verdict is "low" — pre-classification, so the strong/moderate/weak
+    # boundary picks up the penalty.
+    rollup_fields = _extract_rollup_fields(rollup_block)
+    if rollup_fields["chain_confidence_verdict"] == "low":
+        score["score"] = max(0, int(score.get("score", 0)) - 10)
+        fired = score.get("fired") or []
+        fired.append("low-confidence-chain penalty -10")
+        score["fired"] = fired
     summary = _classify_chain_full_loop_summary(score)
+    # Attach the four chain-level reliability fields to the summary
+    # block. Always emitted (None when label-aware unavailable / empty
+    # chain / step soft-failed) so downstream consumers don't have to
+    # branch on field presence.
+    summary.update(rollup_fields)
 
     elapsed_ms = round((_time.perf_counter() - t0) * 1000.0, 2)
     out: dict[str, Any] = {
@@ -3917,6 +4051,34 @@ def chain_full_loop_summary(
         "elapsed_ms": elapsed_ms,
     }
     return json.dumps(_sanitize_for_json(out), indent=2, default=str)
+
+
+def _extract_rollup_fields(rollup_block: dict[str, Any]) -> dict[str, Any]:
+    """Pull the four chain-level reliability fields out of the rollup block.
+
+    Soft-failure: when the rollup step raised, all four fields default
+    to None / verdict=None so the summary contract is uniform.
+    """
+    if not rollup_block.get("ok"):
+        return {
+            "chain_mean_signed_confidence": None,
+            "chain_n_low_confidence_members": None,
+            "chain_n_single_dim_driven_members": None,
+            "chain_confidence_verdict": None,
+        }
+    data = rollup_block.get("data") or {}
+    return {
+        "chain_mean_signed_confidence": data.get(
+            "chain_mean_signed_confidence",
+        ),
+        "chain_n_low_confidence_members": data.get(
+            "chain_n_low_confidence_members",
+        ),
+        "chain_n_single_dim_driven_members": data.get(
+            "chain_n_single_dim_driven_members",
+        ),
+        "chain_confidence_verdict": data.get("chain_confidence_verdict"),
+    }
 
 
 def _score_chain_full_loop(

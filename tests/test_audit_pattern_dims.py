@@ -569,3 +569,118 @@ def test_decision_tree_preserved_for_gaussian_below_kind_mismatch_gates(
     assert rows_by_label["drop_dim"]["recommended_action"] == (
         "drop_low_separation"
     )
+
+
+def test_auroc_per_dim_present_and_matches_closed_form(fake_state):
+    """Every row in the label-aware response carries ``auroc_per_dim``
+    equal to ``Phi((mu_pos - mu_neg) / sqrt(sigma_pos^2 + sigma_neg^2))``.
+
+    Three engineered tuples cover strong / moderate / weak separation
+    plus asymmetric class sigmas — the closed form must match the
+    response field to 6 decimals.
+    """
+    from scipy.special import ndtr
+    tuples = {
+        "strong_dim": (2.0, 0.5, 0.0, 0.5),
+        "moderate_dim": (1.0, 1.0, 0.0, 1.5),
+        "weak_dim": (0.1, 2.0, 0.0, 2.0),
+    }
+    lac = {
+        label: _dim_cal(
+            mu_pos=mp, sigma_pos=sp, mu_neg=mn, sigma_neg=sn, direction=0.5,
+        )
+        for label, (mp, sp, mn, sn) in tuples.items()
+    }
+    fake_state(
+        "p_auroc",
+        _make_pattern(
+            dim_labels=list(tuples.keys()),
+            mu=[1.0, 0.5, 0.05],
+            sigma_diag=[0.5, 1.25, 2.0],
+            label_aware_calibration=lac,
+        ),
+    )
+    body = audit_pattern_dims(pattern_id="p_auroc", top_k=3)
+    parsed = json.loads(body)
+    rows_by_label = {row["dim_label"]: row for row in parsed["dims"]}
+    for label, (mp, sp, mn, sn) in tuples.items():
+        expected = float(ndtr((mp - mn) / math.sqrt(sp ** 2 + sn ** 2)))
+        got = rows_by_label[label]["auroc_per_dim"]
+        assert got == pytest.approx(expected, abs=1e-6), (
+            f"{label}: got {got}, expected {expected}"
+        )
+        assert 0.0 <= got <= 1.0
+
+
+def test_auroc_per_dim_degenerate_zero_class_sigmas(fake_state):
+    """When both ``sigma_pos`` and ``sigma_neg`` are zero the closed
+    form is undefined; the tool reports ``auroc_per_dim = 0.5``.
+    """
+    fake_state(
+        "p_degen",
+        _make_pattern(
+            dim_labels=["zero_sigma_dim"],
+            mu=[0.5],
+            sigma_diag=[0.5],
+            label_aware_calibration={
+                "zero_sigma_dim": _dim_cal(
+                    mu_pos=1.0, sigma_pos=0.0,
+                    mu_neg=0.0, sigma_neg=0.0, direction=0.0,
+                ),
+            },
+        ),
+    )
+    body = audit_pattern_dims(pattern_id="p_degen")
+    parsed = json.loads(body)
+    assert parsed["dims"][0]["auroc_per_dim"] == pytest.approx(0.5, abs=1e-12)
+
+
+def test_pattern_level_displacement_means_emitted_when_present(fake_state):
+    """``intrinsic_displacement_mean`` / ``extrinsic_displacement_mean``
+    populated on Pattern → surfaced in the top-level response.
+    """
+    pattern = _make_pattern(
+        dim_labels=["dim_a"],
+        mu=[0.0],
+        sigma_diag=[1.0],
+        label_aware_calibration={
+            "dim_a": _dim_cal(
+                mu_pos=1.0, sigma_pos=1.0,
+                mu_neg=-1.0, sigma_neg=1.0, direction=0.7,
+            ),
+        },
+    )
+    pattern.intrinsic_displacement_mean = 0.42
+    pattern.extrinsic_displacement_mean = 0.31
+    fake_state("p_means", pattern)
+    body = audit_pattern_dims(pattern_id="p_means")
+    parsed = json.loads(body)
+    assert parsed["intrinsic_displacement_mean"] == pytest.approx(
+        0.42, abs=1e-12,
+    )
+    assert parsed["extrinsic_displacement_mean"] == pytest.approx(
+        0.31, abs=1e-12,
+    )
+
+
+def test_pattern_level_displacement_means_null_on_legacy_pattern(fake_state):
+    """Pattern without the new fields → response carries ``None`` for
+    both means (shape-stable for legacy spheres).
+    """
+    pattern = _make_pattern(
+        dim_labels=["dim_a"],
+        mu=[0.0],
+        sigma_diag=[1.0],
+        label_aware_calibration={
+            "dim_a": _dim_cal(
+                mu_pos=1.0, sigma_pos=1.0,
+                mu_neg=-1.0, sigma_neg=1.0, direction=0.7,
+            ),
+        },
+    )
+    # No `intrinsic_displacement_mean` attribute — legacy sphere shape.
+    fake_state("p_legacy", pattern)
+    body = audit_pattern_dims(pattern_id="p_legacy")
+    parsed = json.loads(body)
+    assert parsed["intrinsic_displacement_mean"] is None
+    assert parsed["extrinsic_displacement_mean"] is None

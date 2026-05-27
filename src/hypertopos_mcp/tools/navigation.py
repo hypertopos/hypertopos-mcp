@@ -174,6 +174,13 @@ def dive_solid(
         )
     # Add forecast when solid has enough slices
     if len(solid.slices) >= 3:
+        from hypertopos.engine.topology import local_trajectory_shape
+
+        delta_norms = [float(sl.delta_norm_snapshot) for sl in solid.slices]
+        shape = local_trajectory_shape(delta_norms)
+        if shape is not None:
+            ss["trajectory_shape"] = shape
+
         forecast_dict = nav.solid_forecast(
             primary_key,
             pattern_id,
@@ -246,6 +253,8 @@ def find_anomalies(
     metric: str = "L2",
     min_confidence: float = 0.0,
     dimension_weights: dict | None = None,
+    sample_size: int | None = None,
+    boundary_aware: bool = False,
     summary: bool = False,
 ) -> str:
     """Find the most anomalous polygons in a pattern, ranked by delta_norm.
@@ -267,6 +276,8 @@ def find_anomalies(
     select: "top_norm" (default, rank by score) or "diverse" (submodular facility location — K most diverse representatives with representativeness counts).
     min_confidence: filter by bootstrap confidence threshold (0.0 = no filter). Requires bregman_calibration=True on the sphere.
     dimension_weights: optional {dim_name: float} mapping to multiply each dim's contribution before computing the rank score. Default None = no weighting. Missing dims default to 1.0; explicit 0.0 silences a dim; empty {} is equivalent to None. Requires metric in ('L2', 'Linf'). Connects stratified correlation gate verdicts to runtime ranking — discount NOISE-classified dims via 0.0, down-weight HEAVY-TAIL dims via 0.5. When weights are active, only `delta_norm` on the returned polygons is the weighted rank score; `delta`, `is_anomaly`, `bregman_divergence`, and `delta_rank_pct` come from storage and reflect unweighted calibration.
+    sample_size: optional cap on geometry rows scanned. When set below the population size, a random sample is drawn before threshold filtering and ranking. Forces the in-process scan path. Default None = scan full population.
+    boundary_aware: when True (default False), stratified sampling allocates half the sample_size budget to entities within [0.8 * theta_norm, 1.2 * theta_norm] (boundary band), other half drawn from the rest of the population. Requires sample_size to be set. Useful for calibration audits where boundary cases are under-represented under uniform sampling.
     summary: when True, drops the full delta array, edges list, and enriched properties from each polygon to keep the response compact for wide patterns (>20 dims). Retains primary_key, delta_norm, is_anomaly, delta_rank_pct, bregman_divergence, q_value family, reliability_flags, and anomaly_dimensions. Call get_polygon for full per-polygon detail.
     The edges list (when present) is filtered to actual jumpable entity edges; degenerate dim-line edges with empty point_key are omitted for response size — call get_polygon to retrieve the full edge list including dim lines.
     Returns: anomalous polygons with anomaly_dimensions, clusters, total_found.
@@ -322,6 +333,8 @@ def find_anomalies(
         metric=metric,
         min_confidence=min_confidence,
         dimension_weights=dimension_weights,
+        sample_size=sample_size,
+        boundary_aware=boundary_aware,
     )
 
     serialized = [_serialize_polygon(p) for p in polygons]

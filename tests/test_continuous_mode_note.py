@@ -17,8 +17,8 @@ class TestContinuousModeNote:
         from hypertopos_mcp.tools.observability import sphere_overview
 
         result = json.loads(sphere_overview(pattern_id="tx_pattern"))
-        assert len(result) == 1
-        entry = result[0]
+        assert len(result["patterns"]) == 1
+        entry = result["patterns"][0]
         assert "continuous_mode_note" in entry, (
             "Missing continuous_mode_note for pattern with edge_max"
         )
@@ -39,8 +39,8 @@ class TestContinuousModeNote:
             # Remove edge_max to simulate a discrete pattern
             pattern.edge_max = None
             result = json.loads(sphere_overview(pattern_id="account_behavior_pattern"))
-            assert len(result) == 1
-            entry = result[0]
+            assert len(result["patterns"]) == 1
+            entry = result["patterns"][0]
             assert "continuous_mode_note" not in entry, (
                 "Discrete pattern should not have continuous_mode_note"
             )
@@ -52,7 +52,7 @@ class TestContinuousModeNote:
         from hypertopos_mcp.tools.observability import sphere_overview
 
         result = json.loads(sphere_overview(pattern_id="tx_pattern"))
-        note = result[0]["continuous_mode_note"]
+        note = result["patterns"][0]["continuous_mode_note"]
         assert "centroid_map(group_by_line)" in note
         assert "contrast_populations(edge spec)" in note
         assert "group_by_property" in note
@@ -65,7 +65,7 @@ class TestContinuousModeNote:
         result = json.loads(sphere_overview())
         sphere = _state["sphere"]._sphere
 
-        for entry in result:
+        for entry in result["patterns"]:
             pid = entry["pattern_id"]
             pattern = sphere.patterns.get(pid)
             if pattern is not None and pattern.edge_max is not None:
@@ -90,7 +90,7 @@ class TestContinuousModeNote:
             # Inject edge_max to ensure continuous-mode anchor
             pattern.edge_max = np.array([1.0, 1.0], dtype=np.float32)
             result = json.loads(sphere_overview(pattern_id="account_behavior_pattern"))
-            entry = result[0]
+            entry = result["patterns"][0]
             assert "continuous_mode_note" in entry, (
                 "Anchor pattern with injected edge_max should have continuous_mode_note"
             )

@@ -1946,6 +1946,7 @@ class TestFindSimilarEntities:
                 missing_edge_to=None,
                 dim_mask=None,
                 metric="L2",
+                with_neighbor_anomaly=True,
             )
             assert result["reference"]["primary_key"] == "CUST-001"
             assert result["reference"]["delta_norm"] == pytest.approx(1.23)
@@ -2085,6 +2086,266 @@ class TestFindSimilarEntities:
         finally:
             for k in list(_state.keys()):
                 _state[k] = None
+
+    def test_neighbor_anomaly_rate_present(self):
+        """find_similar_entities surfaces neighbor_anomaly_rate + count when neighbours are mixed."""
+        from hypertopos_mcp.server import _state
+        from hypertopos_mcp.tools.analysis import find_similar_entities
+        from hypertopos.navigation.navigator import SimilarityResult
+
+        nav_mock = MagicMock()
+        sr = SimilarityResult(
+            [("CUST-002", 0.10), ("CUST-003", 0.20), ("CUST-004", 0.30),
+             ("CUST-005", 0.40), ("CUST-006", 0.50)],
+            is_anomaly_map={
+                "CUST-002": True, "CUST-003": False, "CUST-004": True,
+                "CUST-005": True, "CUST-006": True,
+            },
+        )
+        self._make_similar_state(nav_mock, sr)
+
+        try:
+            result = json.loads(find_similar_entities("CUST-001", "customer_pattern", 5))
+            assert result["neighbor_anomaly_count"] == 4
+            assert result["neighbor_anomaly_rate"] == pytest.approx(0.8)
+        finally:
+            for k in list(_state.keys()):
+                _state[k] = None
+
+    def test_neighbor_anomaly_rate_zero_when_all_normal(self):
+        """All-normal neighbours → rate=0.0, count=0."""
+        from hypertopos_mcp.server import _state
+        from hypertopos_mcp.tools.analysis import find_similar_entities
+        from hypertopos.navigation.navigator import SimilarityResult
+
+        nav_mock = MagicMock()
+        sr = SimilarityResult(
+            [("CUST-002", 0.10), ("CUST-003", 0.20)],
+            is_anomaly_map={"CUST-002": False, "CUST-003": False},
+        )
+        self._make_similar_state(nav_mock, sr)
+
+        try:
+            result = json.loads(find_similar_entities("CUST-001", "customer_pattern", 2))
+            assert result["neighbor_anomaly_count"] == 0
+            assert result["neighbor_anomaly_rate"] == 0.0
+        finally:
+            for k in list(_state.keys()):
+                _state[k] = None
+
+    def test_neighbor_anomaly_rate_one_when_all_anomalous(self):
+        """All-anomalous neighbours → rate=1.0."""
+        from hypertopos_mcp.server import _state
+        from hypertopos_mcp.tools.analysis import find_similar_entities
+        from hypertopos.navigation.navigator import SimilarityResult
+
+        nav_mock = MagicMock()
+        sr = SimilarityResult(
+            [("CUST-002", 0.10), ("CUST-003", 0.20), ("CUST-004", 0.30)],
+            is_anomaly_map={
+                "CUST-002": True, "CUST-003": True, "CUST-004": True,
+            },
+        )
+        self._make_similar_state(nav_mock, sr)
+
+        try:
+            result = json.loads(find_similar_entities("CUST-001", "customer_pattern", 3))
+            assert result["neighbor_anomaly_count"] == 3
+            assert result["neighbor_anomaly_rate"] == 1.0
+        finally:
+            for k in list(_state.keys()):
+                _state[k] = None
+
+    def test_neighbor_anomaly_rate_absent_when_no_neighbours(self):
+        """Empty similar list → no rate/count fields."""
+        from hypertopos_mcp.server import _state
+        from hypertopos_mcp.tools.analysis import find_similar_entities
+
+        nav_mock = MagicMock()
+        self._make_similar_state(nav_mock, [])
+
+        try:
+            result = json.loads(find_similar_entities("CUST-001", "customer_pattern", 3))
+            assert "neighbor_anomaly_rate" not in result
+            assert "neighbor_anomaly_count" not in result
+        finally:
+            for k in list(_state.keys()):
+                _state[k] = None
+
+
+class TestPassiveScanInterpretation:
+    """passive_scan MCP tool — H1 interpretive output."""
+
+    def teardown_method(self):
+        from hypertopos_mcp.server import _state
+
+        for k in list(_state.keys()):
+            _state[k] = None
+
+    def _setup_scanner(self, monkeypatch, hits, sources_summary):
+        """Patch PassiveScanner.scan to return a deterministic ScanResult."""
+        from hypertopos.navigation.scanner import (
+            PassiveScanner,
+            ScanResult,
+        )
+        from hypertopos_mcp.server import _state
+
+        result = ScanResult(
+            home_line_id="account",
+            total_entities=100,
+            total_flagged=len(hits),
+            hits=hits,
+            sources_summary=sources_summary,
+            elapsed_ms=1.0,
+        )
+
+        def fake_scan(self, home_line_id, scoring="count", threshold=2, top_n=100):  # noqa: ARG001
+            return result
+
+        def fake_auto_discover(self, home_line_id, **_kw):  # noqa: ARG001
+            return self
+
+        monkeypatch.setattr(PassiveScanner, "scan", fake_scan)
+        monkeypatch.setattr(PassiveScanner, "auto_discover", fake_auto_discover)
+
+        nav_mock = MagicMock()
+        sphere_mock = MagicMock()
+        sphere_mock._sphere = MagicMock()
+        session_mock = MagicMock()
+        session_mock._reader = MagicMock()
+        session_mock._manifest = MagicMock()
+        _state["navigator"] = nav_mock
+        _state["sphere"] = sphere_mock
+        _state["session"] = session_mock
+
+    @staticmethod
+    def _make_hit(pk, sources_dict, score=2, weighted_score=2.0):
+        from hypertopos.navigation.scanner import ScanHit, ScanSourceHit
+
+        sources = {
+            name: ScanSourceHit(
+                anomalous_count=spec.get("anomalous_count", 0),
+                related_count=spec.get("related_count", 1),
+                max_delta_norm=spec.get("max_delta_norm", 0.0),
+                anomaly_intensity=spec.get("anomaly_intensity", 0.0),
+            )
+            for name, spec in sources_dict.items()
+        }
+        return ScanHit(
+            primary_key=pk,
+            score=score,
+            weighted_score=weighted_score,
+            sources=sources,
+        )
+
+    def test_interpretation_partial_match_count_mode(self, monkeypatch):
+        """flagged_count=1, n_sources=3 → cross-pattern-discrepancy hint."""
+        from hypertopos_mcp.tools.analysis import passive_scan
+
+        hit = self._make_hit(
+            "ACC-1",
+            {
+                "src_a": {"anomalous_count": 1},
+                "src_b": {"anomalous_count": 0},
+                "src_c": {"anomalous_count": 0},
+            },
+            score=1,
+            weighted_score=1.0,
+        )
+        self._setup_scanner(monkeypatch, [hit], {"src_a": 5, "src_b": 0, "src_c": 0})
+
+        result = json.loads(passive_scan(home_line_id="account", scoring="count", threshold=1))
+        assert len(result["hits"]) == 1
+        interp = result["hits"][0]["interpretation"]
+        assert "src_a" in interp
+        assert "src_b" in interp and "src_c" in interp
+        assert "cross-pattern discrepancy" in interp
+
+    def test_interpretation_full_match(self, monkeypatch):
+        """flagged_count=3, n_sources=3 → coordinated multi-pattern anomaly hint."""
+        from hypertopos_mcp.tools.analysis import passive_scan
+
+        hit = self._make_hit(
+            "ACC-1",
+            {
+                "src_a": {"anomalous_count": 1},
+                "src_b": {"anomalous_count": 1},
+                "src_c": {"anomalous_count": 1},
+            },
+            score=3,
+            weighted_score=3.0,
+        )
+        self._setup_scanner(monkeypatch, [hit], {"src_a": 1, "src_b": 1, "src_c": 1})
+
+        result = json.loads(passive_scan(home_line_id="account", scoring="count", threshold=1))
+        interp = result["hits"][0]["interpretation"]
+        assert "coordinated multi-pattern anomaly" in interp
+        assert "3 sources" in interp
+
+    def test_interpretation_absent_in_middle(self, monkeypatch):
+        """flagged_count=2, n_sources=3 → no interpretation field (middle gating)."""
+        from hypertopos_mcp.tools.analysis import passive_scan
+
+        hit = self._make_hit(
+            "ACC-1",
+            {
+                "src_a": {"anomalous_count": 1},
+                "src_b": {"anomalous_count": 1},
+                "src_c": {"anomalous_count": 0},
+            },
+            score=2,
+            weighted_score=2.0,
+        )
+        self._setup_scanner(monkeypatch, [hit], {"src_a": 1, "src_b": 1, "src_c": 0})
+
+        result = json.loads(passive_scan(home_line_id="account", scoring="count", threshold=2))
+        assert "interpretation" not in result["hits"][0]
+
+    def test_interpretation_absent_single_source(self, monkeypatch):
+        """n_sources=1 → no interpretation field (nothing to triangulate against)."""
+        from hypertopos_mcp.tools.analysis import passive_scan
+
+        hit = self._make_hit(
+            "ACC-1",
+            {"src_a": {"anomalous_count": 1}},
+            score=1,
+            weighted_score=1.0,
+        )
+        self._setup_scanner(monkeypatch, [hit], {"src_a": 1})
+
+        result = json.loads(passive_scan(home_line_id="account", scoring="count", threshold=1))
+        assert "interpretation" not in result["hits"][0]
+
+    def test_interpretation_weighted_mode_invariance(self, monkeypatch):
+        """Same flagged_count under scoring='weighted' produces same interpretation.
+
+        Locks the rule that interpretation is mode-independent (gates on
+        flagged_count, not on the `score` field which differs between count
+        and weighted modes).
+        """
+        from hypertopos_mcp.tools.analysis import passive_scan
+
+        # flagged_count=1, n_sources=3 — same structural pattern.
+        hit = self._make_hit(
+            "ACC-1",
+            {
+                "src_a": {"anomalous_count": 1},
+                "src_b": {"anomalous_count": 0},
+                "src_c": {"anomalous_count": 0},
+            },
+            # In weighted mode the score may be e.g. 1.5 — irrelevant to the rule.
+            score=1,
+            weighted_score=1.5,
+        )
+        self._setup_scanner(monkeypatch, [hit], {"src_a": 5, "src_b": 0, "src_c": 0})
+
+        count_resp = json.loads(
+            passive_scan(home_line_id="account", scoring="count", threshold=1)
+        )
+        weighted_resp = json.loads(
+            passive_scan(home_line_id="account", scoring="weighted", threshold=1)
+        )
+        assert count_resp["hits"][0]["interpretation"] == weighted_resp["hits"][0]["interpretation"]
 
 
 class TestFindDriftingEntities:
@@ -2600,6 +2861,104 @@ class TestDiveSolid:
             "customer_pattern",
             current_delta_norm=float(solid.base_polygon.delta_norm),
         )
+
+
+class TestDiveSolidTrajectoryShape:
+    """dive_solid MCP tool — H3 trajectory_shape field on temporal histories."""
+
+    def teardown_method(self):
+        from hypertopos_mcp.server import _state
+
+        for k in list(_state.keys()):
+            _state[k] = None
+
+    @staticmethod
+    def _make_engineered_slice(idx: int, norm: float) -> SolidSlice:
+        return SolidSlice(
+            slice_index=idx,
+            timestamp=datetime(2024, 3, idx + 1, tzinfo=UTC),
+            deformation_type="edge",
+            delta_snapshot=np.array([norm, 0.0], dtype=np.float32),
+            delta_norm_snapshot=norm,
+            pattern_ver=1,
+            changed_property=None,
+            changed_line_id="products",
+            added_edge=None,
+        )
+
+    def _setup_with_norms(self, delta_norms: list[float]):
+        from hypertopos_mcp.server import _state
+
+        slices = [
+            self._make_engineered_slice(i, n) for i, n in enumerate(delta_norms)
+        ]
+        base = _make_polygon("CUST-0001")
+        solid = Solid(
+            primary_key="CUST-0001",
+            pattern_id="customer_pattern",
+            base_polygon=base,
+            slices=slices,
+        )
+
+        nav_mock = MagicMock()
+        nav_mock.position = solid
+        nav_mock.π3_dive_solid = MagicMock()
+        nav_mock.solid_forecast.return_value = None
+        nav_mock.solid_reputation.return_value = None
+
+        pattern_mock = MagicMock()
+        pattern_mock.theta_norm = 2.5
+        pattern_mock.prop_columns = []
+
+        _state["sphere"] = MagicMock()
+        _state["sphere"]._sphere.lines = {}
+        _state["sphere"]._sphere.patterns = {"customer_pattern": pattern_mock}
+        _state["navigator"] = nav_mock
+        _state["session"] = MagicMock()
+        _state["session"]._reader = MagicMock()
+        _state["engine"] = MagicMock()
+        _state["manifest"] = MagicMock()
+
+    def test_trajectory_shape_arch(self):
+        """Up-then-down engineered series → trajectory_shape='arch'."""
+        from hypertopos_mcp.tools.navigation import dive_solid
+
+        self._setup_with_norms([1.0, 2.0, 3.0, 2.0, 1.0])
+        result = json.loads(dive_solid("CUST-0001", "customer_pattern"))
+        assert result["trajectory_shape"] == "arch"
+
+    def test_trajectory_shape_v(self):
+        """Down-then-up engineered series → trajectory_shape='V'."""
+        from hypertopos_mcp.tools.navigation import dive_solid
+
+        self._setup_with_norms([3.0, 2.0, 1.0, 2.0, 3.0])
+        result = json.loads(dive_solid("CUST-0001", "customer_pattern"))
+        assert result["trajectory_shape"] == "V"
+
+    def test_trajectory_shape_linear(self):
+        """Monotone engineered series → trajectory_shape='linear'."""
+        from hypertopos_mcp.tools.navigation import dive_solid
+
+        self._setup_with_norms([1.0, 2.0, 3.0, 4.0])
+        result = json.loads(dive_solid("CUST-0001", "customer_pattern"))
+        assert result["trajectory_shape"] == "linear"
+
+    def test_trajectory_shape_flat(self):
+        """Low-variance engineered series → trajectory_shape='flat'."""
+        from hypertopos_mcp.tools.navigation import dive_solid
+
+        # mean=1.0, range=0.02 → 2% of mean (well below 10% threshold)
+        self._setup_with_norms([1.0, 1.01, 0.99])
+        result = json.loads(dive_solid("CUST-0001", "customer_pattern"))
+        assert result["trajectory_shape"] == "flat"
+
+    def test_trajectory_shape_absent_below_three_slices(self):
+        """<3 slices → no trajectory_shape field (consistent with forecast gating)."""
+        from hypertopos_mcp.tools.navigation import dive_solid
+
+        self._setup_with_norms([1.0, 2.0])
+        result = json.loads(dive_solid("CUST-0001", "customer_pattern"))
+        assert "trajectory_shape" not in result
 
 
 class TestDiveSolidStaleForecast:
@@ -3493,7 +3852,7 @@ class TestSphereOverviewAnomalyRateTrendsConsistency:
         self._setup_state(live_anomaly_rate=live, stale_trend_value=stale)
 
         result = json.loads(sphere_overview(detail="full"))
-        entry = result[0]
+        entry = result["patterns"][0]
 
         assert entry["anomaly_rate"] == live
 
@@ -3509,7 +3868,7 @@ class TestSphereOverviewAnomalyRateTrendsConsistency:
         from hypertopos_mcp.tools.observability import sphere_overview
 
         result = json.loads(sphere_overview())  # default = "summary"
-        first_pattern = result[0]
+        first_pattern = result["patterns"][0]
         assert "temporal_quality" not in first_pattern
         assert "calibration_stale" not in first_pattern
 
@@ -3570,7 +3929,7 @@ class TestSphereOverviewProfilingAlerts:
             relations=[rel],
         )
         result = json.loads(sphere_overview())
-        entry = result[0]
+        entry = result["patterns"][0]
         assert "profiling_alerts" in entry
         alert = entry["profiling_alerts"][0]
         assert alert["dimension"] == "avg_late_days"
@@ -3593,7 +3952,7 @@ class TestSphereOverviewProfilingAlerts:
             event_dimensions=[ed],
         )
         result = json.loads(sphere_overview())
-        entry = result[0]
+        entry = result["patterns"][0]
         assert "profiling_alerts" in entry
         alert = entry["profiling_alerts"][0]
         assert alert["ratio"] > 1.5
@@ -3612,7 +3971,7 @@ class TestSphereOverviewProfilingAlerts:
             event_dimensions=[ed],
         )
         result = json.loads(sphere_overview())
-        entry = result[0]
+        entry = result["patterns"][0]
         assert "profiling_alerts" not in entry
 
     def test_no_alert_when_no_dim_percentiles(self):
@@ -3621,7 +3980,7 @@ class TestSphereOverviewProfilingAlerts:
 
         self._setup_state(None)
         result = json.loads(sphere_overview())
-        entry = result[0]
+        entry = result["patterns"][0]
         assert "profiling_alerts" not in entry
 
     def test_orphan_column_filtered_out(self):
@@ -3640,7 +3999,7 @@ class TestSphereOverviewProfilingAlerts:
             relations=[rel],
         )
         result = json.loads(sphere_overview())
-        entry = result[0]
+        entry = result["patterns"][0]
         assert "profiling_alerts" in entry
         dims = [a["dimension"] for a in entry["profiling_alerts"]]
         assert "avg_late_days" in dims
@@ -4969,6 +5328,7 @@ class TestFindSimilarEntitiesMissingEdgeTo:
                 missing_edge_to="transactions",
                 dim_mask=None,
                 metric="L2",
+                with_neighbor_anomaly=True,
             )
         finally:
             for k in list(_state.keys()):
@@ -4998,6 +5358,7 @@ class TestFindSimilarEntitiesMissingEdgeTo:
                 missing_edge_to=None,
                 dim_mask=None,
                 metric="L2",
+                with_neighbor_anomaly=True,
             )
         finally:
             for k in list(_state.keys()):
@@ -5302,7 +5663,7 @@ class TestSphereOverviewEventRateDivergence:
         self._setup_state([alert])
 
         result = json.loads(sphere_overview(detail="full"))
-        entry = result[0]
+        entry = result["patterns"][0]
         assert "event_rate_divergence_alerts" in entry
         alerts = entry["event_rate_divergence_alerts"]
         assert len(alerts) == 1
@@ -5325,7 +5686,7 @@ class TestSphereOverviewEventRateDivergence:
         self._setup_state([alert])
 
         result = json.loads(sphere_overview(detail="summary"))
-        entry = result[0]
+        entry = result["patterns"][0]
         assert "event_rate_divergence_alerts" not in entry
 
     def test_no_alerts_field_when_empty(self):
@@ -5335,6 +5696,6 @@ class TestSphereOverviewEventRateDivergence:
         self._setup_state([])
 
         result = json.loads(sphere_overview(detail="full"))
-        entry = result[0]
+        entry = result["patterns"][0]
         assert "event_rate_divergence_alerts" not in entry
 

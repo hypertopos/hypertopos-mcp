@@ -5,8 +5,19 @@
 from __future__ import annotations
 
 import json
+import math
 
 from hypertopos_mcp.server import _require_navigator, _state, mcp, timed
+
+
+def _sanitize_float(value: float) -> float | None:
+    """Coerce ±inf / NaN to None so strict JSON parsers accept the output."""
+    if value is None:
+        return None
+    f = float(value)
+    if math.isfinite(f):
+        return f
+    return None
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -117,6 +128,48 @@ def detect_trajectory_anomaly(
         },
         indent=2,
         default=str,
+    )
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def classify_trajectory(
+    primary_key: str,
+    pattern_id: str,
+    sample_size: int = 10_000,
+) -> str:
+    """Categorise one entity's temporal trajectory vs the population.
+
+    Combines DTW distance against the population-median trajectory with a
+    first-derivative slope comparison to surface one of:
+      - "outlier" — DTW > 99th percentile of population
+      - "lagging" — entity slope meaningfully below population median slope
+      - "leading" — entity slope meaningfully above population median slope
+      - "typical" — everything else
+      - "unknown" — entity has no temporal data in the sample
+
+    sample_size: cap on entities sampled for the median trajectory and DTW
+      threshold (default 10 000).
+    Anchor patterns with temporal data only.
+    Returns: {primary_key, dtw_distance, category, category_evidence}.
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    try:
+        result = nav.classify_trajectory(
+            primary_key, pattern_id, sample_size=sample_size,
+        )
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)}, indent=2)
+    return json.dumps(
+        {
+            "primary_key": result["primary_key"],
+            "pattern_id": pattern_id,
+            "dtw_distance": _sanitize_float(result["dtw_distance"]),
+            "category": result["category"],
+            "category_evidence": _sanitize_float(result["category_evidence"]),
+        },
+        indent=2,
     )
 
 
