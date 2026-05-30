@@ -10,6 +10,7 @@ from datetime import UTC
 from typing import Any
 
 import numpy as np
+from hypertopos import CalibrationNotFoundError
 from hypertopos.navigation.navigator import GDSNavigationError
 
 from hypertopos_mcp.enrichment import (
@@ -225,13 +226,15 @@ def decompose_drift(
 
     Returns: JSON-encoded IntrinsicExtrinsicReport.
 
-    Raises ValueError on:
+    Returned as a ``{"error": ..., "pattern_id": ...}`` JSON envelope (never a
+    raised exception) on:
       - <2 retained calibration epochs (auto-resolve)
       - v_from == v_to
       - schema_hash mismatch
       - <2 slices in the window
       - event pattern (M3 requires anchor)
-    CalibrationNotFoundError bubbles up if a requested version was GC'd.
+      - a requested calibration version was garbage-collected
+        (``CalibrationNotFoundError``).
     """
     from dataclasses import asdict
     from datetime import datetime
@@ -250,12 +253,18 @@ def decompose_drift(
         else None
     )
 
-    report = nav.decompose_drift(
-        entity_key=entity_key, pattern_id=pattern_id,
-        v_from=v_from, v_to=v_to,
-        timestamp_from=ts_from, timestamp_to=ts_to,
-        top_n=top_n, verbose=verbose,
-    )
+    try:
+        report = nav.decompose_drift(
+            entity_key=entity_key, pattern_id=pattern_id,
+            v_from=v_from, v_to=v_to,
+            timestamp_from=ts_from, timestamp_to=ts_to,
+            top_n=top_n, verbose=verbose,
+        )
+    except (GDSNavigationError, CalibrationNotFoundError, ValueError) as exc:
+        return json.dumps(
+            {"error": str(exc), "pattern_id": pattern_id},
+            indent=2,
+        )
     return json.dumps(asdict(report), indent=2, default=str)
 
 
@@ -508,6 +517,10 @@ def find_density_gaps(
       sample_size: max entities to read (random sample). Default 100,000.
         Pass 0 to read all entities.
 
+    Returns: gap cells sorted by ratio desc, each mapping a dim pair to a
+    named raw-feature range, the observed vs uniform-independence expected
+    count, the ratio, and a BH-corrected q-value; plus the pairs analysed.
+
     Smart-mode keywords: missing segment, density gap, dark matter,
     under-represented, missing combination.
     """
@@ -584,6 +597,11 @@ def find_motif_by_hops(
     together; output is sorted descending on score with unscored motifs
     at the tail. Raises when no anchor companion is configured for the
     queried event pattern.
+
+    Returns: matched motifs (up to ``max_results``), each with its node
+    sequence and per-edge details; when ``score=True`` each motif also
+    carries ``score``, ``score_breakdown``, and ``anchor_pattern_id``
+    provenance, sorted descending on score with unscored motifs at the tail.
 
     Smart-mode keywords: custom motif, hop predicate, edge dim filter
     motif, motif by hops, decreasing chain, structuring chain.
@@ -1067,6 +1085,10 @@ def investigation_coverage(
     Pass explored_keys (list of entity PKs already investigated) to see coverage
     and which unexplored counterparties are anomalous. Helps agents decide where to look next.
     Requires event pattern with edge table.
+
+    Returns: coverage fraction of the entity's edge neighborhood explored,
+    counts of explored vs unexplored counterparties, and the unexplored
+    counterparties that are anomalous (next-step candidates).
     """
     _require_navigator()
     nav = _state["navigator"]
@@ -1350,6 +1372,10 @@ def classify_chain_typology(
     in elevated rank bands), and dominant_top_dim across all anomalous
     hops. Use to get a per-chain operational tag instead of computing
     from raw hops.
+
+    Returns: chain_id plus the five typology axes (shape, peak_position,
+    position_in_chain, extension_signals, dominant_top_dim) and the
+    underlying per-hop progression summary.
     """
     _require_navigator()
     nav = _state["navigator"]
@@ -1688,6 +1714,10 @@ def find_geometric_path(
     - shortest: plain BFS (no geometric scoring)
 
     Requires pattern with edge table (event pattern with from/to structure).
+
+    Returns: `paths` (top 20 by score, each with the entity-key sequence and
+    its coherence score), `summary` (counts plus `paths_truncated_to` when
+    capped), and a `warning` when more than 20 paths were found.
     """
     _require_navigator()
     nav = _state["navigator"]
@@ -1730,6 +1760,10 @@ def discover_chains(
     See "Chain Interpretation" in concepts docs for details.
 
     Requires pattern with edge table (event pattern with from/to structure).
+
+    Returns: `chains` (sorted by geometric coherence desc, each with its
+    entity-key hop sequence, hop_count, total_amount, and coherence score)
+    plus summary counts.
     """
     _require_navigator()
     nav = _state["navigator"]
@@ -1810,8 +1844,9 @@ def find_topological_anomalies(
     force=true to recompute.
 
     Requires n_entities >= 1000 in the loaded sample; warns below 10_000.
-    Output sorted by topo_score descending. Fields: primary_key, topo_score,
-    h1_max_persistence, h0_mean_death, n_h1_features, computed_at.
+
+    Returns: entities sorted by topo_score descending, each with primary_key,
+    topo_score, h1_max_persistence, h0_mean_death, n_h1_features, computed_at.
     """
     _require_navigator()
     nav = _state["navigator"]
@@ -1910,6 +1945,12 @@ def simulate_edge_removal(
     threshold lookup and is held constant — reported in `dimensions_skipped`.
     `event_dimensions` and `prop_columns` are unchanged-by-design (no
     per-edge contribution by construction).
+
+    Returns: primary_key, pattern_id, the original delta_norm, and candidate
+    edges sorted by |drop_pct| descending — each with the new delta_norm, the
+    percent drop, and the dominant dim that changed; plus `dimensions_skipped`
+    for the held-constant `count_above_threshold` dims. Invalid input returned
+    as `{"error": ..., "primary_key": ...}`.
     """
     _require_navigator()
     nav = _state["navigator"]
@@ -3377,6 +3418,863 @@ def find_diverse_explanations(
         )
     except (GDSNavigationError, ValueError) as exc:
         return json.dumps({"error": str(exc), "primary_key": primary_key})
+    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def assess_anomaly_certainty(
+    primary_key: str,
+    pattern_id: str,
+    perturbation_alphas: list[float] | None = None,
+) -> str:
+    """Agent-correctness composer — how confident should you be in an entity's anomaly classification.
+
+    Required:
+      - primary_key (str): entity identifier.
+      - pattern_id (str): pattern holding the entity's geometry row.
+
+    Optional:
+      - perturbation_alphas (list[float], default [0.005, 0.01, 0.05]): FDR
+        alphas swept for stability — the entity is "stable" at alpha when its
+        stored conformal p-value (``conformal_p`` = fraction of the population
+        at least as extreme) is ``<= alpha``. This is a direct primary_key
+        lookup of the focal entity's calibrated p-value, so it is independent
+        of any random sampling and always resolves the focal entity (a
+        population scan could miss it). The sweep thresholds the same stored
+        p-value against each alpha — no per-alpha re-scan.
+
+    Composes five existing primitives — explain_anomaly (driving dims,
+    conformal_p, signed_confidence, reliability flags), get_entity_geometry_meta
+    (delta_norm + theta_norm boundary check), find_anomalies for each alpha
+    (FDR-gated stability), sphere_overview (calibration staleness), and
+    cross_pattern_profile (cross-pattern consistency) — into a single verdict
+    on classification certainty. ``certainty_verdict`` is certainty about
+    the classification, NOT about anomaly status: a confidently-normal
+    entity also receives ``"high"``.
+
+    Verdict rule (deterministic, documented for test discriminability):
+
+      If is_anomalous == True:
+        - stability_count == 3 AND not single_dim_driven AND not near_data_boundary
+          AND not calibration_stale → "high"
+        - stability_count == 0 (conformal_p > the loosest swept alpha — the
+          entity's calibrated p-value disagrees with its stored is_anomaly),
+          OR single_dim_driven AND near_data_boundary → "contested"
+        - stability_count == 1 → "low"
+        - stability_count == 2 → "moderate"
+        - else → "moderate"
+      If is_anomalous == False:
+        - not near_data_boundary AND not calibration_stale → "high"
+        - near_data_boundary → "low"
+        - else → "moderate"
+
+    ``near_data_boundary`` fires when delta_norm sits in [0.8·theta_norm,
+    1.2·theta_norm] — the same band ``find_anomalies(boundary_aware=True)``
+    uses for stratified sampling, so verdicts here align with the
+    calibration-audit surface.
+
+    ``calibration_stale`` mirrors ``sphere_overview.calibration_health`` —
+    True when the focal pattern's health is ``"suspect"`` or ``"poor"``.
+
+    ``cross_pattern_consistency.n_other_patterns_anomalous`` counts patterns
+    OTHER than ``pattern_id`` that also flag the entity as anomalous;
+    ``consistent_classification`` is True when at least one other pattern
+    agrees with the focal classification (anomalous or normal).
+
+    Returns: JSON dict with primary_key, pattern_id, is_anomalous,
+    certainty_verdict ("high" | "moderate" | "low" | "contested"),
+    certainty_score (float in [0.0, 1.0]), conformal_p, signed_confidence,
+    stability_across_alphas (per-alpha bool), reliability_flags
+    (single_dim_driven, near_data_boundary, calibration_stale),
+    cross_pattern_consistency, rationale, recommended_next_steps.
+
+    Per-step ``steps_status`` field exposes which sub-composition succeeded
+    or failed: each step gets ``{ok: true}`` or ``{ok: false, error: <message>}`` —
+    never nulls or missing keys. Strict-JSON sanitised (±inf/NaN → null).
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+
+    if perturbation_alphas is None:
+        perturbation_alphas = [0.005, 0.01, 0.05]
+
+    steps_status: dict[str, dict] = {}
+    result: dict[str, Any] = {
+        "primary_key": primary_key,
+        "pattern_id": pattern_id,
+    }
+
+    # Step 1: stored geometry meta (delta_norm + is_anomaly + delta_rank_pct)
+    try:
+        geo_meta = nav.get_entity_geometry_meta(primary_key, pattern_id)
+        is_anomalous = bool(geo_meta["is_anomaly"])
+        delta_norm = float(geo_meta["delta_norm"])
+        steps_status["entity_geometry"] = {"ok": True}
+    except (KeyError, GDSNavigationError, ValueError) as exc:
+        return json.dumps(
+            {
+                "error": str(exc),
+                "primary_key": primary_key,
+                "pattern_id": pattern_id,
+            },
+            indent=2,
+        )
+
+    result["is_anomalous"] = is_anomalous
+
+    # Step 2: explain_anomaly → conformal_p, signed_confidence, reliability flags,
+    # top dimension driver
+    conformal_p: float | None = None
+    signed_confidence: float | None = None
+    single_dim_driven = False
+    explanation_payload: dict[str, Any] = {}
+    try:
+        explanation_payload = nav.explain_anomaly(primary_key, pattern_id)
+        cp = explanation_payload.get("conformal_p")
+        if cp is not None:
+            try:
+                cp_f = float(cp)
+                conformal_p = cp_f if math.isfinite(cp_f) else None
+            except (TypeError, ValueError):
+                conformal_p = None
+        sc = explanation_payload.get("signed_confidence")
+        if sc is not None:
+            try:
+                sc_f = float(sc)
+                signed_confidence = sc_f if math.isfinite(sc_f) else None
+            except (TypeError, ValueError):
+                signed_confidence = None
+        rel_flags = explanation_payload.get("reliability_flags") or {}
+        single_dim_driven = bool(rel_flags.get("single_dim_driven", False))
+        steps_status["explain_anomaly"] = {"ok": True}
+    except (GDSNavigationError, ValueError, KeyError) as exc:
+        steps_status["explain_anomaly"] = {"ok": False, "error": str(exc)}
+
+    # Step 3: near_data_boundary via theta_norm band
+    near_data_boundary = False
+    try:
+        sphere = _state["sphere"]._sphere
+        pattern = sphere.patterns[pattern_id]
+        theta_norm = float(np.linalg.norm(pattern.theta))
+        if theta_norm > 0.0:
+            near_data_boundary = bool(
+                0.8 * theta_norm <= delta_norm <= 1.2 * theta_norm
+            )
+        steps_status["boundary_band"] = {"ok": True}
+    except (KeyError, AttributeError, ValueError) as exc:
+        steps_status["boundary_band"] = {"ok": False, "error": str(exc)}
+
+    # Step 4: stability across alphas — threshold the focal entity's stored
+    # conformal p-value against each alpha. ``conformal_p`` (read in Step 2 from
+    # explain_anomaly) is the fraction of the population at least as extreme as
+    # the focal entity — the calibrated, full-population empirical p-value that
+    # the entity-axis FDR thresholds. The entity is "stable" at alpha iff
+    # conformal_p <= alpha. This is a direct primary_key lookup that always
+    # resolves the focal entity, so stability never depends on whether a random
+    # population scan happened to draw it (the prior sampled-sweep membership
+    # check returned False for any entity outside the sample → false
+    # "contested" verdicts on most large-sphere entities).
+    stability_across_alphas: dict[str, bool] = {}
+    stability_count = 0
+    if conformal_p is not None:
+        for alpha in perturbation_alphas:
+            stable = bool(conformal_p <= float(alpha))
+            stability_across_alphas[str(alpha)] = stable
+            if stable:
+                stability_count += 1
+        steps_status["stability_sweep"] = {"ok": True}
+    else:
+        # No stored conformal_p (pre-calibration sphere or explain_anomaly
+        # failed) — emit per-alpha False without claiming the step succeeded.
+        for alpha in perturbation_alphas:
+            stability_across_alphas[str(alpha)] = False
+        steps_status["stability_sweep"] = {
+            "ok": False,
+            "error": "conformal_p unavailable — cannot derive FDR-alpha stability",
+        }
+
+    # Step 5: calibration staleness from sphere_overview.calibration_health
+    calibration_stale = False
+    try:
+        overview = nav.sphere_overview(pattern_id)
+        if overview:
+            health = overview[0].get("calibration_health", "good")
+            calibration_stale = bool(health in {"suspect", "poor"})
+        steps_status["calibration_health"] = {"ok": True}
+    except (GDSNavigationError, ValueError, KeyError, IndexError) as exc:
+        steps_status["calibration_health"] = {"ok": False, "error": str(exc)}
+
+    # Step 6: cross-pattern consistency via cross_pattern_profile
+    n_other_patterns_anomalous = 0
+    consistent_classification = False
+    try:
+        profile = nav.cross_pattern_profile(primary_key)
+        signals = profile.get("signals", {}) or {}
+        other_anomalous = 0
+        other_total = 0
+        for pat_id, sig in signals.items():
+            if pat_id == pattern_id:
+                continue
+            other_total += 1
+            if bool(sig.get("is_anomaly", False)):
+                other_anomalous += 1
+        n_other_patterns_anomalous = other_anomalous
+        # Consistent if at least one other pattern agrees on classification.
+        if is_anomalous:
+            consistent_classification = bool(other_anomalous >= 1)
+        else:
+            consistent_classification = bool(
+                other_total >= 1 and (other_total - other_anomalous) >= 1
+            )
+        steps_status["cross_pattern_consistency"] = {"ok": True}
+    except (GDSNavigationError, ValueError, KeyError) as exc:
+        steps_status["cross_pattern_consistency"] = {"ok": False, "error": str(exc)}
+
+    # Verdict derivation — deterministic table per docstring.
+    if is_anomalous:
+        if stability_count == 0 or (single_dim_driven and near_data_boundary):
+            verdict = "contested"
+        elif (
+            stability_count == 3
+            and not single_dim_driven
+            and not near_data_boundary
+            and not calibration_stale
+        ):
+            verdict = "high"
+        elif stability_count == 1:
+            verdict = "low"
+        else:
+            verdict = "moderate"
+    else:
+        if not near_data_boundary and not calibration_stale:
+            verdict = "high"
+        elif near_data_boundary:
+            verdict = "low"
+        else:
+            verdict = "moderate"
+
+    # certainty_score in [0.0, 1.0] — composed from the same five signals.
+    # Anomalous path: stability is the dominant signal (3 alphas → +0.6),
+    # reliability flags subtract, calibration staleness subtracts, cross-
+    # pattern agreement adds a small bonus.
+    if is_anomalous:
+        score = 0.6 * (stability_count / 3.0)
+        if not single_dim_driven:
+            score += 0.15
+        if not near_data_boundary:
+            score += 0.15
+        if not calibration_stale:
+            score += 0.05
+        if consistent_classification:
+            score += 0.05
+    else:
+        # Normal entity certainty: starts high if not near boundary, deducts
+        # if boundary / calibration stale, small bonus for cross-pattern agreement.
+        score = 0.7
+        if near_data_boundary:
+            score -= 0.4
+        if calibration_stale:
+            score -= 0.1
+        if consistent_classification:
+            score += 0.1
+    certainty_score = max(0.0, min(1.0, float(score)))
+
+    # Rationale + next steps
+    fired: list[str] = []
+    if single_dim_driven:
+        fired.append("single dim drives the anomaly mass")
+    if near_data_boundary:
+        fired.append("delta_norm sits inside [0.8·theta, 1.2·theta] boundary band")
+    if calibration_stale:
+        fired.append("calibration health is suspect/poor")
+    if is_anomalous and stability_count < 3:
+        fired.append(
+            f"FDR-sweep stability {stability_count}/3 — conformal_p exceeds "
+            "the tighter swept alphas"
+        )
+    if not consistent_classification:
+        fired.append(
+            "cross-pattern signals disagree on classification "
+            f"({n_other_patterns_anomalous} of the other patterns flag it)"
+        )
+
+    if not fired:
+        rationale = (
+            f"All {len(steps_status)} certainty checks agree on the "
+            f"'{'anomalous' if is_anomalous else 'normal'}' classification."
+        )
+    else:
+        rationale = (
+            f"Verdict '{verdict}' driven by: " + "; ".join(fired) + "."
+        )
+
+    recommended_next_steps: list[str] = []
+    if verdict == "high":
+        recommended_next_steps.append(
+            "Treat the classification as reliable; proceed to "
+            + ("typology / investigation" if is_anomalous else "next entity")
+        )
+    elif verdict == "contested":
+        recommended_next_steps.append(
+            "Call find_diverse_explanations to surface alternative "
+            "hypotheses before acting"
+        )
+        if single_dim_driven:
+            recommended_next_steps.append(
+                "Inspect the dominant dim for data-quality artefacts "
+                "(saturated counter, capped value)"
+            )
+    else:  # low / moderate
+        if is_anomalous:
+            recommended_next_steps.append(
+                "Corroborate with passive_scan or a second pattern before "
+                "opening a case"
+            )
+        else:
+            recommended_next_steps.append(
+                "Re-check after recalibration; current verdict is fragile"
+            )
+        if near_data_boundary:
+            recommended_next_steps.append(
+                "Run check_anomaly_batch on neighbouring boundary entities "
+                "to gauge local calibration sensitivity"
+            )
+
+    result.update({
+        "certainty_verdict": verdict,
+        "certainty_score": round(certainty_score, 4),
+        "conformal_p": conformal_p,
+        "signed_confidence": signed_confidence,
+        "stability_across_alphas": stability_across_alphas,
+        "reliability_flags": {
+            "single_dim_driven": single_dim_driven,
+            "near_data_boundary": near_data_boundary,
+            "calibration_stale": calibration_stale,
+        },
+        "cross_pattern_consistency": {
+            "n_other_patterns_anomalous": int(n_other_patterns_anomalous),
+            "consistent_classification": consistent_classification,
+        },
+        "rationale": rationale,
+        "recommended_next_steps": recommended_next_steps,
+        "steps_status": steps_status,
+    })
+    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def consensus_classification(
+    primary_key: str,
+    pattern_id: str,
+    sample_size: int | None = 10_000,
+) -> str:
+    """Agent-correctness composer — what do the multiple anomaly detectors say about ONE entity.
+
+    Single-entity focus over the population sweep ``classify_detector_consensus``.
+    The underlying primitive ranks the whole population and truncates to a
+    top-N list; this composer scores the population, then extracts and routes
+    the row for ``primary_key`` — surfacing the detector-agreement pattern and a
+    routing recommendation without the agent re-scanning + filtering a ranked
+    list. Use to answer "do my detectors agree on this entity, or is it a
+    mixed-signal hidden mule?" before opening a case on a single-detector hit.
+
+    Required:
+      - primary_key (str): entity identifier.
+      - pattern_id (str): pattern covering the entity (must have ≥2 patterns on
+        the entity line for cross-detector consensus — same precondition as
+        ``classify_detector_consensus``).
+
+    Optional:
+      - sample_size (int | None, default 10000): cap on geometry rows scored.
+        On large spheres the focal entity may fall outside the random sample;
+        raise this (or pass ``None`` to score the full population) when the
+        response reports ``found=false``. ``top_n`` is forced high internally so
+        a scored entity is never lost to list truncation.
+
+    Returns: JSON dict with primary_key, pattern_id, found (bool),
+    classification (one of ``mixed_signal``, ``anomalous_consensus``,
+    ``single_detector_signal``, ``normal_consensus``, ``insufficient_data`` —
+    null when not found), anomalous_detectors / normal_detectors /
+    borderline_detectors (lists), n_detectors_fired, hmp, p_per_detector,
+    population_rank (the entity's rank in the full consensus sweep),
+    interpretation, recommended_next_steps. When the entity is not in the scored
+    sample, ``found=false`` plus a ``note`` explaining how to widen the scan —
+    never an empty/None payload. Strict-JSON sanitised (±inf/NaN → null).
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+
+    try:
+        # top_n forced high so a scored entity is never lost to list truncation;
+        # the population sweep still returns at most the scored-sample size.
+        ranked = nav.classify_detector_consensus(
+            pattern_id,
+            sample_size=sample_size,
+            top_n=1_000_000,
+        )
+    except (GDSNavigationError, ValueError) as exc:
+        return json.dumps(
+            {"error": str(exc), "primary_key": primary_key, "pattern_id": pattern_id},
+            indent=2,
+        )
+
+    focal: dict[str, Any] | None = None
+    for entry in ranked:
+        if entry.get("primary_key") == primary_key:
+            focal = entry
+            break
+
+    if focal is None:
+        if sample_size is None:
+            note = (
+                f"Entity {primary_key!r} was not in the full-population "
+                "consensus scan — it does not exist in this pattern, or has no "
+                "geometry row."
+            )
+        else:
+            note = (
+                f"Entity {primary_key!r} was not in the scored sample of "
+                f"{sample_size} entities — raise sample_size (or pass null to "
+                "scan the full population), or the entity does not exist in "
+                "this pattern."
+            )
+        return json.dumps(
+            _sanitize_for_json({
+                "primary_key": primary_key,
+                "pattern_id": pattern_id,
+                "found": False,
+                "classification": None,
+                "note": note,
+            }),
+            indent=2,
+            default=str,
+        )
+
+    classification = focal.get("classification")
+    anomalous = focal.get("anomalous_detectors", []) or []
+    normal = focal.get("normal_detectors", []) or []
+    borderline = focal.get("borderline_detectors", []) or []
+
+    # Routing — the agent-correctness payoff. Each classification maps to a
+    # distinct next action, so a single-detector hit is never mistaken for a
+    # consensus target.
+    interpretation_by_class = {
+        "mixed_signal": (
+            "Detectors genuinely disagree — at least one flags this entity "
+            "anomalous while at least one flags it normal. This is the "
+            "hidden-mule / legitimate-but-extreme surface; the entity looks "
+            "different under different lenses."
+        ),
+        "anomalous_consensus": (
+            "Two or more detectors agree this entity is anomalous and none "
+            "call it normal — a clear, corroborated investigation target."
+        ),
+        "single_detector_signal": (
+            "Exactly one detector lands clearly on either side; the rest are "
+            "borderline or did not fire. Needs corroboration before acting — "
+            "a lone detector is the weakest evidence class."
+        ),
+        "normal_consensus": (
+            "Two or more detectors agree this entity is normal and none flag "
+            "it — safe to deprioritise."
+        ),
+        "insufficient_data": (
+            "No detector landed clearly on either side of its band; the "
+            "entity sits in the borderline zone for every available detector."
+        ),
+    }
+    interpretation = interpretation_by_class.get(
+        classification,
+        f"Unrecognised classification {classification!r}.",
+    )
+
+    recommended_next_steps: list[str] = []
+    if classification == "mixed_signal":
+        recommended_next_steps.append(
+            "Call cross_pattern_profile and inspect which detector dissents — "
+            "the disagreeing lens often names the concealment mechanism"
+        )
+        recommended_next_steps.append(
+            "Run explain_anomaly on the anomalous detector's pattern to surface "
+            "the driving dimensions"
+        )
+    elif classification == "anomalous_consensus":
+        recommended_next_steps.append(
+            "Proceed to typology / investigation — the consensus is strong"
+        )
+    elif classification == "single_detector_signal":
+        recommended_next_steps.append(
+            "Corroborate with passive_scan or a second pattern before opening "
+            "a case"
+        )
+    elif classification == "normal_consensus":
+        recommended_next_steps.append("Deprioritise; move to the next entity")
+    else:  # insufficient_data
+        recommended_next_steps.append(
+            "Widen the detector set or recalibrate — no detector currently "
+            "resolves this entity"
+        )
+
+    result = {
+        "primary_key": primary_key,
+        "pattern_id": pattern_id,
+        "found": True,
+        "classification": classification,
+        "anomalous_detectors": anomalous,
+        "normal_detectors": normal,
+        "borderline_detectors": borderline,
+        "n_detectors_fired": focal.get("n_detectors_fired"),
+        "hmp": focal.get("hmp"),
+        "p_per_detector": focal.get("p_per_detector", {}),
+        "population_rank": focal.get("rank"),
+        "interpretation": interpretation,
+        "recommended_next_steps": recommended_next_steps,
+    }
+    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def calibration_drift_report(
+    pattern_id: str,
+    calibration_a: int | None = None,
+    calibration_b: int | None = None,
+    top_n: int = 10,
+) -> str:
+    """Agent-correctness composer — did this pattern's calibration drift enough to distrust cross-epoch reasoning.
+
+    Wraps ``compare_calibrations`` and adds a threshold judgment the raw tool
+    does not: a ``drift_verdict`` over ``overall_drift_rms`` (RMS centroid shift
+    in σ units per dimension) plus a routing recommendation. Use before
+    comparing anomaly verdicts across two calibration epochs — significant μ/σ/θ
+    drift means a "still anomalous" / "no longer anomalous" comparison is
+    measuring recalibration, not the entity.
+
+    For the raw per-dimension μ/σ/θ table without an interpreted verdict, use
+    ``compare_calibrations`` instead.
+
+    Required:
+      - pattern_id (str): pattern to inspect.
+
+    Optional:
+      - calibration_a (int | None, default None): starting epoch
+        (None → second-to-last on disk).
+      - calibration_b (int | None, default None): ending epoch
+        (None → latest on disk).
+      - top_n (int, default 10): number of top-drifted dimensions to surface.
+
+    Returns: JSON dict with pattern_id, calibration_a, calibration_b,
+    overall_drift_rms, drift_verdict (``"stable"`` rms < 0.10, ``"moderate"``
+    0.10 ≤ rms < 0.30, ``"significant"`` rms ≥ 0.30), top_drifted (per-dim
+    drift, sorted by |μ shift| desc), schema_hash, population_size_from,
+    population_size_to, interpretation, recommended_next_steps. Invalid input
+    (equal epochs, schema mismatch, single epoch) returned as
+    ``{"error": ..., "pattern_id": ...}``. Strict-JSON sanitised
+    (±inf/NaN → null).
+    """
+    from dataclasses import asdict
+
+    _require_navigator()
+    nav = _state["navigator"]
+    try:
+        report = nav.compare_calibrations(
+            pattern_id,
+            v_from=calibration_a,
+            v_to=calibration_b,
+            top_n=top_n,
+            verbose=False,
+        )
+    except (GDSNavigationError, CalibrationNotFoundError, ValueError) as exc:
+        return json.dumps(
+            {"error": str(exc), "pattern_id": pattern_id},
+            indent=2,
+        )
+
+    rms = float(report.overall_drift_rms)
+    if rms < 0.10:
+        verdict = "stable"
+        interpretation = (
+            f"Overall drift {rms:.3f} σ/dim is below the recalibration trigger "
+            "— cross-epoch anomaly verdicts are comparable; differences reflect "
+            "the entity, not the coordinate system."
+        )
+        recommended_next_steps = [
+            "Cross-epoch comparison is safe; proceed to compare entity verdicts"
+        ]
+    elif rms < 0.30:
+        verdict = "moderate"
+        interpretation = (
+            f"Overall drift {rms:.3f} σ/dim is moderate — some dimensions moved "
+            "materially; treat cross-epoch verdicts on the top-drifted "
+            "dimensions with caution."
+        )
+        recommended_next_steps = [
+            "Inspect top_drifted dimensions before trusting cross-epoch "
+            "verdicts on those dimensions"
+        ]
+    else:
+        verdict = "significant"
+        interpretation = (
+            f"Overall drift {rms:.3f} σ/dim exceeds the recalibration trigger — "
+            "the coordinate system shifted substantially between epochs. A "
+            "'still anomalous' / 'no longer anomalous' comparison is dominated "
+            "by recalibration, not by the entity."
+        )
+        recommended_next_steps = [
+            "Do not compare anomaly verdicts across these epochs as if the "
+            "coordinate system were fixed",
+            "Use decompose_drift to split per-entity change into intrinsic vs "
+            "extrinsic (recalibration-driven) components",
+        ]
+
+    result = {
+        "pattern_id": report.pattern_id,
+        "calibration_a": report.v_from,
+        "calibration_b": report.v_to,
+        "overall_drift_rms": round(rms, 4),
+        "drift_verdict": verdict,
+        "schema_hash": report.schema_hash,
+        "population_size_from": report.population_size_from,
+        "population_size_to": report.population_size_to,
+        "top_drifted": [asdict(d) for d in report.top_drifted],
+        "interpretation": interpretation,
+        "recommended_next_steps": recommended_next_steps,
+    }
+    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def diverse_explanations(
+    primary_key: str,
+    pattern_id: str,
+    k: int = 3,
+    min_contribution_pct: float = 0.10,
+) -> str:
+    """Agent-correctness composer — is this anomaly one robust multi-cause story or one fragile single-dim artifact.
+
+    Wraps ``find_diverse_explanations`` with counterfactual validation forced ON
+    and adds a synthesis the raw tool does not: a ``robustness_verdict`` that
+    reads the per-hypothesis counterfactual results into a single judgment.
+    Each hypothesis is replayed by overriding its dims to the population mean and
+    checking whether ``delta_norm`` drops below ``theta_norm`` (the flag clears).
+    Use to escape single-explanation tunnel vision: a multi-dim anomaly
+    confirmed by several independent counterfactuals is robust; one that no
+    counterfactual clears is fragile and likely a data-quality artifact.
+
+    For the raw hypotheses + validation blocks without a synthesised verdict, or
+    to opt out of counterfactual validation, use ``find_diverse_explanations``.
+
+    Required:
+      - primary_key (str): anomalous entity to explain.
+      - pattern_id (str): pattern whose geometry holds the entity row.
+
+    Optional:
+      - k (int, default 3): number of diverse hypotheses requested.
+      - min_contribution_pct (float, default 0.10): per-hypothesis joint-share
+        floor in [0, 1]; hypotheses below it are dropped (drives graceful
+        degradation for single-dim-driven entities).
+
+    Returns: JSON dict with primary_key, pattern_id, delta_norm, theta_norm,
+    k_requested, n_hypotheses_returned, n_validated (hypotheses whose
+    counterfactual cleared the anomaly flag), robustness_verdict
+    (``"multi_cause_robust"`` ≥2 independent validated mechanisms,
+    ``"single_cause"`` exactly 1 validated, ``"fragile"`` 0 validated or
+    degraded single-dim, ``"insufficient_signal"`` no hypotheses), hypotheses
+    (each with dim_labels, joint_contribution_pct, narrative, validation),
+    diversity_score, degraded_reason, interpretation, recommended_next_steps.
+    Invalid input returned as ``{"error": ..., "primary_key": ...}``.
+    Strict-JSON sanitised (±inf/NaN → null).
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    try:
+        raw = nav.find_diverse_explanations(
+            primary_key,
+            pattern_id=pattern_id,
+            n_hypotheses=k,
+            min_contribution_pct=min_contribution_pct,
+            validate=True,
+        )
+    except (GDSNavigationError, ValueError) as exc:
+        return json.dumps({"error": str(exc), "primary_key": primary_key})
+
+    hypotheses = raw.get("hypotheses", []) or []
+    # A hypothesis is "validated" when its counterfactual override neutralised
+    # the anomaly flag. find_diverse_explanations attaches a validation block
+    # carrying ``neutralizes_anomaly`` (True when overriding the hypothesis's
+    # dims to their population mean drops delta_norm below theta_norm), or a
+    # ``{"error": ...}`` block when the simulate call could not run.
+    n_validated = 0
+    for hyp in hypotheses:
+        val = hyp.get("validation") or {}
+        if bool(val.get("neutralizes_anomaly")):
+            n_validated += 1
+
+    n_returned = len(hypotheses)
+    if n_returned == 0:
+        verdict = "insufficient_signal"
+        interpretation = (
+            "No diverse hypothesis cleared the contribution floor — the "
+            "anomaly mass is too concentrated or too diffuse to partition into "
+            "independent explanations."
+        )
+        recommended_next_steps = [
+            "Call explain_anomaly for the single ranked-dimension breakdown"
+        ]
+    elif n_validated >= 2:
+        verdict = "multi_cause_robust"
+        interpretation = (
+            f"{n_validated} independent hypotheses each counterfactually clear "
+            "the anomaly flag — this is a robust multi-cause anomaly, not a "
+            "single-dimension artifact. Multiple distinct mechanisms each "
+            "suffice to explain the flag."
+        )
+        recommended_next_steps = [
+            "Treat as a genuine multi-mechanism anomaly; document each "
+            "validated hypothesis as a separate finding"
+        ]
+    elif n_validated == 1:
+        verdict = "single_cause"
+        interpretation = (
+            "Exactly one hypothesis counterfactually clears the anomaly flag — "
+            "the anomaly has a single dominant cause among the diverse cover."
+        )
+        recommended_next_steps = [
+            "Focus the investigation on the one validated hypothesis's "
+            "dimensions"
+        ]
+    else:  # n_validated == 0 with ≥1 hypothesis returned
+        verdict = "fragile"
+        interpretation = (
+            "No hypothesis's counterfactual clears the anomaly flag — no single "
+            "diverse subset explains the anomaly on its own. This is a fragile "
+            "or diffuse signal; inspect for data-quality artifacts before "
+            "acting."
+        )
+        recommended_next_steps = [
+            "Inspect the dominant dimensions for data-quality artifacts "
+            "(saturated counter, capped value)",
+            "Corroborate with a second pattern via cross_pattern_profile before "
+            "opening a case",
+        ]
+
+    result = {
+        "primary_key": primary_key,
+        "pattern_id": pattern_id,
+        "delta_norm": raw.get("delta_norm"),
+        "theta_norm": raw.get("theta_norm"),
+        "k_requested": k,
+        "n_hypotheses_returned": n_returned,
+        "n_validated": n_validated,
+        "robustness_verdict": verdict,
+        "hypotheses": hypotheses,
+        "diversity_score": raw.get("diversity_score"),
+        "degraded_reason": raw.get("degraded_reason"),
+        "interpretation": interpretation,
+        "recommended_next_steps": recommended_next_steps,
+    }
+    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@timed
+def theta_sensitivity_report(
+    pattern_id: str,
+    version: int | None = None,
+) -> str:
+    """Agent-correctness composer — is it safe to move this pattern's anomaly threshold.
+
+    Wraps ``theta_sensitivity`` and adds a threshold judgment the raw tool does
+    not: a ``recalibration_safety`` verdict derived from the stable-band /
+    cliff structure of the per-percentile theta sweep. Answers "if I nudge
+    ``anomaly_percentile``, does the threshold scale smoothly or fall off a
+    cliff?" directly, instead of leaving the agent to interpret raw band/cliff
+    lists. Use before any recalibration move to know whether the population the
+    pattern flags is stable to small percentile changes.
+
+    For the raw per-percentile sweep + band + cliff lists without an interpreted
+    verdict, use ``theta_sensitivity``.
+
+    Required:
+      - pattern_id (str): pattern to inspect.
+
+    Optional:
+      - version (int | None, default None): calibration epoch
+        (None → latest on disk).
+
+    Returns: JSON dict with pattern_id, calibration_epoch, population_size,
+    recalibration_safety (``"safe"`` a stable band exists and no cliffs,
+    ``"caution"`` a stable band exists but cliffs exist elsewhere, ``"unsafe"``
+    no stable band — every percentile step shifts theta ≥30%), n_cliffs,
+    stable_band, cliffs, theta_sensitivity (per-percentile sweep),
+    interpretation, recommended_next_steps. ``ValueError`` (calibration epoch
+    lacks the theta_sensitivity field — pre-diagnostic sphere needs a rebuild —
+    or no epochs on disk) returned as ``{"error": ..., "pattern_id": ...}``.
+    Strict-JSON sanitised (±inf/NaN → null).
+    """
+    _require_navigator()
+    nav = _state["navigator"]
+    try:
+        report = nav.theta_sensitivity(pattern_id, version=version)
+    except (GDSNavigationError, CalibrationNotFoundError, ValueError) as exc:
+        return json.dumps(
+            {"error": str(exc), "pattern_id": pattern_id},
+            indent=2,
+        )
+
+    n_cliffs = int(report.n_cliffs)
+    has_band = bool(report.stable_band_length > 0)
+    if has_band and n_cliffs == 0:
+        safety = "safe"
+        interpretation = (
+            "A contiguous stable band exists and no cliffs were found — moving "
+            "the anomaly_percentile shifts the threshold smoothly. "
+            "Recalibration is safe across the swept percentile range."
+        )
+        recommended_next_steps = [
+            "Recalibration moves within the swept range are safe; proceed"
+        ]
+    elif has_band:
+        safety = "caution"
+        interpretation = (
+            f"A stable band exists but {n_cliffs} cliff(s) sit outside it — "
+            "recalibration is safe inside the band but jumps the threshold by "
+            "≥50% if it crosses a cliff boundary. Keep anomaly_percentile "
+            "inside the stable band."
+        )
+        recommended_next_steps = [
+            "Keep anomaly_percentile inside stable_band; avoid the cliff "
+            "boundaries listed in cliffs[]"
+        ]
+    else:
+        safety = "unsafe"
+        interpretation = (
+            "No stable band exists — every one-step percentile move shifts the "
+            "threshold by ≥30%. The delta_norm distribution is heavy-tailed in "
+            "this region; the population the pattern flags is sensitive to the "
+            "exact percentile choice."
+        )
+        recommended_next_steps = [
+            "Do not recalibrate by percentile without re-measuring the flagged "
+            "population; the threshold is unstable",
+            "Inspect the underlying delta_norm distribution for a heavy tail",
+        ]
+
+    result = {
+        "pattern_id": report.pattern_id,
+        "calibration_epoch": report.calibration_epoch,
+        "population_size": report.population_size,
+        "recalibration_safety": safety,
+        "n_cliffs": n_cliffs,
+        "stable_band": report.stable_band,
+        "cliffs": report.cliffs,
+        "theta_sensitivity": report.theta_sensitivity,
+        "interpretation": interpretation,
+        "recommended_next_steps": recommended_next_steps,
+    }
     return json.dumps(_sanitize_for_json(result), indent=2, default=str)
 
 

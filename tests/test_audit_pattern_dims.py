@@ -73,6 +73,24 @@ def fake_state():
     saved_sphere = _state.get("sphere")
 
     nav = MagicMock()
+    # audit_pattern_dims now appends a vector_index_health block (thin
+    # passthrough to the navigator). Return a real dict so json.dumps works;
+    # the block's own behaviour is covered in the hypertopos-py navigator
+    # tests (test_vector_index_health.py).
+    nav.vector_index_health.return_value = {
+        "pattern_id": "p1",
+        "line_id": None,
+        "index_present": True,
+        "index_type": "IVF_FLAT",
+        "num_indexed_rows": 300,
+        "num_unindexed_rows": 0,
+        "total_rows": 300,
+        "indexed_fraction": 1.0,
+        "num_partitions": None,
+        "is_stale": False,
+        "stale_threshold": 0.1,
+        "recommendation": "index covers all rows",
+    }
     sphere_wrapper = MagicMock()
     sphere_core = SimpleNamespace(patterns={})
     sphere_wrapper._sphere = sphere_core
@@ -394,6 +412,72 @@ def test_response_is_strict_json_no_infinity_literals(fake_state):
     assert "NaN" not in body
     parsed = json.loads(body)  # strict parse must succeed
     assert parsed["dims"][0]["mu"] is None
+
+
+def test_vector_index_health_block_surfaced_fallback_path(fake_state):
+    """The fallback (no label-aware) path carries the vector_index_health block."""
+    fake_state(
+        "p1",
+        _make_pattern(dim_labels=["a"], mu=[0.0], sigma_diag=[1.0]),
+    )
+    body = audit_pattern_dims(pattern_id="p1")
+    parsed = json.loads(body)
+    assert parsed["label_aware_available"] is False
+    vih = parsed["vector_index_health"]
+    assert vih["index_present"] is True
+    assert vih["index_type"] == "IVF_FLAT"
+    assert vih["is_stale"] is False
+    assert vih["num_indexed_rows"] == 300
+
+
+def test_vector_index_health_block_surfaced_full_path(fake_state):
+    """The full-field (label-aware) path also carries the block."""
+    fake_state(
+        "p1",
+        _make_pattern(
+            dim_labels=["d"],
+            mu=[0.0],
+            sigma_diag=[1.0],
+            label_aware_calibration={
+                "d": _dim_cal(
+                    mu_pos=1.0, sigma_pos=1.0,
+                    mu_neg=-1.0, sigma_neg=1.0, direction=0.7,
+                ),
+            },
+        ),
+    )
+    body = audit_pattern_dims(pattern_id="p1")
+    parsed = json.loads(body)
+    assert parsed["label_aware_available"] is True
+    assert "vector_index_health" in parsed
+    assert parsed["vector_index_health"]["index_present"] is True
+
+
+def test_vector_index_health_block_strict_json_sanitized(fake_state):
+    """Non-finite floats inside the health block (e.g. NaN indexed_fraction
+    on a degenerate dataset) must serialise as ``null`` — no Infinity / NaN
+    literals on the wire."""
+    pat = _make_pattern(dim_labels=["a"], mu=[0.0], sigma_diag=[1.0])
+    fake_state("p1", pat)
+    _state["navigator"].vector_index_health.return_value = {
+        "pattern_id": "p1",
+        "line_id": None,
+        "index_present": True,
+        "index_type": "IVF_FLAT",
+        "num_indexed_rows": 0,
+        "num_unindexed_rows": 0,
+        "total_rows": 0,
+        "indexed_fraction": float("nan"),
+        "num_partitions": None,
+        "is_stale": False,
+        "stale_threshold": 0.1,
+        "recommendation": "degenerate",
+    }
+    body = audit_pattern_dims(pattern_id="p1")
+    assert "Infinity" not in body
+    assert "NaN" not in body
+    parsed = json.loads(body)  # strict parse must succeed
+    assert parsed["vector_index_health"]["indexed_fraction"] is None
 
 
 def test_tier_registration():

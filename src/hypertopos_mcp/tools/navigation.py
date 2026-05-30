@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import UTC, datetime
 
 from hypertopos_mcp.enrichment import (
@@ -19,10 +20,35 @@ from hypertopos_mcp.tools._guards import adaptive_polygon_cap, binary_geometry_n
 _STALE_SOLID_DAYS = 180
 
 
+def _sanitize_for_json(obj):
+    """Recursively replace non-finite floats (±inf / NaN) with None.
+
+    Anomaly / boundary / aggregate scans emit per-entity floats (delta_norm,
+    signed_distance, q_value, mean_delta_norm) that can be ±inf / NaN on
+    degenerate populations; strict JSON parsers reject the Infinity / NaN
+    literals Python's json.dumps would otherwise produce. Module-local copy
+    matching the convention in analysis.py / observability.py / detection.py.
+    Navigator methods return plain Python floats, so a ``float`` check suffices.
+    """
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_for_json(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_sanitize_for_json(v) for v in obj)
+    return obj
+
+
 @mcp.tool(annotations={"readOnlyHint": True})
 @timed
 def goto(primary_key: str, line_id: str) -> str:
-    """Navigate to a specific entity by business key and line. Sets current position."""
+    """Navigate to a specific entity by business key and line. Sets current position.
+
+    Returns: the new navigator position (a serialised Point with line_id,
+    primary_key, and entity properties).
+    """
     _require_navigator()
     nav = _state["navigator"]
     nav.goto(primary_key, line_id)
@@ -32,7 +58,11 @@ def goto(primary_key: str, line_id: str) -> str:
 @mcp.tool(annotations={"readOnlyHint": True})
 @timed
 def get_position() -> str:
-    """Return the current navigator position (Point, Polygon, Solid, or None)."""
+    """Return the current navigator position (Point, Polygon, Solid, or None).
+
+    Returns: the serialised current position object, or a null position when
+    the navigator has not been moved.
+    """
     _require_navigator()
     return json.dumps(_serialize_position(_state["navigator"].position), indent=2)
 
@@ -194,7 +224,7 @@ def dive_solid(
     rep = nav.solid_reputation(primary_key, pattern_id)
     if rep is not None:
         ss["reputation"] = rep
-    return json.dumps(ss, separators=(",", ":"), default=str)
+    return json.dumps(_sanitize_for_json(ss), separators=(",", ":"), default=str)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -406,7 +436,7 @@ def find_anomalies(
                 f"re-check after the next calibration cycle."
             )
 
-    return json.dumps(result, indent=2, default=str)
+    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -427,7 +457,7 @@ def anomaly_summary(pattern_id: str, max_clusters: int = 20) -> str:
     if _bgn:
         summary["binary_geometry_note"] = _bgn
 
-    return json.dumps(summary, indent=2, default=str)
+    return json.dumps(_sanitize_for_json(summary), indent=2, default=str)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -464,7 +494,7 @@ def aggregate_anomalies(
         keys_per_group=keys_per_group,
         property_filters=property_filters,
     )
-    return json.dumps(result, indent=2)
+    return json.dumps(_sanitize_for_json(result), indent=2)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -518,13 +548,15 @@ def attract_boundary(
         results.append(entry)
 
     return json.dumps(
-        {
-            "alias_id": alias_id,
-            "pattern_id": pattern_id,
-            "direction": direction,
-            "count": len(results),
-            "results": results,
-        },
+        _sanitize_for_json(
+            {
+                "alias_id": alias_id,
+                "pattern_id": pattern_id,
+                "direction": direction,
+                "count": len(results),
+                "results": results,
+            }
+        ),
         indent=2,
     )
 
@@ -551,4 +583,4 @@ def find_neighborhood(
         max_hops=max_hops,
         max_entities=max_entities,
     )
-    return json.dumps(result, indent=2)
+    return json.dumps(_sanitize_for_json(result), indent=2)

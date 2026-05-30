@@ -240,9 +240,9 @@ def sphere_overview(pattern_id: str | None = None, detail: str = "summary") -> s
 
     response = {
         "patterns": result,
-        "cross_pattern_discrepancy": _sanitize_for_json(cross_pattern_discrepancy),
+        "cross_pattern_discrepancy": cross_pattern_discrepancy,
     }
-    return json.dumps(response, indent=2, default=str)
+    return json.dumps(_sanitize_for_json(response), indent=2, default=str)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -267,7 +267,7 @@ def compare_time_windows(
         window_b_from,
         window_b_to,
     )
-    return json.dumps(result, indent=2, default=str)
+    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -295,7 +295,10 @@ def detect_data_quality_issues(
         pattern_id,
         sample_size=_effective_sample,
     )
-    return json.dumps({"pattern_id": pattern_id, "findings": findings}, indent=2)
+    return json.dumps(
+        _sanitize_for_json({"pattern_id": pattern_id, "findings": findings}),
+        indent=2,
+    )
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -318,7 +321,7 @@ def find_regime_changes(
         timestamp_to=timestamp_to,
         n_regimes=n_regimes,
     )
-    return json.dumps(result, indent=2, default=str)
+    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -346,7 +349,7 @@ def line_geometry_stats(
         pattern_id,
         sample_size=_effective_sample,
     )
-    return json.dumps(result, indent=2)
+    return json.dumps(_sanitize_for_json(result), indent=2)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -358,7 +361,7 @@ def check_alerts(pattern_id: str | None = None) -> str:
     """
     _require_navigator()
     result = _state["navigator"].check_alerts(pattern_id)
-    return json.dumps(result, indent=2)
+    return json.dumps(_sanitize_for_json(result), indent=2)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -382,6 +385,16 @@ def audit_pattern_dims(pattern_id: str, top_k: int = 10) -> str:
     each polygon's delta along (``intrinsic``) and orthogonal to
     (``extrinsic``) the Fisher LDA direction. Identity:
     ``intrinsic^2 + extrinsic^2 == ||delta||^2`` per polygon.
+
+    Every response (both the full-field and the fallback path) also carries
+    a ``vector_index_health`` block reporting ANN (IVF) index staleness for
+    the pattern's geometry: ``{index_present, index_type, num_indexed_rows,
+    num_unindexed_rows, total_rows, indexed_fraction, num_partitions,
+    is_stale, stale_threshold, recommendation}``. ``is_stale`` is True when
+    incrementally-appended rows sit outside the index (unindexed fraction >
+    0.1), meaning ANN-backed tools such as ``pi10_attract_trajectory``
+    currently miss those rows until the next reindex. This is a
+    metadata-only read — no geometry column scan.
 
     Decision tree (applied in order, first match wins):
 
@@ -501,6 +514,9 @@ def audit_pattern_dims(pattern_id: str, top_k: int = 10) -> str:
             "n_dims_total": n_dims,
             "n_dims_returned": len(rows),
             "dims": rows,
+            "vector_index_health": _state["navigator"].vector_index_health(
+                pattern_id,
+            ),
         }
         return json.dumps(_sanitize_for_json(result), indent=2)
 
@@ -625,6 +641,11 @@ def audit_pattern_dims(pattern_id: str, top_k: int = 10) -> str:
     )
     result["extrinsic_displacement_mean"] = (
         float(extr_mean) if extr_mean is not None else None
+    )
+    # ANN index-health observability: surface whether incrementally-added
+    # rows landed outside the IVF index (metadata-only read, no column scan).
+    result["vector_index_health"] = _state["navigator"].vector_index_health(
+        pattern_id,
     )
     return json.dumps(_sanitize_for_json(result), indent=2)
 

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import math
 
 from hypertopos.engine.geometry import GDSEngine
 
@@ -15,6 +16,25 @@ from hypertopos_mcp.enrichment import (
 from hypertopos_mcp.serializers import _serialize_polygon, _serialize_solid
 from hypertopos_mcp.server import _require_navigator, _state, mcp, timed
 from hypertopos_mcp.tools._guards import adaptive_polygon_cap
+
+
+def _sanitize_for_json(obj):
+    """Recursively replace non-finite floats (±inf / NaN) with None so strict
+    JSON parsers accept the output. Polygon / solid / event-polygon geometry
+    carries delta_norm / delta contributions that can be ±inf / NaN on
+    degenerate populations. Module-local copy matching the convention in
+    analysis.py / observability.py / detection.py / navigation.py. Serialised
+    geometry values are plain Python floats, so a ``float`` check suffices.
+    """
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_for_json(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_sanitize_for_json(v) for v in obj)
+    return obj
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -56,7 +76,7 @@ def get_polygon(pattern_id: str) -> str:
                 }
         except Exception:
             pass  # temporal data unavailable — skip hint silently
-    return json.dumps(enriched, indent=2, default=str)
+    return json.dumps(_sanitize_for_json(enriched), indent=2, default=str)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -100,7 +120,7 @@ def get_solid(
             if forecast_dict.get("stale_warning"):
                 ss["stale_forecast_warning"] = forecast_dict.pop("stale_warning")
             ss["forecast"] = forecast_dict
-    return json.dumps(ss, separators=(",", ":"), default=str)
+    return json.dumps(_sanitize_for_json(ss), separators=(",", ":"), default=str)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -204,4 +224,4 @@ def get_event_polygons(
         result["sample_size"] = n_sampled
     if limit_capped_warning:
         result["capped_warning"] = limit_capped_warning
-    return json.dumps(result, separators=(",", ":"))
+    return json.dumps(_sanitize_for_json(result), separators=(",", ":"))

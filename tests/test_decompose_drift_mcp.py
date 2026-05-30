@@ -11,8 +11,43 @@ epoch sphere hides the bug).
 from __future__ import annotations
 
 import json
+from unittest.mock import MagicMock
 
 import pytest
+
+
+class TestDecomposeDriftErrorEnvelope:
+    """Unit-level: the composer must convert a garbage-collected calibration
+    epoch (CalibrationNotFoundError — a GDSError sibling of
+    GDSNavigationError, NOT a subclass) into a JSON error envelope rather than
+    bubbling the exception out of the MCP tool."""
+
+    def test_returns_json_error_on_calibration_not_found(self):
+        import hypertopos_mcp.tools.analysis  # noqa: F401 — register tools
+        from hypertopos import CalibrationNotFoundError
+        from hypertopos_mcp.server import _state
+        from hypertopos_mcp.tools.analysis import decompose_drift
+
+        nav = MagicMock()
+        nav.decompose_drift.side_effect = CalibrationNotFoundError(
+            "calibration version 1 for 'account_pattern' was garbage-collected"
+        )
+        saved_nav = _state.get("navigator")
+        saved_sphere = _state.get("sphere")
+        _state["navigator"] = nav
+        _state["sphere"] = MagicMock()
+        try:
+            body = decompose_drift(
+                entity_key="E1", pattern_id="account_pattern", v_from=1, v_to=3,
+            )
+        finally:
+            _state["navigator"] = saved_nav
+            _state["sphere"] = saved_sphere
+
+        parsed = json.loads(body)
+        assert "error" in parsed
+        assert "garbage-collected" in parsed["error"]
+        assert parsed["pattern_id"] == "account_pattern"
 
 
 class TestDecomposeDriftMcp:

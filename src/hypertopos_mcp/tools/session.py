@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import time
 
 from hypertopos_mcp.server import (
@@ -19,6 +20,25 @@ from hypertopos_mcp.server import (
     mcp,
     timed,
 )
+
+
+def _sanitize_for_json(obj):
+    """Recursively replace non-finite floats (±inf / NaN) with None so strict
+    JSON parsers accept the output. line_profile distribution stats and
+    recalibrate fit outputs (mean / std / percentiles / theta) can be ±inf /
+    NaN on degenerate columns. Module-local copy matching the convention in
+    analysis.py / observability.py / detection.py. Navigator outputs are plain
+    Python floats, so a ``float`` check suffices.
+    """
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_for_json(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_sanitize_for_json(v) for v in obj)
+    return obj
 
 
 def _suggest_queries(sphere) -> list[str]:
@@ -139,22 +159,39 @@ def close_sphere() -> str:
 
 
 def _build_session_stats() -> dict:
-    """Build session stats dict from _call_stats."""
+    """Build session stats dict from _call_stats.
+
+    When a session is open, also surfaces the reader's points-handle cache
+    counters (handle reuse vs fresh open) so an agent can see whether warm
+    reads are reusing the open Lance dataset handle. These are
+    hypertopos-owned counters, not a Lance-provided metric.
+    """
     wall_ms = None
     if _call_stats["session_start"] is not None:
         wall_ms = round((time.perf_counter() - _call_stats["session_start"]) * 1000, 1)
-    return {
+    stats = {
         "total_tool_calls": _call_stats["call_count"],
         "total_elapsed_ms": round(_call_stats["total_elapsed_ms"], 1),
         "wall_clock_ms": wall_ms,
         "per_tool": _call_stats["per_tool"],
     }
+    session = _state.get("session")
+    reader = getattr(session, "_reader", None) if session is not None else None
+    cache_stats = getattr(reader, "points_cache_stats", None)
+    if callable(cache_stats):
+        with contextlib.suppress(Exception):
+            stats["points_handle_cache"] = cache_stats()
+    return stats
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
 @timed
 def get_session_stats() -> str:
-    """Return current session tool call statistics without closing the session."""
+    """Return current session tool call statistics without closing the session.
+
+    Returns: total_tool_calls, total_elapsed_ms, wall_clock_ms, and a per_tool
+    breakdown of call counts and elapsed time.
+    """
     stats = _build_session_stats()
     return json.dumps(stats, indent=2)
 
@@ -412,7 +449,7 @@ def get_line_profile(
         "property": property_name,
         **core_result,
     }
-    return json.dumps(result, indent=2, default=str)
+    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
 
 
 @mcp.tool()
@@ -433,4 +470,4 @@ def recalibrate(
         soft_threshold=soft_threshold,
         hard_threshold=hard_threshold,
     )
-    return json.dumps(result, indent=2)
+    return json.dumps(_sanitize_for_json(result), indent=2)

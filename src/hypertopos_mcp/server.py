@@ -276,6 +276,10 @@ _TOOL_TIERS: dict[str, str] = {
     "check_anomaly_batch": "base",
     "explain_anomaly": "base",
     "find_diverse_explanations": "base",
+    "assess_anomaly_certainty": "base",
+    "calibration_drift_report": "base",
+    "diverse_explanations": "base",
+    "theta_sensitivity_report": "base",
     "find_conformance_violations": "base",
     "trace_root_cause": "base",
     "score_edge": "base",
@@ -326,6 +330,7 @@ _TOOL_TIERS: dict[str, str] = {
     "composite_risk_batch": "multi_pattern",
     "combine_anomaly_pvalues": "multi_pattern",
     "classify_detector_consensus": "multi_pattern",
+    "consensus_classification": "multi_pattern",
     "detect_cross_pattern_discrepancy": "multi_pattern",
     # trajectory_index — visible after sphere_overview IF trajectory ANN index exists
     "find_drifting_similar": "trajectory_index",

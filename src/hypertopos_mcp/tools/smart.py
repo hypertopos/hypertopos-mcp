@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import re
 from typing import Any
 
@@ -19,6 +20,26 @@ from hypertopos_mcp.server import (
     mcp,
     timed,
 )
+
+
+def _sanitize_for_json(obj):
+    """Recursively replace non-finite floats (±inf / NaN) with None so strict
+    JSON parsers accept the output. The detect_pattern orchestrator embeds
+    step results that carry navigator-math floats (anomaly scores, drift, rates)
+    which can be ±inf / NaN on degenerate populations. Module-local copy
+    matching the convention in analysis.py / observability.py / detection.py.
+    Step results are assembled from JSON-bound dicts of plain Python floats, so
+    a ``float`` check suffices.
+    """
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_for_json(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_sanitize_for_json(v) for v in obj)
+    return obj
 
 # ---------------------------------------------------------------------------
 # Step handlers — internal functions, NOT exposed as MCP tools
@@ -1036,7 +1057,7 @@ async def detect_pattern(query: str, ctx: Context) -> str:
     }
     not_explored = sorted(all_combos - set(explored.keys()))
 
-    return json.dumps({
+    return json.dumps(_sanitize_for_json({
         "query": query,
         "capabilities": caps,
         "plan": plan,
@@ -1050,7 +1071,7 @@ async def detect_pattern(query: str, ctx: Context) -> str:
             "explored": list(explored.keys()),
             "not_yet_explored": not_explored[:10],
         } if not_explored else None,
-    }, indent=2, default=str)
+    }), indent=2, default=str)
 
 
 def _resolve_dependency(

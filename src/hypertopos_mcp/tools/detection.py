@@ -20,6 +20,28 @@ def _sanitize_float(value: float) -> float | None:
     return None
 
 
+def _sanitize_for_json(obj):
+    """Recursively replace non-finite floats (±inf / NaN) with None.
+
+    The navigator's detection scans emit per-entity floats (delta_norm,
+    contamination_rate, displacement, shift_ratio) that can be ±inf / NaN on
+    degenerate populations; strict JSON parsers reject the Infinity / NaN
+    literals Python's json.dumps would otherwise produce. Mirrors the helper in
+    analysis.py — kept module-local so detection.py carries no cross-module
+    import for a 20-line utility. Navigator detection methods return plain
+    Python floats in their result dicts, so a ``float`` check suffices.
+    """
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_for_json(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_sanitize_for_json(v) for v in obj)
+    return obj
+
+
 @mcp.tool(annotations={"readOnlyHint": True})
 @timed
 def detect_cross_pattern_discrepancy(
@@ -54,7 +76,9 @@ def detect_cross_pattern_discrepancy(
         )
     results = nav.detect_cross_pattern_discrepancy(entity_line, top_n=top_n)
     return json.dumps(
-        {"entity_line": entity_line, "total_found": len(results), "results": results},
+        _sanitize_for_json(
+            {"entity_line": entity_line, "total_found": len(results), "results": results}
+        ),
         indent=2,
     )
 
@@ -79,14 +103,16 @@ def detect_neighbor_contamination(
         pattern_id, k=k, sample_size=sample_size, contamination_threshold=contamination_threshold
     )
     return json.dumps(
-        {
-            "pattern_id": pattern_id,
-            "k": k,
-            "sample_size": sample_size,
-            "contamination_threshold": contamination_threshold,
-            "total_found": len(results),
-            "results": results,
-        },
+        _sanitize_for_json(
+            {
+                "pattern_id": pattern_id,
+                "k": k,
+                "sample_size": sample_size,
+                "contamination_threshold": contamination_threshold,
+                "total_found": len(results),
+                "results": results,
+            }
+        ),
         indent=2,
     )
 
@@ -118,14 +144,16 @@ def detect_trajectory_anomaly(
     except ValueError as exc:
         return json.dumps({"error": str(exc)}, indent=2)
     return json.dumps(
-        {
-            "pattern_id": pattern_id,
-            "displacement_ranks": displacement_ranks or [0, 20, 100],
-            "top_n_per_range": top_n_per_range,
-            "sample_size": sample_size,
-            "total_found": len(results),
-            "results": results,
-        },
+        _sanitize_for_json(
+            {
+                "pattern_id": pattern_id,
+                "displacement_ranks": displacement_ranks or [0, 20, 100],
+                "top_n_per_range": top_n_per_range,
+                "sample_size": sample_size,
+                "total_found": len(results),
+                "results": results,
+            }
+        ),
         indent=2,
         default=str,
     )
@@ -230,4 +258,4 @@ def detect_segment_shift(
                 f"min_shift_ratio={min_shift_ratio}x the population anomaly rate. "
                 f"Try lowering min_shift_ratio (e.g. 1.5) or max_cardinality={max_cardinality}."
             )
-    return json.dumps(out, indent=2)
+    return json.dumps(_sanitize_for_json(out), indent=2)

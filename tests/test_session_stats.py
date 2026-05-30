@@ -101,3 +101,45 @@ def test_timed_handles_non_json_response():
     result = dummy()
     assert result == "not json"
     assert _call_stats["call_count"] == 1
+
+
+def test_session_stats_omits_cache_block_without_session():
+    """No open session → no points_handle_cache block."""
+    from hypertopos_mcp.server import _state
+    from hypertopos_mcp.tools.session import _build_session_stats
+
+    prev = _state.get("session")
+    _state["session"] = None
+    try:
+        stats = _build_session_stats()
+        assert "points_handle_cache" not in stats
+    finally:
+        _state["session"] = prev
+
+
+def test_session_stats_surfaces_points_handle_cache(monkeypatch):
+    """With an open session, _build_session_stats forwards the reader's
+    points-handle cache hit/miss counters verbatim."""
+    from types import SimpleNamespace
+
+    from hypertopos_mcp.server import _state
+    from hypertopos_mcp.tools.session import _build_session_stats
+
+    fake_reader = SimpleNamespace(
+        points_cache_stats=lambda: {
+            "points_handle_cache_hits": 7,
+            "points_handle_cache_misses": 2,
+        }
+    )
+    fake_session = SimpleNamespace(_reader=fake_reader)
+
+    prev = _state.get("session")
+    _state["session"] = fake_session
+    try:
+        stats = _build_session_stats()
+        assert stats["points_handle_cache"] == {
+            "points_handle_cache_hits": 7,
+            "points_handle_cache_misses": 2,
+        }
+    finally:
+        _state["session"] = prev

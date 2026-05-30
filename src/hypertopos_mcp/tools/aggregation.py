@@ -5,9 +5,28 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import Literal
 
 from hypertopos_mcp.server import _require_sphere, _state, mcp, timed
+
+
+def _sanitize_for_json(obj):
+    """Recursively replace non-finite floats (±inf / NaN) with None so strict
+    JSON parsers accept the output. avg / sum / min / max over empty or
+    degenerate groups can yield ±inf / NaN. ``nav.aggregate`` returns plain
+    Python floats (Lance SQL output), so a ``float`` check suffices — this
+    module stays numpy-free by design (thin wrapper over the navigator).
+    """
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_for_json(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_sanitize_for_json(v) for v in obj)
+    return obj
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -220,4 +239,4 @@ def aggregate(
                     if pivot_labels:
                         result["pivot_labels"] = pivot_labels
 
-    return json.dumps(result, separators=(",", ":"))
+    return json.dumps(_sanitize_for_json(result), separators=(",", ":"))

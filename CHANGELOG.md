@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-05-30
+
+### Added
+
+- `get_session_stats` (and the `close_sphere` summary) now reports a `points_handle_cache` block with hit/miss counters, so an agent can see whether repeated entity lookups are reusing the open dataset handle.
+- `assess_anomaly_certainty(primary_key, pattern_id, perturbation_alphas=[0.005, 0.01, 0.05])` — agent-correctness composer that fuses conformal p-value, FDR-gated perturbation stability, single-dim-driven flag, boundary-band proximity, calibration health, and cross-pattern consistency into one verdict (`high` / `moderate` / `low` / `contested`) plus a `[0, 1]` certainty score, a rationale, and recommended next steps; returns per-step `steps_status` and strict-JSON sanitised payload.
+- `consensus_classification(primary_key, pattern_id, sample_size=10000)` — single-entity view over the multi-detector consensus sweep: extracts and routes the focal entity's detector-agreement pattern (`mixed_signal` / `anomalous_consensus` / `single_detector_signal` / `normal_consensus` / `insufficient_data`) with a `found` flag, `population_rank`, interpretation, and recommended next steps; returns `found=false` with a note when the entity falls outside the scored sample.
+- `calibration_drift_report(pattern_id, calibration_a=None, calibration_b=None, top_n=10)` — adds a `drift_verdict` (`stable` / `moderate` / `significant`) over the per-dimension μ/σ/θ calibration drift between two epochs, plus an interpretation and routing recommendation for cross-epoch reasoning.
+- `diverse_explanations(primary_key, pattern_id, k=3, min_contribution_pct=0.10)` — runs the diverse-cover explanation with counterfactual validation on and synthesises a `robustness_verdict` (`multi_cause_robust` / `single_cause` / `fragile` / `insufficient_signal`) from how many hypotheses' counterfactuals clear the anomaly flag, with interpretation and next steps.
+- `theta_sensitivity_report(pattern_id, version=None)` — adds a `recalibration_safety` verdict (`safe` / `caution` / `unsafe`) derived from the stable-band / cliff structure of the per-percentile theta sweep, answering whether moving the anomaly percentile shifts the threshold smoothly or off a cliff.
+- `audit_pattern_dims` now returns a `vector_index_health` block reporting ANN (IVF) index staleness for the pattern's geometry — `{index_present, index_type, num_indexed_rows, num_unindexed_rows, total_rows, indexed_fraction, num_partitions, is_stale, stale_threshold, recommendation}`. `is_stale` is `true` when incrementally-added rows sit outside the index (unindexed fraction above the threshold), so an agent can tell whether ANN-backed tools such as `pi10_attract_trajectory` currently see the full population. Metadata-only read, no geometry scan.
+- `check_alerts` now emits a `stale_vector_index` alert (severity `MEDIUM`) for any pattern whose IVF index no longer covers all geometry rows, with a recommendation to reindex.
+
+### Changed
+
+- Picks up the `pylance` 7.x floor from `hypertopos`; existing spheres open transparently and all MCP tools return equivalent payloads.
+
+### Fixed
+
+- Detection, observability, navigation, geometry, aggregation, session, and smart-mode tools now sanitise non-finite floats (`±inf` / `NaN`) to JSON `null` before serialising, so every tool's output is strict-JSON-valid and parses cleanly in non-Python MCP clients even on degenerate populations.
+- `assess_anomaly_certainty` accepts a `sample_size` parameter (default 20000) that caps the population sampled by each stability-sweep anomaly scan, bounding the per-verdict cost on large patterns.
+
 ## [0.7.3] — 2026-05-27
 
 ### Added

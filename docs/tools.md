@@ -58,7 +58,7 @@ Closes the active session and releases resources.
 |-----------|------|---------|-------------|
 | _(none)_ | — | — | — |
 
-**Returns:** `status`, `session_stats` (`{total_tool_calls, total_elapsed_ms, wall_clock_ms, per_tool}`)
+**Returns:** `status`, `session_stats` (`{total_tool_calls, total_elapsed_ms, wall_clock_ms, per_tool}`, plus `points_handle_cache` `{points_handle_cache_hits, points_handle_cache_misses}` when a session is open)
 
 ---
 
@@ -84,7 +84,7 @@ Returns performance and cache statistics for the current session.
 |-----------|------|---------|-------------|
 | _(none)_ | — | — | — |
 
-**Returns:** Cache hit/miss counts, geometry read counts, elapsed totals.
+**Returns:** `total_tool_calls`, `total_elapsed_ms`, `wall_clock_ms`, `per_tool`, plus a `points_handle_cache` block (`points_handle_cache_hits` / `points_handle_cache_misses`) that reports whether repeated entity lookups reuse the open dataset handle.
 
 ---
 
@@ -196,7 +196,9 @@ Per-dim calibration audit of a pattern. Reports raw population moments alongside
 | `pattern_id` | string | required | Pattern to audit |
 | `top_k` | int | `10` | Cap on returned rows, sorted by \|`cohens_d_pos_neg`\| descending |
 
-**Returns:** `{pattern_id, label_aware_available, n_dims_total, n_dims_returned, dims[] ({dim_label, mu, sigma, mu_pos, sigma_pos, mu_neg, sigma_neg, cohens_d_pos_neg, direction_component, recommended_action})}`. When label-aware calibration is unavailable, also emits a top-level `reason` and dim rows carry only `mu`, `sigma`, `recommended_action`.
+**Returns:** `{pattern_id, label_aware_available, n_dims_total, n_dims_returned, dims[] ({dim_label, mu, sigma, mu_pos, sigma_pos, mu_neg, sigma_neg, cohens_d_pos_neg, direction_component, recommended_action}), vector_index_health}`. When label-aware calibration is unavailable, also emits a top-level `reason` and dim rows carry only `mu`, `sigma`, `recommended_action`.
+
+Every response also carries a `vector_index_health` block reporting ANN (IVF) index staleness for the pattern's geometry: `{pattern_id, line_id, index_present, index_type, num_indexed_rows, num_unindexed_rows, total_rows, indexed_fraction, num_partitions, is_stale, stale_threshold, recommendation}`. `is_stale` is `true` when incrementally-appended rows sit outside the index (unindexed fraction > `0.1`), meaning ANN-backed tools such as `pi10_attract_trajectory` currently miss those rows until the next reindex. Metadata-only read — no geometry column scan.
 
 **Decision tree** for `recommended_action` (applied in order, first match wins):
 
@@ -235,7 +237,17 @@ Example response (full-field path, abbreviated):
       "direction_component": 0.62,
       "recommended_action": "keep"
     }
-  ]
+  ],
+  "vector_index_health": {
+    "index_present": true,
+    "index_type": "IVF_FLAT",
+    "num_indexed_rows": 50000,
+    "num_unindexed_rows": 0,
+    "total_rows": 50000,
+    "indexed_fraction": 1.0,
+    "is_stale": false,
+    "recommendation": "index covers all rows — ANN tools see the full population"
+  }
 }
 ```
 
@@ -683,6 +695,168 @@ K diverse hypotheses for why an entity is anomalous. Greedy selection over per-d
 | `degraded_reason` | `null` when K hypotheses returned, `"insufficient_diverse_mass"` when graceful degradation kicked in |
 
 **Notes:** Pure recomputation over the stored polygon; no storage scan. Hypotheses are strict disjoint — each dim appears in at most one hypothesis. When remaining mass can't meet the `min_contribution_pct` floor, fewer hypotheses are emitted with `degraded_reason="insufficient_diverse_mass"` — the correct semantic for single-dim-driven entities (no alternative diverse explanation exists). Routes through the same per-dim contribution primitive that `explain_anomaly.top_dimensions` and `reliability_flags.dominant_dim` use, so the multi-hypothesis ranking stays semantically aligned with the single-explanation surface. `validate=true` adds a `validation` sub-block per hypothesis (`{delta_norm_after, drops_below_theta}`). Non-finite floats sanitised to `null` on the wire. Invalid input returned as `{"error": ..., "primary_key": ...}` JSON.
+
+---
+
+### `assess_anomaly_certainty`
+
+Agent-correctness composer — how confident should an investigator be in an entity's anomaly classification. Composes `explain_anomaly` (conformal_p, signed_confidence, single-dim driver), `get_entity_geometry_meta` (delta_norm vs theta_norm boundary band), the focal entity's stored `conformal_p` thresholded against each of `perturbation_alphas` (sample-free FDR-alpha stability), `sphere_overview` (calibration staleness), and `cross_pattern_profile` (cross-pattern consistency) into one verdict.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `primary_key` | string | required | Entity to assess |
+| `pattern_id` | string | required | Pattern holding the entity's geometry row |
+| `perturbation_alphas` | list[float] | `[0.005, 0.01, 0.05]` | FDR alphas swept for stability — entity is stable at alpha when its stored `conformal_p` (a direct, sample-free primary_key lookup) is `<= alpha` |
+
+**Returns:**
+
+| Field | Description |
+|-------|-------------|
+| `primary_key` | Echoed entity id |
+| `pattern_id` | Echoed pattern id |
+| `is_anomalous` | Stored classification from geometry row |
+| `certainty_verdict` | `"high"` / `"moderate"` / `"low"` / `"contested"` — confidence in the classification, NOT in anomaly status (a confidently-normal entity also gets `"high"`) |
+| `certainty_score` | Float in `[0.0, 1.0]` — same signals as the verdict on a continuous scale |
+| `conformal_p` | Conformal p-value from `explain_anomaly` (or `null`) |
+| `signed_confidence` | Signed LDA-aligned confidence from `explain_anomaly` (or `null` when `label_audit` is not enabled on the pattern) |
+| `stability_across_alphas` | `{alpha_str: bool}` — per-alpha `conformal_p <= alpha` (sample-free FDR-alpha stability) |
+| `reliability_flags` | `{single_dim_driven, near_data_boundary, calibration_stale}` — derived from `explain_anomaly.reliability_flags`, the `[0.8·θ, 1.2·θ]` band, and `sphere_overview.calibration_health` |
+| `cross_pattern_consistency` | `{n_other_patterns_anomalous, consistent_classification}` from `cross_pattern_profile` |
+| `rationale` | Human-readable summary of which signals drove the verdict |
+| `recommended_next_steps` | List of suggested follow-up tool calls |
+| `steps_status` | `{step_name: {ok: bool, error?: str}}` — per sub-composition success / failure, never null / missing |
+
+**Verdict rule (deterministic):**
+
+If `is_anomalous == True`:
+- `stability_count == 3` AND not `single_dim_driven` AND not `near_data_boundary` AND not `calibration_stale` → `"high"`
+- `stability_count == 0` OR (`single_dim_driven` AND `near_data_boundary`) → `"contested"`
+- `stability_count == 1` → `"low"`
+- `stability_count == 2` → `"moderate"`
+
+If `is_anomalous == False`:
+- not `near_data_boundary` AND not `calibration_stale` → `"high"`
+- `near_data_boundary` → `"low"`
+- else → `"moderate"`
+
+**Notes:** `near_data_boundary` reuses the same `[0.8·theta_norm, 1.2·theta_norm]` band that `find_anomalies(boundary_aware=True)` uses for stratified sampling, so verdicts align with the calibration-audit surface. Sub-composition failures (e.g. cross-pattern profile unavailable on event patterns) surface in `steps_status` rather than aborting — the verdict degrades gracefully on partial information. Strict-JSON sanitised (`±inf` / `NaN` → `null`). Returns `{"error": ..., "primary_key": ..., "pattern_id": ...}` JSON when the entity is not found in the pattern's geometry.
+
+---
+
+### `consensus_classification`
+
+Agent-correctness composer — single-entity view over the population sweep `classify_detector_consensus`. Scores the population, then extracts and routes the row for `primary_key`: surfaces the detector-agreement pattern (which detectors call the entity anomalous vs normal vs borderline) and a routing recommendation, so a single-detector hit is never mistaken for a corroborated consensus. Answers "do my detectors agree on this entity?" without re-scanning a ranked list. For the population ranking, use `classify_detector_consensus`.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `primary_key` | string | required | Entity to classify |
+| `pattern_id` | string | required | Pattern covering the entity (needs ≥2 patterns on the entity line for cross-detector consensus) |
+| `sample_size` | int \| null | `10000` | Cap on geometry rows scored; raise (or pass `null` for the full population) when the entity falls outside the random sample. `top_n` is forced high internally so a scored entity is never lost to list truncation |
+
+**Returns:**
+
+| Field | Description |
+|-------|-------------|
+| `primary_key` / `pattern_id` | Echoed identifiers |
+| `found` | `true` when the entity was in the scored sample; `false` (with a `note`) when not — never an empty/None payload |
+| `classification` | `"mixed_signal"` / `"anomalous_consensus"` / `"single_detector_signal"` / `"normal_consensus"` / `"insufficient_data"` (`null` when not found) |
+| `anomalous_detectors` / `normal_detectors` / `borderline_detectors` | Detector-name lists |
+| `n_detectors_fired` | Detectors that returned a p-value (incl. borderline) |
+| `hmp` | Harmonic-mean p-value across detectors |
+| `p_per_detector` | Per-detector p-value map |
+| `population_rank` | The entity's rank in the full consensus sweep |
+| `interpretation` | What the classification means operationally |
+| `recommended_next_steps` | Routing per classification |
+
+**Notes:** Strict-JSON sanitised (`±inf` / `NaN` → `null`). Returns `{"error": ..., "primary_key": ..., "pattern_id": ...}` when the underlying sweep raises (e.g. fewer than 2 patterns on the entity line).
+
+---
+
+### `calibration_drift_report`
+
+Agent-correctness composer over `compare_calibrations`. Adds a threshold judgment the raw tool does not: a `drift_verdict` over `overall_drift_rms` plus a routing recommendation, so an agent comparing anomaly verdicts across two calibration epochs knows whether a difference reflects the entity or the recalibrated coordinate system. For the raw per-dimension μ/σ/θ table, use `compare_calibrations`.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `pattern_id` | string | required | Pattern to inspect |
+| `calibration_a` | int \| null | `null` | Starting epoch (`null` → second-to-last on disk) |
+| `calibration_b` | int \| null | `null` | Ending epoch (`null` → latest on disk) |
+| `top_n` | int | `10` | Number of top-drifted dimensions to surface |
+
+**Returns:**
+
+| Field | Description |
+|-------|-------------|
+| `pattern_id` | Echoed pattern id |
+| `calibration_a` / `calibration_b` | Resolved epochs compared |
+| `overall_drift_rms` | RMS centroid shift in σ units per dimension |
+| `drift_verdict` | `"stable"` (rms < 0.10), `"moderate"` (0.10 ≤ rms < 0.30), `"significant"` (rms ≥ 0.30) |
+| `schema_hash` | Calibration schema hash |
+| `population_size_from` / `population_size_to` | Population sizes per epoch |
+| `top_drifted` | Per-dim `DimensionDrift` list, sorted by \|μ shift\| desc |
+| `interpretation` | What the drift verdict means for cross-epoch reasoning |
+| `recommended_next_steps` | Routing per verdict (e.g. `decompose_drift` on significant drift) |
+
+**Notes:** Strict-JSON sanitised (`±inf` / `NaN` → `null`). Returns `{"error": ..., "pattern_id": ...}` on equal epochs, single-epoch auto-resolve, or schema_hash mismatch.
+
+---
+
+### `diverse_explanations`
+
+Agent-correctness composer over `find_diverse_explanations` with counterfactual validation forced ON. Adds a synthesis the raw tool does not: a `robustness_verdict` that reads each hypothesis's counterfactual result (override the hypothesis's dims to the population mean, check whether `delta_norm` drops below `theta_norm`) into one judgment. Escapes single-explanation tunnel vision — a multi-dim anomaly confirmed by several independent counterfactuals is robust; one that no counterfactual clears is fragile. For raw hypotheses without a synthesised verdict, or to opt out of validation, use `find_diverse_explanations`.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `primary_key` | string | required | Anomalous entity to explain |
+| `pattern_id` | string | required | Pattern whose geometry holds the entity row |
+| `k` | int | `3` | Number of diverse hypotheses requested |
+| `min_contribution_pct` | float | `0.10` | Per-hypothesis joint-share floor in `[0, 1]`; hypotheses below it are dropped |
+
+**Returns:**
+
+| Field | Description |
+|-------|-------------|
+| `primary_key` / `pattern_id` | Echoed identifiers |
+| `delta_norm` / `theta_norm` | Entity magnitude vs anomaly threshold |
+| `k_requested` | Requested hypothesis count |
+| `n_hypotheses_returned` | Hypotheses that cleared the contribution floor |
+| `n_validated` | Hypotheses whose counterfactual cleared the anomaly flag |
+| `robustness_verdict` | `"multi_cause_robust"` (≥2 validated), `"single_cause"` (1 validated), `"fragile"` (0 validated or degraded single-dim), `"insufficient_signal"` (no hypotheses) |
+| `hypotheses` | Each with `dim_labels`, `joint_contribution_pct`, `narrative`, `validation` |
+| `diversity_score` | Mean pairwise `1 - Jaccard` over hypothesis dim sets (`null` when < 2 hypotheses) |
+| `degraded_reason` | `null` / `"insufficient_diverse_mass"` / `"capped_to_dim_count"` / `"diversity_unavailable_top1_only"` |
+| `interpretation` | What the robustness verdict means |
+| `recommended_next_steps` | Routing per verdict |
+
+**Notes:** Strict-JSON sanitised (`±inf` / `NaN` → `null`). Returns `{"error": ..., "primary_key": ...}` on invalid input.
+
+---
+
+### `theta_sensitivity_report`
+
+Agent-correctness composer over `theta_sensitivity`. Adds a threshold judgment the raw tool does not: a `recalibration_safety` verdict derived from the stable-band / cliff structure of the per-percentile theta sweep. Answers "if I nudge `anomaly_percentile`, does the threshold scale smoothly or fall off a cliff?" directly. For the raw per-percentile sweep + band + cliff lists, use `theta_sensitivity`.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `pattern_id` | string | required | Pattern to inspect |
+| `version` | int \| null | `null` | Calibration epoch (`null` → latest on disk) |
+
+**Returns:**
+
+| Field | Description |
+|-------|-------------|
+| `pattern_id` | Echoed pattern id |
+| `calibration_epoch` | Epoch inspected |
+| `population_size` | Population behind the calibration |
+| `recalibration_safety` | `"safe"` (stable band exists, no cliffs), `"caution"` (stable band exists but cliffs elsewhere), `"unsafe"` (no stable band — every step shifts θ ≥30%) |
+| `n_cliffs` | Number of percentile-pair cliffs (θ ratio ≥ 1.50) |
+| `stable_band` | `{from, to, length}` longest contiguous smooth percentile run |
+| `cliffs` | `[{from, to, ratio}]` cliff boundaries |
+| `theta_sensitivity` | Per-percentile sweep (`p90 .. p99`) |
+| `interpretation` | What the safety verdict means |
+| `recommended_next_steps` | Routing per verdict |
+
+**Notes:** Strict-JSON sanitised (`±inf` / `NaN` → `null`). Returns `{"error": ..., "pattern_id": ...}` when the epoch predates the `theta_sensitivity` field (needs a rebuild) or no epochs exist on disk.
 
 ---
 
