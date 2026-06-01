@@ -361,6 +361,13 @@ def search_entities(line_id: str, property_name: str, value: str, limit: int = 2
         "value": value,
         **core_result,
     }
+    if core_result.get("total", 0) == 0:
+        result["hint"] = (
+            f"No exact match for {property_name}={value!r} (this match is "
+            "case-sensitive). Try search_entities_fts(line_id, query) for a "
+            "token/substring match, or get_line_schema(line_id) to confirm the "
+            "column name and inspect sample values."
+        )
     return json.dumps(result, indent=2, default=str)
 
 

@@ -193,7 +193,7 @@ def theta_sensitivity(
     _require_navigator()
     nav = _state["navigator"]
     report = nav.theta_sensitivity(pattern_id, version=version)
-    return json.dumps(asdict(report), indent=2, default=str)
+    return json.dumps(_sanitize_for_json(asdict(report)), indent=2, default=str)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -556,7 +556,8 @@ def find_motif_by_hops(
 ) -> str:
     """Match motifs declaratively via per-hop ``HopPredicate``s.
 
-    Power-user escape hatch from the closed-vocab ``find_motif`` registry.
+    Power-user escape hatch from the closed-vocab motif registry
+    (``score_motif(motif_type=...)`` / ``find_high_potential_motifs``).
     Each hop is a dict with optional ``amount_min``, ``amount_max``,
     ``time_delta_max_hours``, ``direction`` (``"forward"`` /
     ``"reverse"`` / ``"any"``), ``amount_ratio_to_prev`` (decreasing-
@@ -1845,7 +1846,7 @@ def find_topological_anomalies(
 
     Requires n_entities >= 1000 in the loaded sample; warns below 10_000.
 
-    Returns: entities sorted by topo_score descending, each with primary_key,
+    Returns: entities sorted by h1_max_persistence descending, each with primary_key,
     topo_score, h1_max_persistence, h0_mean_death, n_h1_features, computed_at.
     """
     _require_navigator()
@@ -1946,11 +1947,15 @@ def simulate_edge_removal(
     `event_dimensions` and `prop_columns` are unchanged-by-design (no
     per-edge contribution by construction).
 
-    Returns: primary_key, pattern_id, the original delta_norm, and candidate
-    edges sorted by |drop_pct| descending — each with the new delta_norm, the
-    percent drop, and the dominant dim that changed; plus `dimensions_skipped`
-    for the held-constant `count_above_threshold` dims. Invalid input returned
-    as `{"error": ..., "primary_key": ...}`.
+    Returns: `edges` (candidate edges sorted by |drop_pct| descending — each
+    with the new delta_norm, the percent drop, and the dominant dim that
+    changed), `edges_total` (the entity's full candidate-edge count),
+    `edges_evaluated` (how many were actually scored), and `truncated`. The
+    candidate set is capped at 2000 edges in adjacency order BEFORE ranking;
+    on a high-degree hub `truncated` is True and the ranking reflects only the
+    evaluated subset, not the full edge set — so a partial counterfactual is
+    never mistaken for a complete one. Invalid input returned as
+    `{"error": ..., "primary_key": ...}`.
     """
     _require_navigator()
     nav = _state["navigator"]
@@ -2814,10 +2819,12 @@ def extract_chains(
         version = line.versions[-1] if line.versions else 1
         points_table = reader.read_points(event_pattern_id, version)
     else:
-        raise ValueError(
-            f"'{event_pattern_id}' is neither a pattern nor a line. "
-            f"Available patterns: {sorted(sphere.patterns)}, "
-            f"lines: {sorted(sphere.lines)}"
+        return json.dumps(
+            {
+                "error": f"'{event_pattern_id}' is neither a pattern nor a line. "
+                f"Available patterns: {sorted(sphere.patterns)}, "
+                f"lines: {sorted(sphere.lines)}"
+            }
         )
 
     # Validate required columns exist before selection
@@ -4393,6 +4400,7 @@ def score_edge(
     from_key: str,
     to_key: str,
     pattern_id: str,
+    include_ranking: bool = False,
 ) -> str:
     """Geometric anomaly score for a single edge (from_key → to_key).
 
@@ -4400,11 +4408,21 @@ def score_edge(
     means endpoints are structurally distant AND the pair is rare — classic
     AML layering signature. Complementary to entity-level delta_norm.
 
+    By default this is the fast single-edge path: score_rank_pct and
+    is_high_potential are null. Pass include_ranking=True to also compute this
+    edge's population percentile — a full-population edge ranking that is much
+    slower on large graphs.
+
     Returns: {score, delta_distance, pair_tx_count, effective_weight, interpretation}.
     """
     _require_navigator()
     nav = _state["navigator"]
-    result = nav.edge_potential(from_key, to_key, pattern_id)
+    result = nav.edge_potential(from_key, to_key, pattern_id, include_ranking=include_ranking)
+    if not include_ranking and isinstance(result, dict) and "error" not in result:
+        result["ranking_note"] = (
+            "score_rank_pct/is_high_potential omitted — pass include_ranking=True "
+            "for the population percentile (slower on large graphs)."
+        )
     return json.dumps(result, indent=2, default=str)
 
 

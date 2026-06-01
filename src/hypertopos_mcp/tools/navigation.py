@@ -52,7 +52,7 @@ def goto(primary_key: str, line_id: str) -> str:
     _require_navigator()
     nav = _state["navigator"]
     nav.goto(primary_key, line_id)
-    return json.dumps(_serialize_position(nav.position), indent=2)
+    return json.dumps(_sanitize_for_json(_serialize_position(nav.position)), indent=2)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -64,7 +64,7 @@ def get_position() -> str:
     the navigator has not been moved.
     """
     _require_navigator()
-    return json.dumps(_serialize_position(_state["navigator"].position), indent=2)
+    return json.dumps(_sanitize_for_json(_serialize_position(_state["navigator"].position)), indent=2)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -79,7 +79,7 @@ def walk_line(line_id: str, direction: str = "+") -> str:
     nav = _state["navigator"]
     walk = nav.π1_walk_line
     walk(line_id, direction)
-    return json.dumps(_serialize_position(nav.position), indent=2)
+    return json.dumps(_sanitize_for_json(_serialize_position(nav.position)), indent=2)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -149,7 +149,7 @@ def jump_polygon(target_line_id: str, edge_index: int = 0) -> str:
         return json.dumps(resp, indent=2)
     result = _serialize_position(nav.position)
     result["total_edges_to_target"] = alive_count
-    return json.dumps(result, indent=2)
+    return json.dumps(_sanitize_for_json(result), indent=2)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -258,7 +258,7 @@ def emerge() -> str:
             )
 
     result["entity_properties"] = entity_properties
-    return json.dumps(result, indent=2, default=str)
+    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})

@@ -21,7 +21,10 @@ import hypertopos_mcp.tools.analysis  # noqa: F401 — register tools
 import pytest
 from hypertopos.model.sphere import ThetaSensitivityReport
 from hypertopos_mcp.server import _TOOL_TIERS, _state
-from hypertopos_mcp.tools.analysis import theta_sensitivity_report
+from hypertopos_mcp.tools.analysis import (
+    theta_sensitivity,
+    theta_sensitivity_report,
+)
 
 
 @pytest.fixture
@@ -125,6 +128,21 @@ def test_sanitises_non_finite_cliff_ratio(fake_nav):
         cliffs=[{"from": "p97", "to": "p98", "ratio": math.inf}],
     )
     body = theta_sensitivity_report("account_pattern")
+    parsed = json.loads(body)
+    assert parsed["cliffs"][0]["ratio"] is None
+    assert "NaN" not in body
+    assert "Infinity" not in body
+
+
+def test_theta_sensitivity_tool_sanitises_non_finite_cliff_ratio(fake_nav):
+    """The raw theta_sensitivity tool (not just the _report composer) must
+    sanitise an inf cliff ratio to JSON null — strict MCP parsers reject the
+    bare Infinity literal json.dumps would otherwise emit."""
+    fake_nav.theta_sensitivity.return_value = _report(
+        band_length=5,
+        cliffs=[{"from": "p97", "to": "p98", "ratio": math.inf}],
+    )
+    body = theta_sensitivity("account_pattern")
     parsed = json.loads(body)
     assert parsed["cliffs"][0]["ratio"] is None
     assert "NaN" not in body

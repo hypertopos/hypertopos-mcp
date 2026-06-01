@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-06-01
+
+### Changed
+
+- `extract_chains` now reports an unrecognised `event_pattern_id` as an `{"error": ...}` body instead of raising, matching how it already reports a missing `from_col`/`to_col` — one failure shape for the whole tool.
+- `search_entities` adds a `hint` on zero matches (the match is case-sensitive) pointing at `search_entities_fts` and `get_line_schema`, mirroring the existing `search_entities_fts` zero-result hint.
+- `find_motif_by_hops` docstring + docs no longer reference a non-existent `find_motif` tool; they point at the real closed-vocab path (`score_motif` / `find_high_potential_motifs`).
+- `score_edge` now defaults to fast single-edge scoring; the population percentile (`score_rank_pct`, `is_high_potential`) is opt-in via `include_ranking=True`. The default response carries a `ranking_note` explaining how to request the percentile.
+- `simulate_edge_removal` now returns an `{edges, edges_total, edges_evaluated, truncated}` envelope. On a high-degree entity whose candidate edges exceed the internal cap, `truncated` is `true` and `edges_evaluated` < `edges_total` — so a partial per-edge ranking is no longer mistaken for a complete one (previously the response was a bare list with no signal that the ranking covered only a capped subset).
+
+### Fixed
+
+- `discover_chains` now reports cyclic round-trip chains. Previously every returned chain had `is_cyclic: false` and the summary `cyclic` count was always `0` even when a funds-return cycle (A→…→A) existed — a silent false-negative on a core AML typology. The closing hop back to the origin is now surfaced as a cyclic chain. The `tools.md` return description for the tool was also corrected to document `is_cyclic` and `summary.cyclic`.
+- The position tools (`goto`, `get_position`, `walk_line`, `jump_polygon`, and `π4_emerge`) now serialize non-finite entity-property floats (`NaN` / `±inf`) as JSON `null`, matching `get_polygon`. A property stored as a non-finite float would otherwise have serialized as the bare `NaN` / `Infinity` literal, which strict MCP clients reject.
+- The `theta_sensitivity` tool now returns strict-JSON-safe output: a non-finite cliff `ratio` (e.g. `+inf` when a low-percentile θ collapses to zero on a degenerate subgroup) serializes as `null` instead of the bare `Infinity` literal that strict JSON parsers reject. The sibling `theta_sensitivity_report` tool already sanitized this; the lower-level tool now matches.
+
 ## [0.8.0] — 2026-05-30
 
 ### Added

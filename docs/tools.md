@@ -323,7 +323,7 @@ Exact-match entity lookup by a single property value.
 | `value` | string | required | Exact value (case-sensitive). Bool columns accept `"true"`/`"false"`. |
 | `limit` | int | `20` | Max results to return |
 
-**Returns:** `results[]` (entity records), `total` (all matches), `returned` (slice size).
+**Returns:** `results[]` (entity records), `total` (all matches), `returned` (slice size). On zero matches the response adds a `hint` (the match is case-sensitive — suggests `search_entities_fts` for a token match and `get_line_schema` to confirm the column).
 
 Use `limit=1` to count matches cheaply without fetching full payloads.
 
@@ -1063,7 +1063,7 @@ Per-group leave-set-out impact + reinforcing/canceling factor (caller-supplied f
 
 ### `find_motif_by_hops`
 
-Declarative motif API — escape hatch from the closed-vocab `find_motif` registry. Caller passes a list of dicts describing per-hop constraints (`amount_min`, `amount_max`, `time_delta_max_hours`, `amount_ratio_to_prev`, `direction` (`"forward"` / `"reverse"` / `"any"`), `edge_dim_predicates: {dim: [op, value]}`) and the navigator walks the edge table via level-synchronous BFS for matching chains of length 1..8.
+Declarative motif API — escape hatch from the closed-vocab motif registry (`score_motif(motif_type=...)` / `find_high_potential_motifs`). Caller passes a list of dicts describing per-hop constraints (`amount_min`, `amount_max`, `time_delta_max_hours`, `amount_ratio_to_prev`, `direction` (`"forward"` / `"reverse"` / `"any"`), `edge_dim_predicates: {dim: [op, value]}`) and the navigator walks the edge table via level-synchronous BFS for matching chains of length 1..8.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -1452,7 +1452,7 @@ Extracts chain patterns from an event line.
 | `bidirectional` | bool | `false` | When true, each edge A→B also creates reverse edge B→A (for undirected relationship analysis) |
 | `anchor_pattern_id` | string | `null` | Anchor pattern over the entity line referenced by `from_col`/`to_col`. When set, each chain carries a per-hop `edge_potentials` list — Euclidean distance between consecutive entities' polygon delta vectors against that pattern. When null, `edge_potentials` is a list of nulls per hop. |
 
-**Returns:** `chains[]` with `{hop_count, is_cyclic, keys, n_distinct_categories, amount_decay, edge_potentials}`, `total_chains`, `returned`, `summary` (`{total_chains, cyclic_chains, hop_count_mean, hop_count_max}`). `edge_potentials` length equals `len(keys) - 1`; each element is `null` on missing polygon, mismatched delta shapes, or non-finite distance (NaN / inf strict-JSON sanitised).
+**Returns:** `chains[]` with `{hop_count, is_cyclic, keys, n_distinct_categories, amount_decay, edge_potentials}`, `total_chains`, `returned`, `summary` (`{total_chains, cyclic_chains, hop_count_mean, hop_count_max}`). `edge_potentials` length equals `len(keys) - 1`; each element is `null` on missing polygon, mismatched delta shapes, or non-finite distance (NaN / inf strict-JSON sanitised). Bad input is reported as an `{"error": ...}` body (both an unrecognised `event_pattern_id` and a missing `from_col`/`to_col`), not a thrown protocol error.
 
 ---
 
@@ -1726,7 +1726,7 @@ Discover entity chains from a starting point via runtime temporal BFS. Unlike `e
 | `max_chains` | int | `20` | Max chains to return |
 | `direction` | string | `"forward"` | Traversal direction: `"forward"`, `"backward"`, `"both"` |
 
-**Returns:** `chains[]` scored by geometric coherence, `total_chains`, `returned`.
+**Returns:** `chains[]` (each `{chain_id, keys, hop_count, is_cyclic, time_span_hours, total_amount, geometric_score}`, sorted by `geometric_score` desc) plus a `summary` (`{total, cyclic, avg_hops}`). `is_cyclic` is `true` when the chain returns to the originating entity (A→…→A round trip — a money-laundering typology); `summary.cyclic` counts those.
 
 **Notes:** Does NOT require pre-built chain lines. Operates directly on the pattern's edge table via temporal BFS.
 
@@ -2107,7 +2107,7 @@ Per-edge counterfactual for one entity. For each candidate edge in the entity's 
 | `edge_ids` | list[string] / null | `null` | If not null, restrict simulation to candidates whose `event_key` is in this list |
 | `max_edges_loaded` | int | `2000` | Hard cap on candidate edges before engine evaluation. Hub entities with very large adjacencies are truncated (adjacency order) to keep per-call latency bounded; lower this to trade coverage for speed, raise it when exhaustive coverage on a specific hub is required and you can budget the wall clock. |
 
-**Returns:** list of dicts sorted by `|drop_pct|` descending, tie-broken ascending by `min_pvalue`. Each entry: `edge_id`, `edge_partner_key`, `edge_direction`, `edge_line_id`, `delta_norm_before`, `delta_norm_after`, `drop_pct`, `dominant_dim_idx`, `dominant_dim_label`, `dimensions_simulated`, `dimensions_skipped`, `source_value_pvalues` (per-source-dim upper-tail p-value vs population ECDF), `min_pvalue` (most extreme dim for the edge), `dominant_significance_dim`.
+**Returns:** an envelope `{edges, edges_total, edges_evaluated, truncated}`. `edges` is the ranked list sorted by `|drop_pct|` descending, tie-broken ascending by `min_pvalue` — each entry: `edge_id`, `edge_partner_key`, `edge_direction`, `edge_line_id`, `delta_norm_before`, `delta_norm_after`, `drop_pct`, `dominant_dim_idx`, `dominant_dim_label`, `dimensions_simulated`, `dimensions_skipped`, `source_value_pvalues` (per-source-dim upper-tail p-value vs population ECDF), `min_pvalue` (most extreme dim for the edge), `dominant_significance_dim`. `edges_total` is the entity's full candidate-edge count; `edges_evaluated` is how many were scored after the `max_edges_loaded` cap; `truncated` is `true` when `edges_evaluated < edges_total` — the candidate set was capped in adjacency order BEFORE ranking, so the ranking reflects only the evaluated subset, not the full edge set. (Mirrors the `candidates_truncated` signal on `select_minimal_joint_edge_removal`.)
 
 **Significance discipline:** the per-edge p-values resolve the within-tied-`drop_pct` flat-ranking degeneracy that affects high-volume entities. When `drop_pct` is uniform across an entity's edges (the robust-tail regime — `p95` with duplicates), `min_pvalue` still discriminates because edges differ in their source values; the tie-break carries the most extreme source-value edge to the top of the returned slice.
 
