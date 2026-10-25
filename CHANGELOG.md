@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.2] — 2026-10-25
+
+### Added
+
+- The README shows how to install the skills as a Claude Code plugin (`/plugin marketplace add hypertopos/hypertopos-skills`).
+
 ## [0.9.1] — 2026-10-25
 
 ### Fixed

@@ -30,8 +30,14 @@ def _doc_files() -> list[Path]:
         _PACKAGES / "hypertopos-mcp" / "README.md",
         *(_PACKAGES / "hypertopos-mcp" / "docs").glob("*.md"),
     ]
-    skills = _PACKAGES / "hypertopos-skills"
-    skill_docs = [*skills.glob("*/SKILL.md"), *skills.glob("*/references/*.md")]
+    # Skills that drive the MCP server declare it; a library skill (gds-spark)
+    # documents Python functions that share names with tools.
+    skills = [
+        s.parent
+        for s in (_PACKAGES / "hypertopos-skills").glob("*/SKILL.md")
+        if "mcp-server: hypertopos" in s.read_text(encoding="utf-8")
+    ]
+    skill_docs = [p for s in skills for p in (s / "SKILL.md", *(s / "references").glob("*.md"))]
     return sorted(set(mcp_docs + skill_docs))
 
 

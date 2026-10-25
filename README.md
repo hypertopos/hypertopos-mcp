@@ -6,7 +6,7 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-compatible-green.svg)](https://modelcontextprotocol.io)
-[![Version](https://img.shields.io/badge/version-0.9.1-%235500FF.svg)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-0.9.2-%235500FF.svg)](pyproject.toml)
 
 Point the server at a sphere built with [hypertopos](https://github.com/hypertopos/hypertopos-py), connect an MCP client, and the agent navigates the data instead of querying it: rank what is out of place, explain one entity, jump along a relationship, test a what-if on a branch.
 
@@ -371,6 +371,15 @@ The [Tool Reference](docs/tools.md) lists every tool with its parameters and ret
 ## Works best with skills
 
 hypertopos-mcp provides tools. [hypertopos-skills](https://github.com/hypertopos/hypertopos-skills) provides judgement — structured investigation workflows that guide agents through real tasks like fraud detection, anomaly triage and drift monitoring, and that know which tool to reach for next.
+
+In Claude Code, install them as a plugin:
+
+```
+/plugin marketplace add hypertopos/hypertopos-skills
+/plugin install hypertopos-skills@hypertopos-skills
+```
+
+Other agents: `npx skills add hypertopos/hypertopos-skills`.
 
 ## Documentation
 
