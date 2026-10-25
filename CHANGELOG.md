@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-10-25
+
+### Fixed
+
+- The `open_sphere` pattern summary lists the dimensions of `metric_properties` / `geo_properties` / `semantic_dim` blocks next to the relation dimensions, so a pattern built from blocks no longer shows an empty dimension list.
+
 ## [0.9.0] — 2026-10-25
 
 ### Added

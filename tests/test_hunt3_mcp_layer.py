@@ -361,6 +361,7 @@ def test_open_sphere_pattern_summary_counts_entities_and_labels_roles() -> None:
         pattern_type="event",
         population_size=6924049,
         relations=[rel("accounts", "sender"), rel("accounts", "receiver"), rel("currencies")],
+        dim_block_names=[],
     )
     summary = _pattern_summary(SimpleNamespace(patterns={"tx_pattern": pattern}))
     assert summary["tx_pattern"] == {
@@ -368,3 +369,18 @@ def test_open_sphere_pattern_summary_counts_entities_and_labels_roles() -> None:
         "entities": "6,924,049",
         "dimensions": ["sender", "receiver", "currencies"],
     }
+
+
+def test_open_sphere_pattern_summary_lists_dimension_block_columns() -> None:
+    # A pattern made of metric / geo blocks has no relations; its dimensions
+    # must still show, or the agent sees a pattern with nothing to navigate.
+    from hypertopos_mcp.tools.session import _pattern_summary
+
+    pattern = SimpleNamespace(
+        pattern_type="anchor",
+        population_size=2000,
+        relations=[SimpleNamespace(line_id="_d_n_out", role=None, display_name=None)],
+        dim_block_names=["t:amount_sum_out", "g:lat"],
+    )
+    summary = _pattern_summary(SimpleNamespace(patterns={"entity_pattern": pattern}))
+    assert summary["entity_pattern"]["dimensions"] == ["n out", "amount sum out", "lat"]

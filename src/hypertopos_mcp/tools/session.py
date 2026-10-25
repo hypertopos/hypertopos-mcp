@@ -85,16 +85,19 @@ def _suggest_queries(sphere: Sphere) -> list[str]:
 
 
 def _pattern_summary(sphere: Any) -> dict[str, dict[str, Any]]:
-    """Per-pattern type, entity count and relation dimension labels."""
+    """Per-pattern type, entity count, and relation and dimension-block labels."""
     from hypertopos.model.sphere import relation_dim_labels
+
+    def readable(label: str) -> str:
+        # "_d_x" (derived / precomputed) and "t:x" / "g:x" / "s:x" (blocks) -> "x"
+        return label.replace("_d_", "").split(":", 1)[-1].replace("_", " ")
 
     return {
         pid: {
             "type": p.pattern_type,
             "entities": f"{p.population_size:,}",
             "dimensions": [
-                label.replace("_d_", "").replace("_", " ")
-                for label in relation_dim_labels(p.relations)
+                readable(label) for label in [*relation_dim_labels(p.relations), *p.dim_block_names]
             ],
         }
         for pid, p in sphere.patterns.items()
