@@ -6,45 +6,59 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Callable
 from datetime import UTC
-from typing import Any
+from typing import Any, Literal, cast
 
 import numpy as np
 from hypertopos import CalibrationNotFoundError
 from hypertopos.navigation.navigator import GDSNavigationError
+from mcp.types import ToolAnnotations
 
+from hypertopos_mcp._format import (
+    dedupe_nested_errors,
+    dedupe_text,
+    drop_none_fields,
+    hoist_constant_fields,
+    json_default,
+    labelled,
+    project_descriptive,
+    sanitize_for_json,
+    slim_polygons,
+    tabulate_properties,
+    truncate_long_lists,
+)
 from hypertopos_mcp.enrichment import (
     build_batch_lookups,
-    build_entity_lookups,
     resolve_entity_line_id,
 )
-from hypertopos_mcp.server import _require_navigator, _state, mcp, timed
+from hypertopos_mcp.server import (
+    _refresh_state,
+    _require_navigator,
+    _state,
+    active_response_format,
+    mcp,
+    resolve_verbose,
+    timed,
+)
 from hypertopos_mcp.tools._guards import binary_geometry_note_for_pattern, dead_dim_indices
 
 
-def _sanitize_for_json(obj: Any) -> Any:
-    """Replace non-finite floats (``±inf`` / ``NaN``) with ``None`` recursively.
-
-    Python's ``json.dumps`` emits ``Infinity`` / ``-Infinity`` / ``NaN`` literals
-    for non-finite floats, which are NOT valid per RFC 8259 and are rejected by
-    strict parsers (browser ``JSON.parse``, many non-Python MCP clients). The
-    navigator's motif scorers legitimately emit ``log_score = -inf`` when a
-    motif contains a zero-product edge (identical-delta endpoints). Converting
-    to ``null`` keeps the wire format strict-JSON-compliant; consumers read
-    ``log_score == null`` as "score degenerate / not finite".
-    """
-    if isinstance(obj, (float, np.floating)) and not math.isfinite(float(obj)):
-        return None
-    if isinstance(obj, dict):
-        return {k: _sanitize_for_json(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_sanitize_for_json(v) for v in obj]
-    if isinstance(obj, tuple):
-        return tuple(_sanitize_for_json(v) for v in obj)
-    return obj
+def _attach_properties(output: dict[str, Any], table: dict[str, Any] | None) -> None:
+    """Attach a properties table; in compact sessions keep only its text columns."""
+    if not table:
+        return
+    output["properties"] = table
+    if active_response_format() == "compact":
+        dropped = project_descriptive(table)
+        if dropped:
+            output["omitted"] = {
+                "properties": dropped,
+                "full_response": "open_sphere(<path>, response_format='full') returns every column",
+            }
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def compare_entities(
     key_a: str,
@@ -54,7 +68,8 @@ def compare_entities(
 ) -> str:
     """Compare two entities geometrically (intraclass=Euclidean, temporal=DTW).
 
-    Returns: distance (lower = more similar) and interpretation.
+    Returns: distance (lower = more similar) and interpretation; both entities'
+    properties in one table properties = {columns: [primary_key, ...], rows}.
     """
     _require_navigator()
     nav = _state["navigator"]
@@ -66,21 +81,14 @@ def compare_entities(
         lookups = build_batch_lookups(reader, sphere, {entity_line_id: {key_a, key_b}})
     else:
         lookups = {}
+    entity_lookup = lookups.get(entity_line_id, {}) if entity_line_id else {}
 
-    def _entity_label(key: str) -> dict:
-        props = lookups.get(entity_line_id, {}).get(key, {}) if entity_line_id else {}
-        d: dict = {"primary_key": key}
-        if props:
-            d["properties"] = {k: v for k, v in props.items() if v is not None}
-        return d
-
+    result: dict[str, Any]
     if mode == "intraclass":
         geo = nav.compare_entities_intraclass(key_a, key_b, pattern_id)
         dist = geo["distance"]
         result = {
             "mode": "intraclass",
-            "entity_a": _entity_label(key_a),
-            "entity_b": _entity_label(key_b),
             "key_a": key_a,
             "key_b": key_b,
             "pattern_id": pattern_id,
@@ -105,8 +113,6 @@ def compare_entities(
         temporal = nav.compare_entities_temporal(key_a, key_b, pattern_id)
         result = {
             "mode": "temporal",
-            "entity_a": _entity_label(key_a),
-            "entity_b": _entity_label(key_b),
             "key_a": key_a,
             "key_b": key_b,
             "pattern_id": pattern_id,
@@ -118,17 +124,30 @@ def compare_entities(
     else:
         raise ValueError(f"Unknown mode '{mode}'. Use 'intraclass' or 'temporal'.")
 
-    return json.dumps(result, indent=2, default=str)
+    _attach_properties(result, _pair_properties(entity_lookup, key_a, key_b))
+    return json.dumps(result, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+def _pair_properties(
+    lookup: dict[str, dict[str, Any]], key_a: str, key_b: str
+) -> dict[str, Any] | None:
+    """One ``primary_key``-first properties table for the two compared entities."""
+    items = [
+        {"primary_key": key, "properties": {k: v for k, v in lookup[key].items() if v is not None}}
+        for key in (key_a, key_b)
+        if lookup.get(key)
+    ]
+    return tabulate_properties(items, "primary_key")
+
+
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def compare_calibrations(
     pattern_id: str,
     v_from: int | None = None,
     v_to: int | None = None,
     top_n: int = 10,
-    verbose: bool = False,
+    verbose: bool | None = None,
 ) -> str:
     """Per-dimension μ/σ/θ drift between two calibration epochs of one pattern.
 
@@ -141,7 +160,8 @@ def compare_calibrations(
       v_from: starting epoch (None → second-to-last on disk).
       v_to: ending epoch (None → latest on disk).
       top_n: number of top-drifted dimensions to return (default 10).
-      verbose: when True, also include the full per-dimension breakdown.
+      verbose: None follows the session response_format (full -> True).
+      When True, also include the full per-dimension breakdown.
 
     Returns: JSON-encoded CalibrationDriftReport.
 
@@ -153,12 +173,97 @@ def compare_calibrations(
     _require_navigator()
     nav = _state["navigator"]
     report = nav.compare_calibrations(
-        pattern_id, v_from=v_from, v_to=v_to, top_n=top_n, verbose=verbose,
+        pattern_id,
+        v_from=v_from,
+        v_to=v_to,
+        top_n=top_n,
+        verbose=resolve_verbose(verbose),
     )
-    return json.dumps(asdict(report), indent=2, default=str)
+    return json.dumps(asdict(report), indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+@timed
+def compare_branches(
+    pattern_id: str,
+    branch: str,
+    other: str | None = None,
+    top_n: int = 20,
+) -> str:
+    """How one pattern differs between a sphere branch and main (or branch ``other``).
+
+    Use after recalibrate(pattern_id, branch=..., exclude_keys=...) to see what
+    a counterfactual calibration changes before keeping or deleting the branch.
+
+    Returns: anomaly counts per side, flipped_in / flipped_out (entities that
+    became / stopped being anomalous on the branch), jaccard of the anomaly
+    sets, top_movers by delta_norm change, keys on one side only,
+    calibration_drift between the two fits, and the branch's recipe log
+    (compact format: recipe lists longer than 10, such as exclude_keys, are cut
+    to their first 10; `omitted.recipe` gives each full length).
+    """
+    from dataclasses import asdict
+
+    _require_navigator()
+    report = _state["navigator"].compare_branches(pattern_id, branch, other=other, top_n=top_n)
+    out = asdict(report)
+    if active_response_format() == "compact":
+        cut = truncate_long_lists(out["recipe"])
+        if cut:
+            out["omitted"] = {
+                "recipe": cut,
+                "full_response": "open_sphere(<path>, response_format='full') returns full lists",
+            }
+    return json.dumps(sanitize_for_json(out), indent=2, default=json_default)
+
+
+@mcp.tool(annotations=ToolAnnotations(destructive_hint=True))
+@timed
+def manage_branch(
+    action: Literal["list", "create", "delete", "promote"],
+    name: str | None = None,
+    purpose: str | None = None,
+) -> str:
+    """List, create, delete or promote sphere branches (copy-free what-if workspaces).
+
+    A branch pins the current sphere state without copying data; writes on it
+    (recalibrate(..., branch=name)) never touch main. Open a branch with
+    open_sphere(path, branch=name); compare it with compare_branches.
+
+    action: "list" (no name), "create" (name, optional purpose; always from main's
+    current state), "delete" (name;
+    not the branch this session is open on), "promote" (name, same rule; replays the
+    branch's recipes on main, verifies the result is identical, then deletes
+    the branch; refused when main moved since the branch was created).
+    Returns: the branch list, the created branch, the deleted name, or the
+    promotion report.
+    """
+    from dataclasses import asdict
+
+    _require_navigator()
+    hs = _state["sphere"]
+    if action == "list":
+        return json.dumps({"branches": [asdict(b) for b in hs.branches()]}, indent=2)
+    if not name:
+        raise ValueError(f"manage_branch(action={action!r}) needs name")
+    if action == "create":
+        info = hs.create_branch(name, created_by="mcp-agent", purpose=purpose or "")
+        return json.dumps({"created": asdict(info)}, indent=2)
+    if name == _state.get("branch"):
+        raise ValueError(
+            f"this session is open on branch {name!r}; open main with open_sphere(path) first"
+        )
+    if action == "promote":
+        report = hs.promote_branch(name)
+        if _state.get("branch") is None:
+            _state["session"].refresh()
+            _refresh_state()
+        return json.dumps({"promoted": asdict(report)}, indent=2)
+    hs.delete_branch(name)
+    return json.dumps({"deleted": name}, indent=2)
+
+
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def theta_sensitivity(
     pattern_id: str,
@@ -193,20 +298,20 @@ def theta_sensitivity(
     _require_navigator()
     nav = _state["navigator"]
     report = nav.theta_sensitivity(pattern_id, version=version)
-    return json.dumps(_sanitize_for_json(asdict(report)), indent=2, default=str)
+    return json.dumps(sanitize_for_json(asdict(report)), indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def decompose_drift(
-    entity_key: str,
+    primary_key: str,
     pattern_id: str,
     v_from: int | None = None,
     v_to: int | None = None,
     timestamp_from: float | None = None,
     timestamp_to: float | None = None,
     top_n: int = 10,
-    verbose: bool = False,
+    verbose: bool | None = None,
 ) -> str:
     """Decompose an entity's drift between two temporal slices into intrinsic
     (entity-driven) and extrinsic (population-recalibration-driven) components.
@@ -215,14 +320,15 @@ def decompose_drift(
     calibration retention. No on-disk format change.
 
     Args:
-      entity_key: which entity to decompose.
+      primary_key: which entity to decompose.
       pattern_id: anchor pattern with temporal data.
       v_from: starting calibration epoch (None → oldest retained on disk).
       v_to: ending calibration epoch (None → latest on disk).
       timestamp_from: Unix-seconds lower bound for slice window (None → first slice).
       timestamp_to: Unix-seconds upper bound for slice window (None → last slice).
       top_n: number of top dimensions (by |total|) to return (default 10).
-      verbose: when True, also include the full per-dimension breakdown.
+      verbose: None follows the session response_format (full -> True).
+      When True, also include the full per-dimension breakdown.
 
     Returns: JSON-encoded IntrinsicExtrinsicReport.
 
@@ -242,33 +348,29 @@ def decompose_drift(
     _require_navigator()
     nav = _state["navigator"]
 
-    ts_from = (
-        datetime.fromtimestamp(timestamp_from, tz=UTC)
-        if timestamp_from is not None
-        else None
-    )
-    ts_to = (
-        datetime.fromtimestamp(timestamp_to, tz=UTC)
-        if timestamp_to is not None
-        else None
-    )
+    ts_from = datetime.fromtimestamp(timestamp_from, tz=UTC) if timestamp_from is not None else None
+    ts_to = datetime.fromtimestamp(timestamp_to, tz=UTC) if timestamp_to is not None else None
 
     try:
         report = nav.decompose_drift(
-            entity_key=entity_key, pattern_id=pattern_id,
-            v_from=v_from, v_to=v_to,
-            timestamp_from=ts_from, timestamp_to=ts_to,
-            top_n=top_n, verbose=verbose,
+            entity_key=primary_key,
+            pattern_id=pattern_id,
+            v_from=v_from,
+            v_to=v_to,
+            timestamp_from=ts_from,
+            timestamp_to=ts_to,
+            top_n=top_n,
+            verbose=resolve_verbose(verbose),
         )
     except (GDSNavigationError, CalibrationNotFoundError, ValueError) as exc:
         return json.dumps(
             {"error": str(exc), "pattern_id": pattern_id},
             indent=2,
         )
-    return json.dumps(asdict(report), indent=2, default=str)
+    return json.dumps(asdict(report), indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def find_calibration_influencers(
     pattern_id: str,
@@ -276,7 +378,7 @@ def find_calibration_influencers(
     classify: str = "hidden",
     high_threshold_pct: float = 90.0,
     sample_size: int | None = None,
-    verbose: bool = False,
+    verbose: bool | None = None,
     auto_discover: bool = False,
     auto_k: int = 10,
 ) -> str:
@@ -311,13 +413,15 @@ def find_calibration_influencers(
                 "normal", "all" (returns top_n by total_impact across all cells).
       high_threshold_pct: percentile cutoff for "high impact" classification (default 90).
       sample_size: subsample N entities before leave-one-out scan.
-      verbose: when True, each entry gains cascading_flip_count
+      verbose: None follows the session response_format (full -> True).
+      When True, each entry gains cascading_flip_count
                (extra O(top_n × N × D) recompute cost).
       auto_discover: when True, run k-means on the geometry and rank
                      cluster representatives only.
       auto_k: number of clusters when auto_discover=True (hard cap 50).
 
-    Returns: JSON-encoded InfluenceReport with cell_counts + entries.
+    Returns: JSON-encoded InfluenceReport with cell_counts + entries (fields that do
+    not apply to the call, e.g. cluster_size without auto_discover, are omitted).
 
     Raises ValueError on event pattern, N<2, invalid threshold/classify/top_n/auto_k.
     """
@@ -331,15 +435,16 @@ def find_calibration_influencers(
         classify=classify,
         high_threshold_pct=high_threshold_pct,
         sample_size=sample_size,
-        verbose=verbose,
+        verbose=resolve_verbose(verbose),
         auto_discover=auto_discover,
         auto_k=auto_k,
     )
-    payload = _sanitize_for_json(asdict(report))
-    return json.dumps(payload, indent=2, default=str)
+    payload = sanitize_for_json(asdict(report))
+    drop_none_fields(payload.get("entries") or [])
+    return json.dumps(payload, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def calibration_influencer_history(
     primary_key: str,
@@ -370,11 +475,11 @@ def calibration_influencer_history(
         primary_key=primary_key,
         pattern_id=pattern_id,
     )
-    payload = _sanitize_for_json(asdict(report))
-    return json.dumps(payload, indent=2, default=str)
+    payload = sanitize_for_json(asdict(report))
+    return json.dumps(payload, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def find_group_influence(
     pattern_id: str,
@@ -397,7 +502,7 @@ def find_group_influence(
       groups: list of lists of entity_keys; each group must have ≥2 distinct
               members and len(group) < N.
 
-    Returns: JSON-encoded list[GroupInfluenceReport] (input order preserved).
+    Returns: ``{"results": [GroupInfluenceReport, ...]}`` (input order preserved).
 
     Raises ValueError on event pattern, N<3, empty groups, group<2 members,
     group≥N, missing entity_key, duplicate entity in group, undefined
@@ -408,10 +513,10 @@ def find_group_influence(
     _require_navigator()
     nav = _state["navigator"]
     reports = nav.find_group_influence(pattern_id=pattern_id, groups=groups)
-    return json.dumps([asdict(r) for r in reports], indent=2, default=str)
+    return json.dumps({"results": [asdict(r) for r in reports]}, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def find_lead_lag(
     pattern_a: str,
@@ -423,8 +528,8 @@ def find_lead_lag(
     max_lag: int | None = None,
     fdr_alpha: float = 0.05,
     fdr_method: str = "storey",
-    verbose: bool = False,
-    entity_key: str | None = None,
+    verbose: bool | None = None,
+    primary_key: str | None = None,
 ) -> str:
     """Cross-pattern temporal lead-lag in population-relative coordinates.
 
@@ -433,7 +538,7 @@ def find_lead_lag(
     the peak lag and correlation. Positive lag means pattern_a leads
     pattern_b. Per-dim drill-down: top-10 (dim_a, dim_b) pairs by ascending
     BH/Storey-adjusted q-value (full D_A × D_B matrix when verbose=True).
-    Per-entity drill-down: pass entity_key to replace population centroid
+    Per-entity drill-down: pass primary_key to replace population centroid
     by that entity's own delta trajectory.
 
     Args:
@@ -450,8 +555,9 @@ def find_lead_lag(
       fdr_alpha: FDR level for the per-dim D_A × D_B matrix (default 0.05).
       fdr_method: "bh" or "storey" (default — recovers power on rich-signal
         regimes via π₀-adaptive scaling).
-      verbose: when True, full D_A × D_B matrix in per_dim_pairs.
-      entity_key: per-entity drill-down mode.
+      verbose: None follows the session response_format (full -> True).
+      When True, full D_A × D_B matrix in per_dim_pairs.
+      primary_key: per-entity drill-down mode.
 
     Returns: JSON LeadLagReport with `lag`, `correlation`, `agreement`,
     `is_significant`, `bartlett_ci_95`, `max_corr_threshold`, `reliability`
@@ -462,7 +568,7 @@ def find_lead_lag(
     Raises ValueError on: event pattern, pattern_a==pattern_b, disjoint
     entity_lines (patterns track different entity populations — no shared
     cohort is possible), intersection below min_epochs, empty fixed cohort,
-    entity_key not present in both patterns over the window.
+    primary_key not present in both patterns over the window.
     """
     from dataclasses import asdict
 
@@ -478,14 +584,14 @@ def find_lead_lag(
         max_lag=max_lag,
         fdr_alpha=fdr_alpha,
         fdr_method=fdr_method,
-        verbose=verbose,
-        entity_key=entity_key,
+        verbose=resolve_verbose(verbose),
+        entity_key=primary_key,
     )
-    payload = _sanitize_for_json(asdict(report))
-    return json.dumps(payload, indent=2, default=str)
+    payload = sanitize_for_json(asdict(report))
+    return json.dumps(payload, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def find_density_gaps(
     pattern_id: str,
@@ -541,16 +647,16 @@ def find_density_gaps(
         r_max=r_max,
         sample_size=None if sample_size == 0 else sample_size,
     )
-    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+    return json.dumps(sanitize_for_json(result), indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def find_motif_by_hops(
     pattern_id: str,
-    hops: list[dict],
+    hops: list[dict[Any, Any]],
     seed_keys: list[str] | None = None,
-    max_results: int = 100,
+    top_n: int = 100,
     score: bool = False,
     time_window_hours: float | None = None,
 ) -> str:
@@ -584,7 +690,7 @@ def find_motif_by_hops(
     the resulting motif) must satisfy ``is_anomaly=True`` in the resolved
     anchor companion pattern. Multiple hops can set this independently
     (constraints AND across hops). Raises when no anchor companion is
-    configured. ``max_results`` applies AFTER this filter.
+    configured. ``top_n`` applies AFTER this filter.
 
     ``score`` (optional bool, default ``False``): when ``True``, each
     motif is scored as the product of event-aware ``edge_potential``
@@ -599,7 +705,7 @@ def find_motif_by_hops(
     at the tail. Raises when no anchor companion is configured for the
     queried event pattern.
 
-    Returns: matched motifs (up to ``max_results``), each with its node
+    Returns: matched motifs (up to ``top_n``), each with its node
     sequence and per-edge details; when ``score=True`` each motif also
     carries ``score``, ``score_breakdown``, and ``anchor_pattern_id``
     provenance, sorted descending on score with unscored motifs at the tail.
@@ -619,34 +725,34 @@ def find_motif_by_hops(
         edge_dim_raw = hop_dict.get("edge_dim_predicates", {})
         edge_dim: dict[str, tuple[str, float]] = {
             dim: (op, float(val))
-            for dim, (op, val) in (
-                edge_dim_raw.items() if isinstance(edge_dim_raw, dict) else []
-            )
+            for dim, (op, val) in (edge_dim_raw.items() if isinstance(edge_dim_raw, dict) else [])
         }
-        parsed_hops.append(HopPredicate(
-            amount_min=hop_dict.get("amount_min"),
-            amount_max=hop_dict.get("amount_max"),
-            time_delta_max_hours=hop_dict.get("time_delta_max_hours"),
-            amount_ratio_to_prev=hop_dict.get("amount_ratio_to_prev"),
-            direction=hop_dict.get("direction", "forward"),
-            edge_dim_predicates=edge_dim,
-            require_anomalous_entity=bool(
-                hop_dict.get("require_anomalous_entity", False),
-            ),
-        ))
+        parsed_hops.append(
+            HopPredicate(
+                amount_min=hop_dict.get("amount_min"),
+                amount_max=hop_dict.get("amount_max"),
+                time_delta_max_hours=hop_dict.get("time_delta_max_hours"),
+                amount_ratio_to_prev=hop_dict.get("amount_ratio_to_prev"),
+                direction=hop_dict.get("direction", "forward"),
+                edge_dim_predicates=edge_dim,
+                require_anomalous_entity=bool(
+                    hop_dict.get("require_anomalous_entity", False),
+                ),
+            )
+        )
 
     result = nav.find_motif_by_hops(
         pattern_id=pattern_id,
         hops=parsed_hops,
         seed_keys=seed_keys,
-        max_results=max_results,
+        max_results=top_n,
         score=score,
         time_window_hours=time_window_hours,
     )
-    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+    return json.dumps(sanitize_for_json(result), indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def find_similar_entities(
     primary_key: str,
@@ -709,7 +815,7 @@ def find_similar_entities(
         lookups = {}
     entity_lookup = lookups.get(entity_line_id, {}) if entity_line_id else {}
 
-    def _props(key: str) -> dict:
+    def _props(key: str) -> dict[str, Any]:
         p = entity_lookup.get(key, {})
         return {k: v for k, v in p.items() if v is not None} if p else {}
 
@@ -719,15 +825,13 @@ def find_similar_entities(
             "primary_key": bk,
             **({} if not _props(bk) else {"properties": _props(bk)}),
             "distance": round(float(dist), 4),
-            **(
-                {"is_anomaly": bool(anomaly_map[bk])}
-                if bk in anomaly_map else {}
-            ),
+            **({"is_anomaly": bool(anomaly_map[bk])} if bk in anomaly_map else {}),
         }
         for bk, dist in similar_pairs
     ]
+    similar_properties = tabulate_properties(similar_list, "primary_key")
     pct = ref_meta["delta_rank_pct"]
-    result: dict = {
+    result: dict[str, Any] = {
         "reference": {
             "primary_key": primary_key,
             **({} if not _props(primary_key) else {"properties": _props(primary_key)}),
@@ -737,13 +841,13 @@ def find_similar_entities(
         },
         "similar": similar_list,
     }
+    _attach_properties(result, similar_properties)
     if similar_list:
-        neighbor_anomaly_count = sum(
-            1 for entry in similar_list if entry.get("is_anomaly") is True
-        )
+        neighbor_anomaly_count = sum(1 for entry in similar_list if entry.get("is_anomaly") is True)
         result["neighbor_anomaly_count"] = neighbor_anomaly_count
         result["neighbor_anomaly_rate"] = round(
-            neighbor_anomaly_count / len(similar_list), 4,
+            neighbor_anomaly_count / len(similar_list),
+            4,
         )
     if missing_edge_to and len(similar_list) < top_n:
         result["partial_results_warning"] = (
@@ -752,9 +856,7 @@ def find_similar_entities(
         )
     if missing_edge_to:
         result["missing_edge_to"] = missing_edge_to
-        result["missing_edge_to_note"] = (
-            "Filters by geometric edges, not property values."
-        )
+        result["missing_edge_to_note"] = "Filters by geometric edges, not property values."
     if not similar_list and filter_expr:
         note = f"No entities matching filter_expr='{filter_expr}' found near this entity. "
         if not ref_meta["is_anomaly"] and "is_anomaly" in filter_expr.lower():
@@ -773,7 +875,7 @@ def find_similar_entities(
     return json.dumps(result, indent=2)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def search_entities_hybrid(
     primary_key: str,
@@ -791,7 +893,8 @@ def search_entities_hybrid(
     alpha: weight of vector score (0.0=pure text, 1.0=pure vector, default 0.7).
     query: BM25 text query across all string attributes. Requires INVERTED index.
     filter_expr: optional Lance SQL predicate (e.g. "is_anomaly = true").
-    Returns: ranked results with vector_score, text_score, final_score per entity.
+    Returns: ranked results with vector_score, text_score, final_score per entity;
+    their properties in one table properties = {columns: [primary_key, ...], rows}.
     """
     _require_navigator()
     navigator = _state["navigator"]
@@ -831,11 +934,11 @@ def search_entities_hybrid(
     else:
         entity_props = {}
 
-    def _props(key: str) -> dict:
+    def _props(key: str) -> dict[str, Any]:
         p = entity_props.get(key, {})
         return {k: v for k, v in p.items() if v is not None} if p else {}
 
-    results = [
+    results: list[dict[str, Any]] = [
         {
             "primary_key": r["primary_key"],
             **({} if not _props(r["primary_key"]) else {"properties": _props(r["primary_key"])}),
@@ -846,7 +949,7 @@ def search_entities_hybrid(
         for r in raw_results
     ]
 
-    output: dict = {
+    output: dict[str, Any] = {
         "primary_key": primary_key,
         "pattern_id": pattern_id,
         "query": query,
@@ -855,6 +958,7 @@ def search_entities_hybrid(
         "fts_candidates": _fts_candidates,
         "results": results,
     }
+    _attach_properties(output, tabulate_properties(results, "primary_key"))
 
     if results and not _ann_active:
         output["degradation_warning"] = (
@@ -865,15 +969,18 @@ def search_entities_hybrid(
             "(GDSWriter.build_index_if_needed)."
         )
 
-    return json.dumps(output, indent=2, default=str)
+    return json.dumps(output, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def find_common_relations(key_a: str, key_b: str, pattern_id: str) -> str:
     """Find shared alive edges between two entities in a pattern.
 
-    Returns: common relations (line_id + point_key), edge counts, interpretation.
+    Returns: common_relations (shared entity edges: line_id + point_key + that
+    entity's properties), common_dim_lines (shared continuous-mode dim lines, which
+    carry no entity key), common_count (both together), edge counts, interpretation,
+    and both entities' properties in one table properties = {columns, rows}.
     """
     _require_navigator()
     nav = _state["navigator"]
@@ -892,16 +999,11 @@ def find_common_relations(key_a: str, key_b: str, pattern_id: str) -> str:
     lookups = build_batch_lookups(reader, sphere, keys_by_line)
     entity_lookup = lookups.get(entity_line_id, {}) if entity_line_id else {}
 
-    def _entity_label(key: str) -> dict:
-        props = entity_lookup.get(key, {})
-        d: dict = {"primary_key": key}
-        if props:
-            d["properties"] = {k: v for k, v in props.items() if v is not None}
-        return d
-
     enriched_common = []
     for line_id, point_key in sorted(common):
-        entry: dict = {"line_id": line_id, "point_key": point_key}
+        if not point_key:
+            continue
+        entry: dict[str, Any] = {"line_id": line_id, "point_key": point_key}
         edge_props = lookups.get(line_id, {}).get(point_key, {})
         for k, v in edge_props.items():
             if v is not None:
@@ -925,22 +1027,22 @@ def find_common_relations(key_a: str, key_b: str, pattern_id: str) -> str:
     else:
         interpretation = f"share {len(common)} relation(s)"
 
-    result = {
-        "entity_a": _entity_label(key_a),
-        "entity_b": _entity_label(key_b),
+    result: dict[str, Any] = {
         "key_a": key_a,
         "key_b": key_b,
         "pattern_id": pattern_id,
         "common_count": len(common),
         "common_relations": enriched_common,
+        **({"common_dim_lines": sorted(continuous_lines)} if continuous_lines else {}),
         "edges_a": rel["edges_a"],
         "edges_b": rel["edges_b"],
         "interpretation": interpretation,
     }
-    return json.dumps(result, indent=2)
+    _attach_properties(result, _pair_properties(entity_lookup, key_a, key_b))
+    return json.dumps(result, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def find_counterparties(
     primary_key: str,
@@ -954,6 +1056,8 @@ def find_counterparties(
 ) -> str:
     """Find transaction counterparties of an entity with optional anomaly enrichment.
 
+    One hop over an event line's from/to columns. For the entities a polygon links
+    to through its relation edges (binary FK patterns), use get_polygon or jump_polygon.
     from_col/to_col: columns with source/destination entity keys in the event line.
     When pattern_id is given and edge table exists, uses fast BTREE lookup with
     amount_sum/amount_max per counterparty. Set use_edge_table=False to force points scan.
@@ -961,6 +1065,7 @@ def find_counterparties(
     timestamp <= cutoff are considered. Used for as-of graph reconstruction.
     Points-scan fallback silently ignores it.
     Returns: outgoing targets, incoming sources, each with tx_count and optional anomaly status.
+    Sorted by tx_count desc; ties by amount_sum desc (edge table), then key asc.
     """
     _require_navigator()
     nav = _state["navigator"]
@@ -976,10 +1081,10 @@ def find_counterparties(
         timestamp_cutoff=timestamp_cutoff,
     )
 
-    return json.dumps(result, indent=2, default=str)
+    return json.dumps(result, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def entity_flow(
     primary_key: str,
@@ -994,17 +1099,19 @@ def entity_flow(
     timestamp_cutoff (Unix seconds): only edges with timestamp <= cutoff
     are considered. Use for as-of flow reconstruction.
     Returns: outgoing_total, incoming_total, net_flow, flow_direction, counterparties sorted by |net_flow|.
-    """
+    """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
     result = nav.entity_flow(
-        primary_key, pattern_id, top_n=top_n,
+        primary_key,
+        pattern_id,
+        top_n=top_n,
         timestamp_cutoff=timestamp_cutoff,
     )
-    return json.dumps(result, indent=2, default=str)
+    return json.dumps(result, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def contagion_score(
     primary_key: str,
@@ -1021,12 +1128,14 @@ def contagion_score(
     _require_navigator()
     nav = _state["navigator"]
     result = nav.contagion_score(
-        primary_key, pattern_id, timestamp_cutoff=timestamp_cutoff,
+        primary_key,
+        pattern_id,
+        timestamp_cutoff=timestamp_cutoff,
     )
-    return json.dumps(result, indent=2, default=str)
+    return json.dumps(result, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def contagion_score_batch(
     primary_keys: list[str],
@@ -1042,13 +1151,16 @@ def contagion_score_batch(
     _require_navigator()
     nav = _state["navigator"]
     result = nav.contagion_score_batch(
-        primary_keys, pattern_id, max_keys=max_keys,
+        primary_keys,
+        pattern_id,
+        max_keys=max_keys,
         timestamp_cutoff=timestamp_cutoff,
     )
-    return json.dumps(result, indent=2, default=str)
+    slim_polygons(result.get("results") or [], pattern_id)
+    return json.dumps(result, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def degree_velocity(
     primary_key: str,
@@ -1068,13 +1180,15 @@ def degree_velocity(
     _require_navigator()
     nav = _state["navigator"]
     result = nav.degree_velocity(
-        primary_key, pattern_id, n_buckets=n_buckets,
+        primary_key,
+        pattern_id,
+        n_buckets=n_buckets,
         timestamp_cutoff=timestamp_cutoff,
     )
-    return json.dumps(result, indent=2, default=str)
+    return json.dumps(result, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def investigation_coverage(
     primary_key: str,
@@ -1095,10 +1209,10 @@ def investigation_coverage(
     nav = _state["navigator"]
     explored_set = set(explored_keys) if explored_keys else set()
     result = nav.investigation_coverage(primary_key, pattern_id, explored_set)
-    return json.dumps(result, indent=2, default=str)
+    return json.dumps(result, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def propagate_influence(
     seed_keys: list[str],
@@ -1120,18 +1234,21 @@ def propagate_influence(
     _require_navigator()
     nav = _state["navigator"]
     result = nav.propagate_influence(
-        seed_keys, pattern_id,
-        max_depth=max_depth, decay=decay, min_threshold=min_threshold,
+        seed_keys,
+        pattern_id,
+        max_depth=max_depth,
+        decay=decay,
+        min_threshold=min_threshold,
         timestamp_cutoff=timestamp_cutoff,
     )
     # Cap output to top 100
     if len(result["affected_entities"]) > 100:
         result["affected_entities"] = result["affected_entities"][:100]
         result["summary"]["truncated_to"] = 100
-    return json.dumps(result, indent=2, default=str)
+    return json.dumps(result, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def cluster_bridges(
     pattern_id: str,
@@ -1151,13 +1268,15 @@ def cluster_bridges(
     _require_navigator()
     nav = _state["navigator"]
     result = nav.cluster_bridges(
-        pattern_id, n_clusters=n_clusters, top_n_bridges=top_n_bridges,
+        pattern_id,
+        n_clusters=n_clusters,
+        top_n_bridges=top_n_bridges,
         sample_size=sample_size,
     )
-    return json.dumps(result, indent=2, default=str)
+    return json.dumps(result, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def anomalous_edges(
     from_key: str,
@@ -1176,10 +1295,10 @@ def anomalous_edges(
     _require_navigator()
     nav = _state["navigator"]
     result = nav.anomalous_edges(from_key, to_key, pattern_id, top_n=top_n)
-    return json.dumps(result, indent=2, default=str)
+    return json.dumps(result, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def find_witness_cohort(
     primary_key: str,
@@ -1229,6 +1348,7 @@ def find_witness_cohort(
         WitnessCohortConfig,
         WitnessCohortWeights,
     )
+
     config = WitnessCohortConfig(
         candidate_pool=candidate_pool,
         min_witness_overlap=min_witness_overlap,
@@ -1250,10 +1370,11 @@ def find_witness_cohort(
         edge_pattern_id=edge_pattern_id,
     )
     import dataclasses
-    return json.dumps(dataclasses.asdict(result), indent=2, default=str)
+
+    return json.dumps(dataclasses.asdict(result), indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def find_chains_for_entity(
     primary_key: str,
@@ -1263,7 +1384,7 @@ def find_chains_for_entity(
     """Find transaction chains involving a specific entity (requires chain pattern with chain_keys column).
 
     Returns: chains enriched with is_anomaly, delta_norm, delta_rank_pct.
-    """
+    """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
     result = nav.find_chains_for_entity(
@@ -1271,16 +1392,16 @@ def find_chains_for_entity(
         pattern_id,
         top_n=top_n,
     )
-    return json.dumps(result, indent=2, default=str)
+    return json.dumps(result, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def find_chains_with_coherent_anomaly(
     pattern_id: str,
     anchor_pattern_id: str,
     min_hops: int = 3,
-    max_results: int = 100,
+    top_n: int = 100,
 ) -> str:
     """Find chains with coherent anomaly cascades.
 
@@ -1298,8 +1419,9 @@ def find_chains_with_coherent_anomaly(
         anchor_pattern_id: entity anchor pattern whose primary_keys match
             the chain hops (e.g. account_pattern when chains hop through
             accounts).
-        min_hops: strict consecutive run length; must be >= 2.
-        max_results: cap on returned runs; sorted by (run_length DESC,
+        min_hops: strict consecutive run length in entities (not edges):
+      min_hops=3 means three consecutive anomalous entities, i.e. two hops; must be >= 2.
+        top_n: cap on returned runs; sorted by (run_length DESC,
             max_delta_norm DESC).
 
     Returns: chains list with chain_id, run_start_idx, run_length, top_dim,
@@ -1312,15 +1434,15 @@ def find_chains_with_coherent_anomaly(
         pattern_id,
         anchor_pattern_id=anchor_pattern_id,
         min_hops=min_hops,
-        max_results=max_results,
+        max_results=top_n,
     )
     # Strip the internal-consumer set field; not JSON-serialisable cleanly
     # and downstream MCP callers consume the per-chain entries in chains[].
     result["diagnostics"].pop("all_coherent_chain_ids", None)
-    return json.dumps(result, indent=2, default=str)
+    return json.dumps(result, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def anomaly_propagation_in_chain(
     chain_id: str,
@@ -1354,10 +1476,10 @@ def anomaly_propagation_in_chain(
         pattern_id,
         anchor_pattern_id=anchor_pattern_id,
     )
-    return json.dumps(result, indent=2, default=str)
+    return json.dumps(result, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def classify_chain_typology(
     chain_id: str,
@@ -1385,10 +1507,10 @@ def classify_chain_typology(
         pattern_id,
         anchor_pattern_id=anchor_pattern_id,
     )
-    return json.dumps(result, indent=2, default=str)
+    return json.dumps(result, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def chain_witness_intersection(
     chain_id: str,
@@ -1435,10 +1557,10 @@ def chain_witness_intersection(
         )
     except (GDSNavigationError, ValueError) as exc:
         return json.dumps({"error": str(exc), "chain_id": chain_id})
-    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+    return json.dumps(sanitize_for_json(result), indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def chain_drift_trajectory(
     chain_id: str,
@@ -1491,10 +1613,10 @@ def chain_drift_trajectory(
         )
     except (GDSNavigationError, ValueError) as exc:
         return json.dumps({"error": str(exc), "chain_id": chain_id})
-    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+    return json.dumps(sanitize_for_json(result), indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def chain_investigation_summary(
     chain_pattern_id: str,
@@ -1528,7 +1650,8 @@ def chain_investigation_summary(
         max_runs: cap on coherent runs read for top-dim aggregation.
 
     Returns: chain_pattern_id, anchor_pattern_id, n_chains_total,
-    n_chains_with_coherent_anomaly_run, coherent_run_rate,
+    n_chains_with_coherent_anomaly_run (distinct chains), n_coherent_runs (runs can
+    outnumber chains), coherent_run_rate,
     n_chains_with_shape_anomaly, shape_anomaly_rate,
     cross_pattern_overlap (n_both, n_coherent_only, n_shape_only, jaccard),
     top_dims_in_coherent_runs (top 10 by run count),
@@ -1543,16 +1666,16 @@ def chain_investigation_summary(
         min_hops=min_hops,
         max_runs=max_runs,
     )
-    return json.dumps(result, indent=2, default=str)
+    return json.dumps(result, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def investigate_chain(
     chain_id: str,
     pattern_id: str,
     anchor_pattern_id: str,
-    extension_max_results: int = 20,
+    extension_top_n: int = 20,
 ) -> str:
     """One-shot orchestrator for the full R9 investigative loop on a single chain.
 
@@ -1566,7 +1689,9 @@ def investigate_chain(
     not "no-run", forward extension surfaces an anomalous candidate, backward
     extension surfaces an anomalous candidate. `recommended_action`: `escalate to SAR`
     (strong, score >= 3), `continue investigation` (moderate, score 2),
-    `false-positive candidate` (weak, score 0-1). `chain_shape_anomaly` is
+    `false-positive candidate` (weak, score 0-1); `inconclusive` (with
+    `failed_steps`) when scored steps failed and their missing points could
+    change the bucket. `chain_shape_anomaly` is
     intentionally NOT in the score — R9's value proposition is catching what
     `find_anomalies(<chain_pattern>)` misses, so composition-anomalous-but-
     shape-normal is the textbook R9 sweet spot. The shape block stays in the
@@ -1582,11 +1707,12 @@ def investigate_chain(
         chain_id: primary_key of the chain in the chain anchor pattern.
         pattern_id: chain anchor pattern id (built from chain_lines:).
         anchor_pattern_id: entity anchor pattern (e.g. account_pattern).
-        extension_max_results: cap on each extension's candidate list (default 20).
+        extension_top_n: cap on each extension's candidate list (default 20).
 
     Returns: chain_id, pattern_id, anchor_pattern_id, trace, typology,
     shape_anomaly, extension_forward, extension_backward, summary
-    (investigation_strength, recommended_action, score, rationale), elapsed_ms.
+    (investigation_strength, recommended_action, score, rationale, failed_steps
+    when scored steps failed), elapsed_ms.
     """
     _require_navigator()
     nav = _state["navigator"]
@@ -1594,18 +1720,18 @@ def investigate_chain(
         chain_id,
         pattern_id,
         anchor_pattern_id=anchor_pattern_id,
-        extension_max_results=extension_max_results,
+        extension_max_results=extension_top_n,
     )
-    return json.dumps(result, indent=2, default=str)
+    return json.dumps(result, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def generate_sar_rationale(
     chain_id: str,
     pattern_id: str,
     anchor_pattern_id: str,
-    evidence: dict | None = None,
+    evidence: dict[Any, Any] | None = None,
     regulatory_template: str = "FinCEN SAR",
 ) -> str:
     """Compose a SAR-ready narrative from R9 evidence on a single chain.
@@ -1653,17 +1779,17 @@ def generate_sar_rationale(
         evidence=evidence,
         regulatory_template=regulatory_template,
     )
-    return json.dumps(result, indent=2, default=str)
+    return json.dumps(result, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def extend_chain(
     chain_id: str,
     pattern_id: str,
     anchor_pattern_id: str,
     direction: str = "forward",
-    max_results: int = 20,
+    top_n: int = 20,
 ) -> str:
     """Suggest extension entities at the boundary of a chain's anomalous run.
 
@@ -1673,7 +1799,8 @@ def extend_chain(
     investigation forward into the laundering ring.
 
     direction='backward': same logic at the run's start, returning entities
-    that PRECEDE the boundary entity in other chains.
+    that PRECEDE the boundary entity in other chains. The chain's own
+    next / previous hop is never a candidate (it is already in the trace).
 
     Returns: boundary_key, boundary_position, candidates[] (entity_key,
     is_anomaly, delta_norm, delta_rank_pct, n_source_chains,
@@ -1687,12 +1814,12 @@ def extend_chain(
         pattern_id,
         anchor_pattern_id=anchor_pattern_id,
         direction=direction,
-        max_results=max_results,
+        max_results=top_n,
     )
-    return json.dumps(result, indent=2, default=str)
+    return json.dumps(result, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def find_geometric_path(
     from_key: str,
@@ -1719,12 +1846,16 @@ def find_geometric_path(
     Returns: `paths` (top 20 by score, each with the entity-key sequence and
     its coherence score), `summary` (counts plus `paths_truncated_to` when
     capped), and a `warning` when more than 20 paths were found.
-    """
+    """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
     result = nav.find_geometric_path(
-        from_key, to_key, pattern_id,
-        max_depth=max_depth, beam_width=beam_width, scoring=scoring,
+        from_key,
+        to_key,
+        pattern_id,
+        max_depth=max_depth,
+        beam_width=beam_width,
+        scoring=scoring,
     )
     # Cap output: return top 20 paths to avoid token explosion
     total = len(result.get("paths", []))
@@ -1735,48 +1866,10 @@ def find_geometric_path(
             f"Found {total} paths, showing top 20 by score. "
             "Use smaller beam_width or max_depth to reduce results."
         )
-    return json.dumps(result, indent=2, default=str)
+    return json.dumps(result, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
-@timed
-def discover_chains(
-    primary_key: str,
-    pattern_id: str,
-    time_window_hours: int = 168,
-    max_hops: int = 10,
-    min_hops: int = 2,
-    max_chains: int = 20,
-    direction: str = "forward",
-) -> str:
-    """Discover transaction chains from entity via runtime temporal BFS.
-
-    Does NOT require pre-built chain lines — works on any event pattern
-    with an edge table. For pre-built chain lookups, use find_chains_for_entity.
-
-    Chains are scored by geometric coherence — highest-scored first.
-    Use direction="both" for full neighborhood chain analysis.
-
-    Note: total_amount is sum of hop amounts, not tracked money flow.
-    See "Chain Interpretation" in concepts docs for details.
-
-    Requires pattern with edge table (event pattern with from/to structure).
-
-    Returns: `chains` (sorted by geometric coherence desc, each with its
-    entity-key hop sequence, hop_count, total_amount, and coherence score)
-    plus summary counts.
-    """
-    _require_navigator()
-    nav = _state["navigator"]
-    result = nav.discover_chains(
-        primary_key, pattern_id,
-        time_window_hours=time_window_hours, max_hops=max_hops,
-        min_hops=min_hops, max_chains=max_chains, direction=direction,
-    )
-    return json.dumps(result, indent=2, default=str)
-
-
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def edge_stats(
     pattern_id: str,
@@ -1793,19 +1886,27 @@ def edge_stats(
     nav = _state["navigator"]
     stats = nav._storage.edge_table_stats(pattern_id)
     if stats is None:
-        return json.dumps({
+        return json.dumps(
+            {
+                "pattern_id": pattern_id,
+                "has_edge_table": False,
+                "hint": (
+                    "This pattern has no edge table. Rebuild the sphere with edge table support."
+                ),
+            }
+        )
+    return json.dumps(
+        {
             "pattern_id": pattern_id,
-            "has_edge_table": False,
-            "hint": "This pattern has no edge table. Rebuild the sphere with edge table support.",
-        })
-    return json.dumps({
-        "pattern_id": pattern_id,
-        "has_edge_table": True,
-        **stats,
-    }, indent=2, default=str)
+            "has_edge_table": True,
+            **stats,
+        },
+        indent=2,
+        default=json_default,
+    )
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def find_novel_entities(
     pattern_id: str,
@@ -1816,7 +1917,7 @@ def find_novel_entities(
 
     High novelty = entity doesn't behave like its neighborhood.
     Requires a pattern with an edge table.
-    Returns: list of {primary_key, novelty_score, n_neighbors} sorted by novelty_score descending.
+    Returns: {results: [{primary_key, novelty_score, n_neighbors}]} by novelty_score descending.
     """
     _require_navigator()
     nav = _state["navigator"]
@@ -1824,10 +1925,10 @@ def find_novel_entities(
         result = nav.find_novel_entities(pattern_id, top_n=top_n, sample_size=sample_size)
     except GDSNavigationError as exc:
         return json.dumps({"error": str(exc), "pattern_id": pattern_id})
-    return json.dumps(result, indent=2, default=str)
+    return json.dumps({"results": result}, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def find_topological_anomalies(
     pattern_id: str,
@@ -1846,7 +1947,7 @@ def find_topological_anomalies(
 
     Requires n_entities >= 1000 in the loaded sample; warns below 10_000.
 
-    Returns: entities sorted by h1_max_persistence descending, each with primary_key,
+    Returns: {results: [...]} sorted by h1_max_persistence descending, each with primary_key,
     topo_score, h1_max_persistence, h0_mean_death, n_h1_features, computed_at.
     """
     _require_navigator()
@@ -1863,15 +1964,17 @@ def find_topological_anomalies(
     except GDSNavigationError as exc:
         return json.dumps({"error": str(exc), "pattern_id": pattern_id})
     except ValueError as exc:
-        return json.dumps({
-            "error": str(exc),
-            "pattern_id": pattern_id,
-            "hint": "PH requires n_entities >= 1000 in the scored sample",
-        })
-    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+        return json.dumps(
+            {
+                "error": str(exc),
+                "pattern_id": pattern_id,
+                "hint": "PH requires n_entities >= 1000 in the scored sample",
+            }
+        )
+    return json.dumps({"results": sanitize_for_json(result)}, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def investigate_entity(
     primary_key: str,
@@ -1921,10 +2024,26 @@ def investigate_entity(
         )
     except GDSNavigationError as exc:
         return json.dumps({"error": str(exc), "primary_key": primary_key})
-    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+    explain = result.get("explain_anomaly")
+    if isinstance(explain, dict):
+        # The report already names the entity and carries its reliability flags.
+        for key in ("primary_key", "pattern_id"):
+            if explain.get(key) == result.get(key):
+                explain.pop(key, None)
+        if explain.get("reliability_flags") == result.get("reliability_flags"):
+            explain.pop("reliability_flags", None)
+        _drop_zero_share_dims(explain)
+    return json.dumps(sanitize_for_json(result), indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+def _drop_zero_share_dims(explanation: dict[str, Any]) -> None:
+    """Keep only dims that contribute to the anomaly in ``top_dimensions``."""
+    dims = explanation.get("top_dimensions")
+    if isinstance(dims, list):
+        explanation["top_dimensions"] = [d for d in dims if d.get("pct_of_total")]
+
+
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def simulate_edge_removal(
     primary_key: str,
@@ -1954,7 +2073,8 @@ def simulate_edge_removal(
     candidate set is capped at 2000 edges in adjacency order BEFORE ranking;
     on a high-degree hub `truncated` is True and the ranking reflects only the
     evaluated subset, not the full edge set — so a partial counterfactual is
-    never mistaken for a complete one. Invalid input returned as
+    never mistaken for a complete one. `edge_line_id` / `dimensions_simulated`
+    move to the top level when every edge shares them. Invalid input returned as
     `{"error": ..., "primary_key": ...}`.
     """
     _require_navigator()
@@ -1969,10 +2089,13 @@ def simulate_edge_removal(
         )
     except GDSNavigationError as exc:
         return json.dumps({"error": str(exc), "primary_key": primary_key})
-    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+    result.update(
+        hoist_constant_fields(result.get("edges") or [], ("edge_line_id", "dimensions_simulated"))
+    )
+    return json.dumps(sanitize_for_json(result), indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def simulate_dimension_change(
     primary_key: str,
@@ -2020,10 +2143,10 @@ def simulate_dimension_change(
         )
     except (GDSNavigationError, ValueError) as exc:
         return json.dumps({"error": str(exc), "primary_key": primary_key})
-    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+    return json.dumps(sanitize_for_json(result), indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def select_minimal_joint_edge_removal(
     primary_key: str,
@@ -2071,10 +2194,10 @@ def select_minimal_joint_edge_removal(
         )
     except GDSNavigationError as exc:
         return json.dumps({"error": str(exc), "primary_key": primary_key})
-    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+    return json.dumps(sanitize_for_json(result), indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def simulate_counterparty_removal(
     primary_key: str,
@@ -2091,7 +2214,7 @@ def simulate_counterparty_removal(
     (``edge_partner_key``) and ranks partners by collective anomaly
     contribution.
 
-    Returns a ranked list with one entry per counterparty:
+    Returns ``{results: [...]}``, ranked, one entry per counterparty:
     ``partner_key``, ``n_edges``, ``sum_drop_pct``, ``sum_abs_drop_pct``,
     ``max_abs_drop_pct``, ``dominant_dim_label``, ``edge_ids``. Sorted by
     ``sum_abs_drop_pct`` descending.
@@ -2114,10 +2237,10 @@ def simulate_counterparty_removal(
         )
     except GDSNavigationError as exc:
         return json.dumps({"error": str(exc), "primary_key": primary_key})
-    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+    return json.dumps({"results": sanitize_for_json(result)}, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def find_graph_geometry_tension(
     primary_key: str,
@@ -2154,22 +2277,22 @@ def find_graph_geometry_tension(
         return json.dumps({"error": str(exc), "primary_key": primary_key})
     except (KeyError, ValueError) as exc:
         return json.dumps({"error": str(exc), "primary_key": primary_key})
-    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+    return json.dumps(sanitize_for_json(result), indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def contrast_populations(
     pattern_id: str,
-    group_a: dict,
-    group_b: dict | None = None,
+    group_a: dict[Any, Any],
+    group_b: dict[Any, Any] | None = None,
 ) -> str:
     """Find which dimensions discriminate most between two entity groups (Cohen's d).
 
     group_a/group_b specs: {"anomaly": bool}, {"keys": [...]}, {"alias": "id", "side": "in"}, or {"edge": {"line_id": ..., "key": ...}}.
     When group_b omitted, complement of group_a is used.
     Returns: dimensions sorted by |effect_size| descending.
-    """
+    """  # noqa: E501
     _require_navigator()
     navigator = _state["navigator"]
     try:
@@ -2188,7 +2311,7 @@ def contrast_populations(
     resp = {
         "pattern_id": pattern_id,
         "group_a_spec": group_a,
-        "group_b_spec": group_b,
+        **({"group_b_spec": group_b} if group_b is not None else {}),
         "dimensions": result,
         "dead_dimensions": dead_dim_indices(pattern_id),
     }
@@ -2198,26 +2321,22 @@ def contrast_populations(
 _MAX_HUB_TOP_N = 25  # hard cap — hub polygons ≈1.9K chars each; 25 ≈ 47K total
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def find_hubs(
     pattern_id: str,
     top_n: int = 10,
     line_id_filter: str | None = None,
-    fdr_alpha: float | None = None,
-    fdr_method: str = "bh",
-    p_value_method: str = "rank",
     select: str = "top_norm",
 ) -> str:
     """Find entities with highest geometric connectivity (hub score).
 
     line_id_filter: rank by a single relation line instead of all.
-    fdr_alpha: apply Benjamini-Hochberg FDR control at this level. Returns only entities with q_value <= alpha. Default None = legacy behavior.
-    fdr_method: "bh" (default) or "storey" (LSL null-proportion estimator; recovers 10-15% more discoveries when combined with p_value_method="chi2" on spheres with genuine null mass).
-    p_value_method: "rank" (default) or "chi2" (required for Storey to shrink q-values).
     select: "top_norm" (default, rank by score) or "diverse" (submodular facility location — K most diverse representatives with representativeness counts).
     Returns: top_n entities by hub_score desc, mode (continuous/binary), score_stats. Hard cap 25.
-    """
+    Binary mode: alive_edges is the alive-edge count. Continuous mode: hub_score is the capacity-weighted
+    sum of the clipped edge shapes and no alive_edges field is returned (there is no edge count).
+    """  # noqa: E501
     _require_navigator()
     capped_warning: str | None = None
     if top_n > _MAX_HUB_TOP_N:
@@ -2232,9 +2351,6 @@ def find_hubs(
         pattern_id,
         top_n=top_n,
         line_id_filter=line_id_filter,
-        fdr_alpha=fdr_alpha,
-        fdr_method=fdr_method,
-        p_value_method=p_value_method,
         select=select,
     )
 
@@ -2254,37 +2370,44 @@ def find_hubs(
 
     enriched = []
     for bk, count, score, hub_pct in results:
-        entry: dict = {"key": bk}
+        entry: dict[str, Any] = {"key": bk}
         props = entity_lookup.get(bk, {})
         if props:
             entry["properties"] = {k: v for k, v in props.items() if v is not None}
-        entry["alive_edges"] = count
+        if pattern.edge_max is None:
+            # Continuous mode has no edge count: the navigator's value is the
+            # rounded hub score.
+            entry["alive_edges"] = count
         entry["hub_score"] = round(score, 2)
         if hub_pct is not None:
             entry["hub_score_pct"] = hub_pct
         enriched.append(entry)
 
+    if score_stats and score_stats.get("max_hub_score") == max_hub_score:
+        score_stats.pop("max_hub_score")
     output = {
         "pattern_id": pattern_id,
         "mode": "continuous" if pattern.edge_max is not None else "binary",
-        "line_id_filter": line_id_filter,
+        **({"line_id_filter": line_id_filter} if line_id_filter is not None else {}),
         "top_n": top_n,
-        "max_hub_score": max_hub_score,
+        **({"max_hub_score": max_hub_score} if max_hub_score is not None else {}),
         "score_stats": score_stats,
         "results": enriched,
     }
+    _attach_properties(output, tabulate_properties(enriched, "key"))
     if capped_warning:
         output["capped_warning"] = capped_warning
     return json.dumps(output, indent=2)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def hub_history(primary_key: str, pattern_id: str) -> str:
     """Show hub score evolution over time for a single entity (continuous patterns only).
 
     Returns: history[] (oldest-first slices with hub_score) and base_state (final accumulated state).
-    """
+    The continuous hub score is the capacity-weighted sum of the clipped edge shapes, not an edge count.
+    """  # noqa: E501
     _require_navigator()
     navigator = _state["navigator"]
     sphere = _state["sphere"]._sphere
@@ -2299,6 +2422,10 @@ def hub_history(primary_key: str, pattern_id: str) -> str:
         base_state = history.pop()
     else:
         base_state = {}
+    if not is_binary:
+        # The edge-count estimate is the rounded hub score; it carries nothing new.
+        for entry in [*history, *([base_state] if base_state else [])]:
+            entry.pop("alive_edges_est", None)
 
     payload = {
         "primary_key": primary_key,
@@ -2312,10 +2439,10 @@ def hub_history(primary_key: str, pattern_id: str) -> str:
             "hub_history is only meaningful for continuous patterns (edge_max configured). "
             "Binary mode stores no weighted hub scores or base_state."
         )
-    return json.dumps(payload, indent=2, default=str)
+    return json.dumps(payload, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def get_centroid_map(
     pattern_id: str,
@@ -2339,7 +2466,10 @@ def get_centroid_map(
         outside the top-N. When truncated, ``groups_truncated_warning`` reports the dropped count and
         the agent should retry with a lower-cardinality grouping property.
     Returns: global centroid, per-group centroids with radius/spread/count/centroid_drift, structural outlier.
-    """
+    Centroid vectors are {dim: value} maps (positional when two dims share a label); group properties
+    (grouping by a line's edges) come in one table properties = {columns: [key, ...], rows}; group_by
+    names the grouping (the property when given, else the line).
+    """  # noqa: E501
     _require_navigator()
     if group_by_line is None and group_by_property is None:
         return json.dumps(
@@ -2361,6 +2491,7 @@ def get_centroid_map(
                 }
             )
         group_by_line = group_by_property.split(":", 1)[0]
+    assert group_by_line is not None  # both None-branches above return or assign it
     _effective_sample = sample_size
     if sample_pct is not None and _effective_sample is None:
         sphere = _state["sphere"]._sphere
@@ -2374,10 +2505,11 @@ def get_centroid_map(
             group_by_line,
             group_by_property,
             sample_size=_effective_sample,
+            max_groups=max_groups,
         )
     except ValueError as exc:
         error_msg = str(exc)
-        resp: dict = {
+        resp: dict[str, Any] = {
             "error": error_msg,
             "pattern_id": pattern_id,
             "group_by": group_by_line,
@@ -2426,48 +2558,36 @@ def get_centroid_map(
             }
         )
 
-    # Hard cap on group_centroids — high-cardinality groupings (e.g. bank_id with
-    # tens of thousands of unique values) blow the per-tool token cap. Keep the
-    # top-N by count plus the structural outlier (which can sit outside top-N).
-    all_groups = result.get("group_centroids", []) or []
-    n_total_groups = len(all_groups)
-    if n_total_groups > max_groups:
-        outlier_key = (result.get("structural_outlier") or {}).get("key")
-        sorted_groups = sorted(
-            all_groups,
-            key=lambda g: int(g.get("count", 0) or 0),
-            reverse=True,
-        )
-        kept = sorted_groups[:max_groups]
-        kept_keys = {g["key"] for g in kept}
-        if outlier_key and outlier_key not in kept_keys:
-            kept = kept[:max_groups - 1] + [
-                g for g in all_groups if g["key"] == outlier_key
-            ]
-        result["group_centroids"] = kept
+    # The core keeps the top max_groups by member count plus the structural outlier.
+    if "n_groups_total" in result:
+        n_total_groups = result["n_groups_total"]
+        n_kept = len(result["group_centroids"])
         result["groups_truncated_warning"] = (
             f"group cardinality {n_total_groups} exceeded max_groups={max_groups} — "
-            f"returned top {len(kept)} by member count (plus structural outlier). "
+            f"returned top {n_kept} by member count (plus structural outlier). "
             "Re-run with a lower-cardinality grouping property or raise max_groups."
         )
-        result["n_groups_total"] = n_total_groups
-        result["n_groups_returned"] = len(kept)
+        result["n_groups_returned"] = n_kept
 
-    # Enrich group keys with human-readable properties
-    reader = _state["session"]._reader
-    sphere = _state["sphere"]._sphere
-    lookups = build_entity_lookups(reader, sphere, {group_by_line})
-    dim_props = lookups.get(group_by_line, {})
+    # Group keys are entity keys of group_by_line only when grouping by its edges;
+    # with group_by_property they are property values and carry no properties.
+    if not group_by_property:
+        reader = _state["session"]._reader
+        sphere = _state["sphere"]._sphere
+        group_keys = {g["key"] for g in result["group_centroids"]}
+        dim_props = build_batch_lookups(reader, sphere, {group_by_line: group_keys}).get(
+            group_by_line, {}
+        )
+        for g in result["group_centroids"]:
+            props = dim_props.get(g["key"], {})
+            if props:
+                g["properties"] = {k: v for k, v in props.items() if v is not None}
 
-    for g in result["group_centroids"]:
-        props = dim_props.get(g["key"], {})
-        if props:
-            g["properties"] = {k: v for k, v in props.items() if v is not None}
-
-    # Round vectors for readability
-    for g in result["group_centroids"]:
-        g["vector"] = [round(v, 6) for v in g["vector"]]
-    result["global_centroid"]["vector"] = [round(v, 6) for v in result["global_centroid"]["vector"]]
+    # Round vectors for readability; label them by dim when the labels are unique
+    labels = _state["sphere"]._sphere.patterns[pattern_id].dim_labels
+    for centroid in [*result["group_centroids"], result["global_centroid"]]:
+        vector = [round(v, 6) for v in centroid["vector"]]
+        centroid["vector"] = labelled(vector, labels) or vector
 
     # centroid_drift is now computed by navigator.centroid_map (core)
     # Remove member_samples from response if still present
@@ -2476,8 +2596,7 @@ def get_centroid_map(
 
     result["pattern_id"] = pattern_id
     result["group_by"] = group_by_property if group_by_property else group_by_line
-    if group_by_property:
-        result["group_by_property"] = group_by_property
+    _attach_properties(result, tabulate_properties(result["group_centroids"], "key"))
 
     _MAX_CENTROID_DISTANCES = 500
     if not include_distances:
@@ -2505,7 +2624,7 @@ def get_centroid_map(
 _MAX_DRIFT_SIMILAR_TOP_N = 50
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def find_drifting_similar(
     primary_key: str,
@@ -2515,7 +2634,8 @@ def find_drifting_similar(
     """Find entities with geometrically similar temporal trajectories (ANN over trajectory vectors).
 
     Anchor patterns with temporal history only. Hard cap 50.
-    Returns: similar entities with distance, displacement, num_slices, timestamps.
+    Returns: ``{"results": [...]}`` — similar entities with distance, displacement,
+    num_slices, timestamps; ``warning`` instead when the entity has too little history.
     """
     import json as _json
 
@@ -2524,7 +2644,7 @@ def find_drifting_similar(
         top_n = _MAX_DRIFT_SIMILAR_TOP_N
     navigator = _state["navigator"]
     try:
-        results = navigator.find_drifting_similar(primary_key, pattern_id, top_n=top_n)
+        results = navigator.π10_attract_trajectory(primary_key, pattern_id, top_n=top_n)
     except ValueError as exc:
         if "insufficient_temporal_history" in str(exc):
             msg = str(exc).split(": ", 1)[1] if ": " in str(exc) else str(exc)
@@ -2539,25 +2659,22 @@ def find_drifting_similar(
             if v is not None and hasattr(v, "isoformat"):
                 row[ts_field] = v.isoformat()
         serialized.append(row)
-    return _json.dumps(serialized, indent=2)
+    return _json.dumps({"results": serialized}, indent=2)
 
 
 _MAX_DRIFT_TOP_N = 50  # ~0.5K chars/entry; 50 ≈ 25K total
 _STALE_SOLID_DAYS = 180  # same threshold as dive_solid in navigation.py
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def find_drifting_entities(
     pattern_id: str,
     top_n: int = 10,
     sample_size: int | None = None,
-    filters: dict | None = None,
+    filters: dict[Any, Any] | None = None,
     forecast_horizon: int | None = None,
     rank_by_dimension: str | None = None,
-    fdr_alpha: float | None = None,
-    fdr_method: str = "bh",
-    p_value_method: str = "rank",
     select: str = "top_norm",
 ) -> str:
     """Find entities with highest geometric drift over time (anchor patterns only).
@@ -2566,12 +2683,10 @@ def find_drifting_entities(
     forecast_horizon: add drift_forecast per entity (requires >=3 slices).
     rank_by_dimension: rank by drift on a specific dimension instead of total displacement.
     sample_size: recommended for >100K entities to bound latency. Hard cap 50.
-    fdr_alpha: apply Benjamini-Hochberg FDR control at this level. Returns only entities with q_value <= alpha. Default None = legacy behavior.
-    fdr_method: "bh" (default) or "storey" (LSL null-proportion estimator; recovers 10-15% more discoveries when combined with p_value_method="chi2" on spheres with genuine null mass).
-    p_value_method: "rank" (default) or "chi2" (required for Storey to shrink q-values).
     select: "top_norm" (default, rank by score) or "diverse" (submodular facility location — K most diverse representatives with representativeness counts).
+    Windows without events are left out of the trajectory (num_inactive_slices counts them); entities with <2 active windows are not drift candidates — absent is not stable.
     Returns: per-entity displacement, path_length, ratio, dimension_diffs, tac, reputation, gradient_alignment (radially-inward component of the drift vector in [-1, 1]), drift_direction ("normalizing" | "deteriorating" | "neutral" per ±0.3 cutoff), and three M3 additive scalars — intrinsic_displacement, extrinsic_displacement, intrinsic_fraction (null when storage lacks multi-epoch retention, <2 retained epochs, schema mismatch, or <2 slices for the entity).
-    """
+    """  # noqa: E501
     _require_navigator()
     capped_warning: str | None = None
     if top_n > _MAX_DRIFT_TOP_N:
@@ -2590,9 +2705,6 @@ def find_drifting_entities(
         filters=filters,
         forecast_horizon=forecast_horizon,
         rank_by_dimension=rank_by_dimension,
-        fdr_alpha=fdr_alpha,
-        fdr_method=fdr_method,
-        p_value_method=p_value_method,
         select=select,
     )
 
@@ -2614,16 +2726,17 @@ def find_drifting_entities(
 
     # slice_window_days and drift_forecast are now computed by navigator (core)
 
-    output: dict = {
+    output: dict[str, Any] = {
         "pattern_id": pattern_id,
         "top_n": top_n,
         "sample_size": sample_size,
-        "filters": filters,
-        "forecast_horizon": forecast_horizon,
+        **({"filters": filters} if filters is not None else {}),
+        **({"forecast_horizon": forecast_horizon} if forecast_horizon is not None else {}),
         "ranked_by": rank_by_dimension or "displacement",
         "count": len(results),
         "results": results,
     }
+    _attach_properties(output, tabulate_properties(results, "primary_key"))
     if capped_warning:
         output["capped_warning"] = capped_warning
     if len(results) == 0:
@@ -2632,28 +2745,28 @@ def find_drifting_entities(
             "or all entities have fewer than 2 recorded slices (minimum required for displacement "
             "computation)."
         )
-    return json.dumps(output, indent=2, default=str)
+    return json.dumps(output, indent=2, default=json_default)
 
 
 _MAX_CLUSTER_TOTAL_MEMBERS = 100  # n_clusters × top_n bound; member entry ≈ 0.5K chars
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def find_clusters(
     pattern_id: str,
     n_clusters: int = 5,
     top_n: int = 10,
     sample_size: int | None = None,
-    summary: bool = False,
+    summary: bool | None = None,
 ) -> str:
     """Discover intrinsic geometric archetypes via k-means++ clustering in delta-space.
 
     n_clusters: number of clusters (default 5). Set 0 for automatic k detection (slower).
     sample_size: recommended for >100K entities. Hard bound: n_clusters x top_n <= 100 members.
-    summary: when True, drops the per-cluster centroid_delta vector, dim_profile, and member-property dicts to keep the response compact for wide patterns (>20 dims). Retains cluster_id, size, anomaly_rate, delta_norm_mean/std, representative_key, and member keys. Call get_polygon on a representative_key for full geometric detail.
-    Returns: clusters sorted by size desc, each with centroid, dim_profile, anomaly_rate, members.
-    """
+    summary: None (default) follows the session response_format — compact keeps only text columns in the member properties table (dropped names in `omitted`), full keeps all; False forces full. True drops the per-cluster centroid_delta and the member properties table to keep the response compact for wide patterns (>20 dims). Retains cluster_id, size, anomaly_rate, delta_norm_mean/std, representative_key, and member keys. Call get_polygon on a representative_key for full geometric detail.
+    Returns: clusters sorted by size desc, each with centroid_delta ({dim: value}), anomaly_rate, members (keys; the representative is the first); member properties in one top-level table properties = {columns: [key, ...], rows}.
+    """  # noqa: E501
     _require_navigator()
     navigator = _state["navigator"]
     capped_warning: str | None = None
@@ -2685,7 +2798,7 @@ def find_clusters(
     else:
         lookup_line_id = resolve_entity_line_id(sphere, pattern_id)
 
-    lookup: dict[str, dict] = {}
+    lookup: dict[str, dict[str, Any]] = {}
     if lookup_line_id:
         needed_keys: set[str] = set()
         for c in clusters:
@@ -2694,31 +2807,28 @@ def find_clusters(
         lookups = build_batch_lookups(reader, sphere, {lookup_line_id: needed_keys})
         lookup = lookups.get(lookup_line_id, {})
 
-    enriched_clusters = []
-    for c in clusters:
-        raw_rep = lookup.get(c["representative_key"], {})
-        enriched_clusters.append(
-            {
-                "cluster_id": c["cluster_id"],
-                "size": c["size"],
-                "anomaly_rate": c["anomaly_rate"],
-                "centroid_delta": c["centroid_delta"],
-                "delta_norm_mean": c["delta_norm_mean"],
-                "delta_norm_std": c["delta_norm_std"],
-                "representative_key": c["representative_key"],
-                "representative_properties": {k: v for k, v in raw_rep.items() if v is not None},
-                "dim_profile": c["dim_profile"],
-                "members": [
-                    {
-                        "key": k,
-                        "properties": {
-                            kk: vv for kk, vv in lookup.get(k, {}).items() if vv is not None
-                        },
-                    }
-                    for k in c["member_keys"]
-                ],
-            }
-        )
+    def _present(key: str) -> dict[str, Any]:
+        return {k: v for k, v in lookup.get(key, {}).items() if v is not None}
+
+    def _labelled(c: dict[str, Any]) -> dict[str, float] | list[float]:
+        names = [d["dimension"] for d in c["dim_profile"]]
+        if len(set(names)) != len(names) or len(names) != len(c["centroid_delta"]):
+            return list(c["centroid_delta"])
+        return dict(zip(names, c["centroid_delta"], strict=True))
+
+    enriched_clusters = [
+        {
+            "cluster_id": c["cluster_id"],
+            "size": c["size"],
+            "anomaly_rate": c["anomaly_rate"],
+            "centroid_delta": _labelled(c),
+            "delta_norm_mean": c["delta_norm_mean"],
+            "delta_norm_std": c["delta_norm_std"],
+            "representative_key": c["representative_key"],
+            "members": list(c["member_keys"]),
+        }
+        for c in clusters
+    ]
 
     # Post-processing: enforce total member cap (auto-k can exceed pre-call estimate)
     total_members = sum(len(c["members"]) for c in enriched_clusters)
@@ -2734,16 +2844,23 @@ def find_clusters(
                 "members per cluster to avoid token overflow."
             )
 
-    # F2b — summary mode: drop heavy fields (per-cluster delta vector, dim_profile,
-    # per-member property dicts) to keep response compact for wide patterns.
+    # F2b — summary mode: drop the centroid vector and member properties to keep
+    # the response compact for wide patterns.
+    properties_table: dict[str, Any] | None = None
     if summary:
         for c in enriched_clusters:
             c.pop("centroid_delta", None)
-            c.pop("dim_profile", None)
-            c.pop("representative_properties", None)
-            c["members"] = [{"key": m["key"]} for m in c.get("members", [])]
+    else:
+        rows: list[dict[str, Any]] = []
+        for c in enriched_clusters:
+            if c["representative_key"] not in c["members"]:
+                rep = _present(c["representative_key"])
+                if rep:
+                    c["representative_properties"] = rep
+            rows.extend({"key": k, "properties": _present(k)} for k in c["members"])
+        properties_table = tabulate_properties([r for r in rows if r["properties"]], "key")
 
-    _response: dict = {
+    _response: dict[str, Any] = {
         "pattern_id": pattern_id,
         "n_clusters_requested": n_clusters,
         "n_clusters_found": len(clusters),
@@ -2751,6 +2868,15 @@ def find_clusters(
         "sample_size": sample_size,
         "clusters": enriched_clusters,
     }
+    if properties_table:
+        _response["properties"] = properties_table
+        if summary is None and active_response_format() == "compact":
+            dropped = project_descriptive(properties_table)
+            if dropped:
+                _response["omitted"] = {
+                    "properties": dropped,
+                    "full_response": "repeat with summary=false",
+                }
     if n_clusters > 0 and len(clusters) < n_clusters and not capped_warning:
         _response["capped_warning"] = (
             f"Requested {n_clusters} clusters but only {len(clusters)} were found. "
@@ -2767,15 +2893,15 @@ def find_clusters(
 
     _response["dead_dimensions"] = dead_dim_indices(pattern_id)
 
-    return json.dumps(_response, indent=2, default=str)
+    return json.dumps(_response, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def extract_chains(
     event_pattern_id: str,
-    from_col: str,
-    to_col: str,
+    from_col: str | None = None,
+    to_col: str | None = None,
     time_col: str | None = None,
     category_col: str | None = None,
     amount_col: str | None = None,
@@ -2792,7 +2918,11 @@ def extract_chains(
 ) -> str:
     """Extract transaction chains by following from_col->to_col links within a time window.
 
-    from_col/to_col: source/destination entity key columns. category_col/amount_col: optional per-hop tracking.
+    Population-wide (samples start nodes) or from specific entities (seed_nodes=[key]; then
+    every event is used, so the chains from those entities are exact). Needs no edge table.
+    from_col/to_col/time_col/amount_col default to the event pattern's edge table (time_col
+    also to the pattern's timestamp column), so hops follow time; pass them for a plain line.
+    category_col: optional per-hop tracking.
     seed_nodes: restrict to specific starting entities. bidirectional: treat edges as undirected.
     max_chains: global cap (default 100K). sample_size: limit starting nodes for large datasets.
     anchor_pattern_id: optional anchor pattern over the entity line referenced by from_col/to_col.
@@ -2800,162 +2930,33 @@ def extract_chains(
     between consecutive entities' polygon delta vectors against that anchor pattern. When None,
     ``edge_potentials`` is a list of nulls per hop. Strict-JSON sanitised (NaN / inf -> null).
     Returns: chains with hop_count, is_cyclic, keys, amount_decay, edge_potentials. Sorted by sort_by.
-    """
+    """  # noqa: E501
     _require_navigator()
-    nav = _state["navigator"]
-    session = _state["session"]
-    reader = session._reader
-
-    sphere = _state["sphere"]._sphere
-
-    # event_pattern_id can be a pattern ID or a line ID — resolve to points table
-    if event_pattern_id in sphere.patterns:
-        version = nav._resolve_version(event_pattern_id)
-        entity_type = sphere.patterns[event_pattern_id].entity_type
-        points_table = reader.read_points(entity_type, version)
-    elif event_pattern_id in sphere.lines:
-        # Direct line ID — read points from that line
-        line = sphere.lines[event_pattern_id]
-        version = line.versions[-1] if line.versions else 1
-        points_table = reader.read_points(event_pattern_id, version)
-    else:
-        return json.dumps(
-            {
-                "error": f"'{event_pattern_id}' is neither a pattern nor a line. "
-                f"Available patterns: {sorted(sphere.patterns)}, "
-                f"lines: {sorted(sphere.lines)}"
-            }
+    try:
+        resp = _state["navigator"].extract_chains(
+            event_pattern_id,
+            from_col,
+            to_col,
+            time_col=time_col,
+            category_col=category_col,
+            amount_col=amount_col,
+            time_window_hours=time_window_hours,
+            max_hops=max_hops,
+            min_hops=min_hops,
+            top_n=top_n,
+            sort_by=sort_by,
+            sample_size=sample_size,
+            max_chains=max_chains,
+            seed_nodes=seed_nodes,
+            bidirectional=bidirectional,
+            anchor_pattern_id=anchor_pattern_id,
         )
-
-    # Validate required columns exist before selection
-    schema_names = {col.name for col in points_table.schema}
-    for col_name, col_label in [(from_col, "from_col"), (to_col, "to_col")]:
-        if col_name not in schema_names:
-            return json.dumps(
-                {
-                    "error": f"{col_label}='{col_name}' not found in line schema. "
-                    f"Available columns: {sorted(schema_names)}"
-                }
-            )
-
-    # Select only needed columns to reduce downstream memory
-    needed_cols = ["primary_key", from_col, to_col]
-    if time_col and time_col in points_table.schema.names:
-        needed_cols.append(time_col)
-    if category_col and category_col in points_table.schema.names:
-        needed_cols.append(category_col)
-    if amount_col and amount_col in points_table.schema.names:
-        needed_cols.append(amount_col)
-    points_table = points_table.select(needed_cols)
-
-    from_keys = points_table[from_col].to_pylist()
-    to_keys = points_table[to_col].to_pylist()
-    event_pks = points_table["primary_key"].to_pylist()
-
-    timestamps = None
-    if time_col and time_col in points_table.schema.names:
-        from hypertopos.engine.chains import parse_timestamps_to_epoch
-
-        ts_raw = points_table[time_col].to_pylist()
-        timestamps = parse_timestamps_to_epoch(ts_raw)
-
-    categories = None
-    if category_col and category_col in points_table.schema.names:
-        categories = points_table[category_col].to_pylist()
-
-    amounts = None
-    if amount_col and amount_col in points_table.schema.names:
-        amounts = [float(v) if v is not None else 0.0 for v in points_table[amount_col].to_pylist()]
-
-    from hypertopos.engine.chains import extract_chains as _extract
-
-    chains = _extract(
-        from_keys=from_keys,
-        to_keys=to_keys,
-        event_pks=event_pks,
-        timestamps=timestamps,
-        categories=categories,
-        amounts=amounts,
-        time_window_hours=time_window_hours,
-        max_hops=max_hops,
-        min_hops=min_hops,
-        sample_size=sample_size,
-        max_chains=max_chains,
-        seed_nodes=seed_nodes,
-        bidirectional=bidirectional,
-    )
-
-    # Sort
-    if sort_by == "hop_count":
-        chains.sort(key=lambda c: c.hop_count, reverse=True)
-    elif sort_by == "amount_decay":
-        chains.sort(key=lambda c: c.amount_decay)
-
-    # Pre-fetch delta vectors once across all unique keys in the top_n
-    # chains when an anchor pattern was supplied. Single batch read keeps
-    # this O(unique_keys) rather than O(hops * chains).
-    delta_by_key: dict[str, "np.ndarray"] | None = None
-    if anchor_pattern_id is not None and chains:
-        import numpy as np
-        if anchor_pattern_id not in sphere.patterns:
-            return json.dumps({
-                "error": (
-                    f"anchor_pattern_id='{anchor_pattern_id}' not found. "
-                    f"Available patterns: {sorted(sphere.patterns)}"
-                ),
-            })
-        unique_keys: set[str] = set()
-        for c in chains[:top_n]:
-            unique_keys.update(c.keys)
-        anchor_version = nav._resolve_version(anchor_pattern_id)
-        geo = reader.read_geometry(
-            anchor_pattern_id,
-            anchor_version,
-            point_keys=list(unique_keys),
-            columns=["primary_key", "delta"],
-        )
-        pks_col = geo["primary_key"].to_pylist()
-        delta_col = geo["delta"].to_pylist()
-        delta_by_key = {
-            pk: np.asarray(d, dtype=np.float32)
-            for pk, d in zip(pks_col, delta_col)
-            if pk is not None and d is not None
-        }
-
-    # Convert to dicts and truncate
-    result_chains = [
-        c.to_dict(delta_by_key=delta_by_key) for c in chains[:top_n]
-    ]
-
-    resp = {
-        "event_pattern_id": event_pattern_id,
-        "total_chains": len(chains),
-        "returned": len(result_chains),
-        "sort_by": sort_by,
-        "chains": result_chains,
-    }
-
-    # Propagate overlap hint from core if present
-    if hasattr(chains, "hint") and chains.hint:
-        resp["hint"] = chains.hint
-
-    # Summary stats
-    if chains:
-        import numpy as np
-
-        hops = [c.hop_count for c in chains]
-        cyclic_count = sum(1 for c in chains if c.is_cyclic)
-        resp["summary"] = {
-            "total_chains": len(chains),
-            "cyclic_chains": cyclic_count,
-            "hop_count_mean": round(float(np.mean(hops)), 1),
-            "hop_count_max": max(hops),
-        }
-
-    return json.dumps(resp, indent=2, default=str)
+    except GDSNavigationError as exc:
+        return json.dumps({"error": str(exc)})
+    return json.dumps(resp, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def cross_pattern_profile(
     primary_key: str,
@@ -2968,10 +2969,10 @@ def cross_pattern_profile(
     _require_navigator()
     nav = _state["navigator"]
     profile = nav.cross_pattern_profile(primary_key, line_id=line_id)
-    return json.dumps(profile, indent=2, default=str)
+    return json.dumps(profile, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def passive_scan(
     home_line_id: str,
@@ -2997,12 +2998,16 @@ def passive_scan(
     borderline_rank_threshold: rank pct for borderline (default 80).
     Returns: per-source breakdown with anomaly_intensity.
     """
+    if scoring not in ("count", "weighted"):
+        return json.dumps(
+            {"error": f"scoring must be 'count' or 'weighted'; got {scoring!r}"},
+        )
     _require_navigator()
     reader = _state["session"]._reader
     sphere = _state["sphere"]._sphere
     manifest = _state["session"]._manifest
 
-    from hypertopos.navigation.scanner import PassiveScanner
+    from hypertopos.navigation.scanner import PassiveScanner, ScanHit
 
     scanner = PassiveScanner(reader, sphere, manifest)
 
@@ -3061,18 +3066,16 @@ def passive_scan(
 
     result = scanner.scan(
         home_line_id,
-        scoring=scoring,
+        scoring=cast(Literal["count", "weighted"], scoring),  # validated above
         threshold=threshold,
         top_n=top_n,
     )
 
-    def _interpret_hit(h) -> str | None:
+    def _interpret_hit(h: ScanHit) -> str | None:
         n_sources = len(h.sources)
         if n_sources < 2:
             return None
-        flagged: list[str] = [
-            name for name, v in h.sources.items() if v.anomalous_count > 0
-        ]
+        flagged: list[str] = [name for name, v in h.sources.items() if v.anomalous_count > 0]
         flagged_count = len(flagged)
         if flagged_count == 1:
             others = [name for name in h.sources if name not in flagged]
@@ -3082,10 +3085,7 @@ def passive_scan(
                 "potential cross-pattern discrepancy"
             )
         if flagged_count == n_sources:
-            return (
-                f"anomalous across all {n_sources} sources — "
-                "coordinated multi-pattern anomaly"
-            )
+            return f"anomalous across all {n_sources} sources — coordinated multi-pattern anomaly"
         return None
 
     hits_payload = []
@@ -3118,10 +3118,13 @@ def passive_scan(
         "sources_summary": result.sources_summary,
         "hits": hits_payload,
     }
-    return json.dumps(resp, indent=2, default=str)
+    interpretations = dedupe_text(hits_payload, "interpretation")
+    if interpretations:
+        resp["interpretations"] = interpretations
+    return json.dumps(resp, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def composite_risk(
     primary_key: str,
@@ -3133,14 +3136,14 @@ def composite_risk(
     firing on the same entity), which Fisher's method incorrectly assumed independent.
 
     Returns: combined_p (low = multi-pattern anomaly), n_patterns, per_pattern{}.
-    """
+    """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
     result = nav.composite_risk(primary_key, line_id)
-    return json.dumps(_sanitize_for_json(result), indent=2)
+    return json.dumps(sanitize_for_json(result), indent=2)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def composite_risk_batch(
     primary_keys: list[str],
@@ -3153,10 +3156,10 @@ def composite_risk_batch(
     _require_navigator()
     nav = _state["navigator"]
     result = nav.composite_risk_batch(primary_keys, line_id)
-    return json.dumps(_sanitize_for_json(result), indent=2)
+    return json.dumps(sanitize_for_json(result), indent=2)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def combine_anomaly_pvalues(
     pattern_id: str,
@@ -3176,7 +3179,9 @@ def combine_anomaly_pvalues(
     * ``delta_norm`` — population-relative geometry deviation (always available)
     * ``neighbor_contamination`` — graph-neighbour anomaly density
     * ``segment_shift`` — categorical-segment anomaly rate shift (Fisher exact)
-    * ``trajectory_continuous`` — DTW distance vs population-median trajectory
+    * ``trajectory_continuous`` — DTW distance vs population-median trajectory;
+      opt-in (pass it in ``detectors``): reads the temporal history of the
+      sampled entities
     * ``density_gap`` — local density-gap detector (currently aggregate-only;
       contributes no per-entity p-value because findings describe missing
       population, not per-entity attribution)
@@ -3188,15 +3193,15 @@ def combine_anomaly_pvalues(
 
     Args:
         pattern_id: Pattern to score.
-        detectors: Subset of detector names to include. ``None`` enables all
-            five (the navigator default).
+        detectors: Subset of detector names to include. ``None`` enables the
+            default set (every detector except the opt-in ``trajectory_continuous``).
         weights: Per-detector weight; defaults to uniform across detectors
             that produced a p-value for the given entity.
         sample_size: Cap on geometry rows used per detector. Default 10_000.
         top_n: Maximum entries returned in the ranked list. Default 50.
 
     Returns:
-        List of ``{primary_key, hmp, p_per_detector, rank}`` ascending by
+        ``{results: [{primary_key, hmp, p_per_detector, rank}]}`` ascending by
         ``hmp``. ``p_per_detector`` only contains detectors that produced a
         valid p-value for the entity.
     """
@@ -3214,10 +3219,10 @@ def combine_anomaly_pvalues(
         result = nav.combine_anomaly_pvalues(pattern_id, **kwargs)
     except GDSNavigationError as exc:
         return json.dumps({"error": str(exc)}, indent=2)
-    return json.dumps(_sanitize_for_json(result), indent=2)
+    return json.dumps({"results": sanitize_for_json(result)}, indent=2)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def classify_detector_consensus(
     pattern_id: str,
@@ -3257,8 +3262,9 @@ def classify_detector_consensus(
 
     Args:
         pattern_id: Pattern to score.
-        detectors: Subset of detector names to include. ``None`` enables all
-            five (matches ``combine_anomaly_pvalues`` default).
+        detectors: Subset of detector names to include. ``None`` enables the
+            default set of ``combine_anomaly_pvalues`` (every detector except the
+            opt-in ``trajectory_continuous``).
         sample_size: Cap on geometry rows scored. Default 10_000.
         top_n: Maximum entries returned. Default 50.
         anomaly_threshold: lower band edge. ``p < anomaly_threshold`` flags
@@ -3267,7 +3273,7 @@ def classify_detector_consensus(
             normal. Default 0.5. Must be > anomaly_threshold.
 
     Returns:
-        Ranked list of ``{primary_key, classification, anomalous_detectors,
+        ``{results: [...]}``, ranked, of ``{primary_key, classification, anomalous_detectors,
         normal_detectors, n_detectors_fired, hmp, p_per_detector, rank}``.
         ``rank`` is position in the returned list (priority + HMP combined),
         not raw HMP rank.
@@ -3286,10 +3292,10 @@ def classify_detector_consensus(
         result = nav.classify_detector_consensus(pattern_id, **kwargs)
     except GDSNavigationError as exc:
         return json.dumps({"error": str(exc)}, indent=2)
-    return json.dumps(_sanitize_for_json(result), indent=2)
+    return json.dumps({"results": sanitize_for_json(result)}, indent=2)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def check_anomaly_batch(
     primary_keys: list[str],
@@ -3350,7 +3356,7 @@ def check_anomaly_batch(
     )
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def explain_anomaly(
     primary_key: str,
@@ -3358,15 +3364,16 @@ def explain_anomaly(
 ) -> str:
     """Full structured explanation of why an entity is anomalous.
 
-    Returns: severity, witness set, repair set, top dimensions, p-value, temporal context, reputation, composite risk.
-    """
+    Returns: severity, witness set, repair set, top dimensions (`{dim, kind, delta, pct_of_total}`, `pct_of_total` = the dim's share of `delta_norm²`, the metric behind `is_anomaly`; dims with a zero share omitted), p-value, temporal context, reputation, composite risk.
+    """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
     result = nav.explain_anomaly(primary_key, pattern_id)
-    return json.dumps(result, indent=2, default=str)
+    _drop_zero_share_dims(result)
+    return json.dumps(result, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def find_diverse_explanations(
     primary_key: str,
@@ -3378,8 +3385,10 @@ def find_diverse_explanations(
     """K diverse hypotheses for why an entity is anomalous.
 
     Hypotheses are strict disjoint — each dim appears in at most one
-    hypothesis. The greedy adds dims to a hypothesis until joint
-    contribution meets `min_contribution_pct`, then moves to the next.
+    hypothesis. A dim's contribution is its share of `delta_norm²` (the
+    metric behind `is_anomaly`, same as `explain_anomaly.top_dimensions`).
+    The greedy adds dims to a hypothesis until joint contribution meets
+    `min_contribution_pct`, then moves to the next.
     When remaining mass can't meet the floor, fewer hypotheses are
     emitted with `degraded_reason="insufficient_diverse_mass"` — the
     correct semantic for single-dim-driven entities (no alternative
@@ -3425,10 +3434,10 @@ def find_diverse_explanations(
         )
     except (GDSNavigationError, ValueError) as exc:
         return json.dumps({"error": str(exc), "primary_key": primary_key})
-    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+    return json.dumps(sanitize_for_json(result), indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def assess_anomaly_certainty(
     primary_key: str,
@@ -3499,14 +3508,14 @@ def assess_anomaly_certainty(
     Per-step ``steps_status`` field exposes which sub-composition succeeded
     or failed: each step gets ``{ok: true}`` or ``{ok: false, error: <message>}`` —
     never nulls or missing keys. Strict-JSON sanitised (±inf/NaN → null).
-    """
+    """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
 
     if perturbation_alphas is None:
         perturbation_alphas = [0.005, 0.01, 0.05]
 
-    steps_status: dict[str, dict] = {}
+    steps_status: dict[str, dict[str, Any]] = {}
     result: dict[str, Any] = {
         "primary_key": primary_key,
         "pattern_id": pattern_id,
@@ -3565,9 +3574,7 @@ def assess_anomaly_certainty(
         pattern = sphere.patterns[pattern_id]
         theta_norm = float(np.linalg.norm(pattern.theta))
         if theta_norm > 0.0:
-            near_data_boundary = bool(
-                0.8 * theta_norm <= delta_norm <= 1.2 * theta_norm
-            )
+            near_data_boundary = bool(0.8 * theta_norm <= delta_norm <= 1.2 * theta_norm)
         steps_status["boundary_band"] = {"ok": True}
     except (KeyError, AttributeError, ValueError) as exc:
         steps_status["boundary_band"] = {"ok": False, "error": str(exc)}
@@ -3712,9 +3719,7 @@ def assess_anomaly_certainty(
             f"'{'anomalous' if is_anomalous else 'normal'}' classification."
         )
     else:
-        rationale = (
-            f"Verdict '{verdict}' driven by: " + "; ".join(fired) + "."
-        )
+        rationale = f"Verdict '{verdict}' driven by: " + "; ".join(fired) + "."
 
     recommended_next_steps: list[str] = []
     if verdict == "high":
@@ -3724,8 +3729,7 @@ def assess_anomaly_certainty(
         )
     elif verdict == "contested":
         recommended_next_steps.append(
-            "Call find_diverse_explanations to surface alternative "
-            "hypotheses before acting"
+            "Call find_diverse_explanations to surface alternative hypotheses before acting"
         )
         if single_dim_driven:
             recommended_next_steps.append(
@@ -3735,8 +3739,7 @@ def assess_anomaly_certainty(
     else:  # low / moderate
         if is_anomalous:
             recommended_next_steps.append(
-                "Corroborate with passive_scan or a second pattern before "
-                "opening a case"
+                "Corroborate with passive_scan or a second pattern before opening a case"
             )
         else:
             recommended_next_steps.append(
@@ -3748,29 +3751,31 @@ def assess_anomaly_certainty(
                 "to gauge local calibration sensitivity"
             )
 
-    result.update({
-        "certainty_verdict": verdict,
-        "certainty_score": round(certainty_score, 4),
-        "conformal_p": conformal_p,
-        "signed_confidence": signed_confidence,
-        "stability_across_alphas": stability_across_alphas,
-        "reliability_flags": {
-            "single_dim_driven": single_dim_driven,
-            "near_data_boundary": near_data_boundary,
-            "calibration_stale": calibration_stale,
-        },
-        "cross_pattern_consistency": {
-            "n_other_patterns_anomalous": int(n_other_patterns_anomalous),
-            "consistent_classification": consistent_classification,
-        },
-        "rationale": rationale,
-        "recommended_next_steps": recommended_next_steps,
-        "steps_status": steps_status,
-    })
-    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+    result.update(
+        {
+            "certainty_verdict": verdict,
+            "certainty_score": round(certainty_score, 4),
+            "conformal_p": conformal_p,
+            "signed_confidence": signed_confidence,
+            "stability_across_alphas": stability_across_alphas,
+            "reliability_flags": {
+                "single_dim_driven": single_dim_driven,
+                "near_data_boundary": near_data_boundary,
+                "calibration_stale": calibration_stale,
+            },
+            "cross_pattern_consistency": {
+                "n_other_patterns_anomalous": int(n_other_patterns_anomalous),
+                "consistent_classification": consistent_classification,
+            },
+            "rationale": rationale,
+            "recommended_next_steps": recommended_next_steps,
+            "steps_status": steps_status,
+        }
+    )
+    return json.dumps(sanitize_for_json(result), indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def consensus_classification(
     primary_key: str,
@@ -3794,11 +3799,11 @@ def consensus_classification(
         ``classify_detector_consensus``).
 
     Optional:
-      - sample_size (int | None, default 10000): cap on geometry rows scored.
-        On large spheres the focal entity may fall outside the random sample;
-        raise this (or pass ``None`` to score the full population) when the
-        response reports ``found=false``. ``top_n`` is forced high internally so
-        a scored entity is never lost to list truncation.
+      - sample_size (int | None, default 10000): cap on geometry rows scored
+        (the population the consensus is calibrated on; ``None`` = all). The
+        focal entity is always scored, added to the sample when the draw
+        missed it; ``top_n`` is forced high internally so a scored entity is
+        never lost to list truncation.
 
     Returns: JSON dict with primary_key, pattern_id, found (bool),
     classification (one of ``mixed_signal``, ``anomalous_consensus``,
@@ -3806,9 +3811,9 @@ def consensus_classification(
     null when not found), anomalous_detectors / normal_detectors /
     borderline_detectors (lists), n_detectors_fired, hmp, p_per_detector,
     population_rank (the entity's rank in the full consensus sweep),
-    interpretation, recommended_next_steps. When the entity is not in the scored
-    sample, ``found=false`` plus a ``note`` explaining how to widen the scan —
-    never an empty/None payload. Strict-JSON sanitised (±inf/NaN → null).
+    interpretation, recommended_next_steps. ``found=false`` (plus a ``note``) only
+    when the entity has no geometry row in the pattern — never an empty/None
+    payload. Strict-JSON sanitised (±inf/NaN → null).
     """
     _require_navigator()
     nav = _state["navigator"]
@@ -3820,6 +3825,7 @@ def consensus_classification(
             pattern_id,
             sample_size=sample_size,
             top_n=1_000_000,
+            include_keys=[primary_key],
         )
     except (GDSNavigationError, ValueError) as exc:
         return json.dumps(
@@ -3834,29 +3840,22 @@ def consensus_classification(
             break
 
     if focal is None:
-        if sample_size is None:
-            note = (
-                f"Entity {primary_key!r} was not in the full-population "
-                "consensus scan — it does not exist in this pattern, or has no "
-                "geometry row."
-            )
-        else:
-            note = (
-                f"Entity {primary_key!r} was not in the scored sample of "
-                f"{sample_size} entities — raise sample_size (or pass null to "
-                "scan the full population), or the entity does not exist in "
-                "this pattern."
-            )
+        note = (
+            f"Entity {primary_key!r} was not scored — it does not exist in this "
+            "pattern, or has no geometry row."
+        )
         return json.dumps(
-            _sanitize_for_json({
-                "primary_key": primary_key,
-                "pattern_id": pattern_id,
-                "found": False,
-                "classification": None,
-                "note": note,
-            }),
+            sanitize_for_json(
+                {
+                    "primary_key": primary_key,
+                    "pattern_id": pattern_id,
+                    "found": False,
+                    "classification": None,
+                    "note": note,
+                }
+            ),
             indent=2,
-            default=str,
+            default=json_default,
         )
 
     classification = focal.get("classification")
@@ -3867,7 +3866,7 @@ def consensus_classification(
     # Routing — the agent-correctness payoff. Each classification maps to a
     # distinct next action, so a single-detector hit is never mistaken for a
     # consensus target.
-    interpretation_by_class = {
+    interpretation_by_class: dict[str | None, str] = {
         "mixed_signal": (
             "Detectors genuinely disagree — at least one flags this entity "
             "anomalous while at least one flags it normal. This is the "
@@ -3913,15 +3912,13 @@ def consensus_classification(
         )
     elif classification == "single_detector_signal":
         recommended_next_steps.append(
-            "Corroborate with passive_scan or a second pattern before opening "
-            "a case"
+            "Corroborate with passive_scan or a second pattern before opening a case"
         )
     elif classification == "normal_consensus":
         recommended_next_steps.append("Deprioritise; move to the next entity")
     else:  # insufficient_data
         recommended_next_steps.append(
-            "Widen the detector set or recalibrate — no detector currently "
-            "resolves this entity"
+            "Widen the detector set or recalibrate — no detector currently resolves this entity"
         )
 
     result = {
@@ -3939,10 +3936,10 @@ def consensus_classification(
         "interpretation": interpretation,
         "recommended_next_steps": recommended_next_steps,
     }
-    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+    return json.dumps(sanitize_for_json(result), indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def calibration_drift_report(
     pattern_id: str,
@@ -3980,7 +3977,7 @@ def calibration_drift_report(
     (equal epochs, schema mismatch, single epoch) returned as
     ``{"error": ..., "pattern_id": ...}``. Strict-JSON sanitised
     (±inf/NaN → null).
-    """
+    """  # noqa: E501
     from dataclasses import asdict
 
     _require_navigator()
@@ -4049,10 +4046,10 @@ def calibration_drift_report(
         "interpretation": interpretation,
         "recommended_next_steps": recommended_next_steps,
     }
-    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+    return json.dumps(sanitize_for_json(result), indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def diverse_explanations(
     primary_key: str,
@@ -4094,7 +4091,7 @@ def diverse_explanations(
     diversity_score, degraded_reason, interpretation, recommended_next_steps.
     Invalid input returned as ``{"error": ..., "primary_key": ...}``.
     Strict-JSON sanitised (±inf/NaN → null).
-    """
+    """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
     try:
@@ -4128,9 +4125,7 @@ def diverse_explanations(
             "anomaly mass is too concentrated or too diffuse to partition into "
             "independent explanations."
         )
-        recommended_next_steps = [
-            "Call explain_anomaly for the single ranked-dimension breakdown"
-        ]
+        recommended_next_steps = ["Call explain_anomaly for the single ranked-dimension breakdown"]
     elif n_validated >= 2:
         verdict = "multi_cause_robust"
         interpretation = (
@@ -4150,8 +4145,7 @@ def diverse_explanations(
             "the anomaly has a single dominant cause among the diverse cover."
         )
         recommended_next_steps = [
-            "Focus the investigation on the one validated hypothesis's "
-            "dimensions"
+            "Focus the investigation on the one validated hypothesis's dimensions"
         ]
     else:  # n_validated == 0 with ≥1 hypothesis returned
         verdict = "fragile"
@@ -4164,8 +4158,7 @@ def diverse_explanations(
         recommended_next_steps = [
             "Inspect the dominant dimensions for data-quality artifacts "
             "(saturated counter, capped value)",
-            "Corroborate with a second pattern via cross_pattern_profile before "
-            "opening a case",
+            "Corroborate with a second pattern via cross_pattern_profile before opening a case",
         ]
 
     result = {
@@ -4183,10 +4176,10 @@ def diverse_explanations(
         "interpretation": interpretation,
         "recommended_next_steps": recommended_next_steps,
     }
-    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+    return json.dumps(sanitize_for_json(result), indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def theta_sensitivity_report(
     pattern_id: str,
@@ -4241,9 +4234,7 @@ def theta_sensitivity_report(
             "the anomaly_percentile shifts the threshold smoothly. "
             "Recalibration is safe across the swept percentile range."
         )
-        recommended_next_steps = [
-            "Recalibration moves within the swept range are safe; proceed"
-        ]
+        recommended_next_steps = ["Recalibration moves within the swept range are safe; proceed"]
     elif has_band:
         safety = "caution"
         interpretation = (
@@ -4282,10 +4273,10 @@ def theta_sensitivity_report(
         "interpretation": interpretation,
         "recommended_next_steps": recommended_next_steps,
     }
-    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+    return json.dumps(sanitize_for_json(result), indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def find_conformance_violations(
     pattern_id: str,
@@ -4334,10 +4325,10 @@ def find_conformance_violations(
         )
     except (GDSNavigationError, ValueError) as exc:
         return json.dumps({"error": str(exc), "pattern_id": pattern_id})
-    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+    return json.dumps(sanitize_for_json(result), indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def trace_root_cause(
     primary_key: str,
@@ -4391,10 +4382,10 @@ def trace_root_cause(
     # emits non-finite log-scale fields, but future enrichment (e.g.
     # inheriting log_score from score_motif) could, and the nested shape of
     # the DAG makes ad-hoc post-processing error-prone.
-    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+    return json.dumps(sanitize_for_json(result), indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def score_edge(
     from_key: str,
@@ -4423,10 +4414,10 @@ def score_edge(
             "score_rank_pct/is_high_potential omitted — pass include_ranking=True "
             "for the population percentile (slower on large graphs)."
         )
-    return json.dumps(result, indent=2, default=str)
+    return json.dumps(result, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def find_high_potential_edges(
     pattern_id: str,
@@ -4442,7 +4433,9 @@ def find_high_potential_edges(
     min_pair_count filters out very rare one-off pairs — raise to 3+ on large
     edge tables where one-off pairs dominate by count.
 
-    Returns: list of {from_key, to_key, score, delta_distance, pair_tx_count}.
+    Returns: results[] of {from_key, to_key, score, delta_distance, pair_tx_count,
+    score_rank_pct_global, is_high_potential} (+ score_rank_pct_in_filter when
+    from_key / to_key / min_pair_count filter the ranking).
     """
     _require_navigator()
     navigator = _state["navigator"]
@@ -4457,6 +4450,16 @@ def find_high_potential_edges(
         to_key=to_key,
         min_pair_count=min_pair_count,
     )
+    # score_rank_pct is the navigator's alias of score_rank_pct_global; copy the rows
+    # (they are the navigator's cached ranking) without it.
+    results = [
+        {
+            k: v
+            for k, v in r.items()
+            if not (k == "score_rank_pct" and v == r.get("score_rank_pct_global"))
+        }
+        for r in results
+    ]
     output: dict[str, Any] = {
         "pattern_id": pattern_id,
         "count": len(results),
@@ -4464,10 +4467,10 @@ def find_high_potential_edges(
     }
     if capped_warning:
         output["capped_warning"] = capped_warning
-    return json.dumps(output, indent=2, default=str)
+    return json.dumps(output, indent=2, default=json_default)
 
 
-def _truncate_motif_instance(inst: dict, threshold: int = 50) -> dict:
+def _truncate_motif_instance(inst: dict[str, Any], threshold: int = 50) -> dict[str, Any]:
     """Cap ``edges`` and ``breakdown`` at the top ``threshold`` contributors.
 
     Pre-fix, a fan_in hub with ~500 sources produced ~200k-char responses
@@ -4500,8 +4503,7 @@ def _truncate_motif_instance(inst: dict, threshold: int = 50) -> dict:
         dtype=np.float64,
     )
     p25, p50, p75, p95 = (
-        np.percentile(ep_full, [25, 50, 75, 95]).tolist()
-        if ep_full.size else (0.0, 0.0, 0.0, 0.0)
+        np.percentile(ep_full, [25, 50, 75, 95]).tolist() if ep_full.size else (0.0, 0.0, 0.0, 0.0)
     )
     summary: dict[str, float] = {
         "count": int(ep_full.size),
@@ -4531,10 +4533,10 @@ def _truncate_motif_instance(inst: dict, threshold: int = 50) -> dict:
     return out
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def score_motif(
-    entity_key: str,
+    primary_key: str,
     motif_type: str,
     pattern_id: str,
     time_window_hours: int | None = None,
@@ -4545,7 +4547,7 @@ def score_motif(
     direction: str = "forward",
     min_m: int = 3,
 ) -> str:
-    """Score the best structural motif seeded at entity_key.
+    """Score the best structural motif seeded at primary_key.
 
     motif_type ∈ {fan_out, fan_in, cycle_2, cycle_3, structuring, chain_k,
     split_recombine, bipartite_burst}. Composes edge_potential across the
@@ -4619,7 +4621,7 @@ def score_motif(
     _require_navigator()
     nav = _state["navigator"]
     result = nav.score_motif(
-        entity_key,
+        primary_key,
         motif_type=motif_type,
         pattern_id=pattern_id,
         time_window_hours=time_window_hours,
@@ -4632,10 +4634,10 @@ def score_motif(
     )
     if result.get("found"):
         result = _truncate_motif_instance(result)
-    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+    return json.dumps(sanitize_for_json(result), indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def find_high_potential_motifs(
     pattern_id: str,
@@ -4695,8 +4697,8 @@ def find_high_potential_motifs(
     MCP token limit. `count` in the envelope is the motif-instance count
     and is unaffected.
 
-    Returns: list of motif instances with score_rank_pct + is_high_potential
-    (p95 threshold within motif_type), plus the truncation fields above on
+    Returns: motif_type (once) and results[] of motif instances with score_rank_pct
+    + is_high_potential (p95 threshold within motif_type), plus the truncation fields above on
     each instance.
     """
     _require_navigator()
@@ -4719,6 +4721,9 @@ def find_high_potential_motifs(
         min_m=min_m,
     )
     results = [_truncate_motif_instance(r) for r in results]
+    for r in results:
+        if r.get("motif_type") == motif_type:
+            del r["motif_type"]
     output: dict[str, Any] = {
         "pattern_id": pattern_id,
         "motif_type": motif_type,
@@ -4727,10 +4732,10 @@ def find_high_potential_motifs(
     }
     if capped_warning:
         output["capped_warning"] = capped_warning
-    return json.dumps(_sanitize_for_json(output), indent=2, default=str)
+    return json.dumps(sanitize_for_json(output), indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def chain_full_loop_summary(
     chain_id: str,
@@ -4768,11 +4773,16 @@ def chain_full_loop_summary(
     ``summary`` derives investigation strength from how many steps fired
     successfully + per-step substance signals (coherent-set membership,
     coordinated witness, non-trivial drift slope, non-default typology,
-    cyclic / multi-bank / anomalous R9 findings, extension candidate
+    anomalous hops or chain-shape anomaly in the R9 loop, extension candidate
     count, SAR step success). Score in ``[0, 100]``; ``strong`` at
     ``>= 70``, ``moderate`` at ``>= 40``, ``weak`` below 40 — mapped to
     ``escalate to SAR`` / ``continue investigation`` /
-    ``false-positive candidate`` recommended actions.
+    ``false-positive candidate`` recommended actions. Steps that errored
+    are listed in ``summary.failed_steps``; when the points they could have
+    added would change the bucket, strength is ``inconclusive`` (action
+    ``resolve the failed steps before deciding``). An error text repeated
+    across steps appears once in a top-level ``errors`` map, referenced by
+    ``error_ref`` in each step block.
 
     ``summary`` also exposes a chain-level reliability rollup derived
     from per-member ``signed_confidence`` ranking on the anchor pattern:
@@ -4796,7 +4806,7 @@ def chain_full_loop_summary(
         include_witness: run chain_witness_intersection. Default True.
         include_sar_rationale: run generate_sar_rationale. Default False
             (expensive — runs the R9 loop server-side a second time).
-        top_n_extensions: ``max_results`` per direction for extend_chain.
+        top_n_extensions: ``top_n`` per direction for extend_chain.
             Default 3.
 
     Returns: chain_id, chain_pattern_id, anchor_pattern_id, one ``{ok,
@@ -4811,14 +4821,20 @@ def chain_full_loop_summary(
     nav = _state["navigator"]
     t0 = _time.perf_counter()
 
-    def _safe(fn):
+    def _safe(fn: Callable[[], Any]) -> dict[str, Any]:
         try:
             data = fn()
             if _dc.is_dataclass(data) and not isinstance(data, type):
                 data = _dc.asdict(data)
             return {"ok": True, "data": data}
-        except (GDSNavigationError, ValueError, KeyError, AttributeError,
-                NotImplementedError, RuntimeError) as exc:
+        except (
+            GDSNavigationError,
+            ValueError,
+            KeyError,
+            AttributeError,
+            NotImplementedError,
+            RuntimeError,
+        ) as exc:
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
     _skipped = {"ok": True, "skipped": True}
@@ -4826,11 +4842,11 @@ def chain_full_loop_summary(
     # Step 1 — coherence-set membership (informational, never aborts)
     def _coherent_lookup() -> dict[str, Any]:
         full = nav.find_chains_with_coherent_anomaly(
-            chain_pattern_id, anchor_pattern_id=anchor_pattern_id,
+            chain_pattern_id,
+            anchor_pattern_id=anchor_pattern_id,
         )
         match = next(
-            (c for c in full.get("chains", [])
-             if c.get("chain_id") == chain_id),
+            (c for c in full.get("chains", []) if c.get("chain_id") == chain_id),
             None,
         )
         if match is None:
@@ -4839,51 +4855,62 @@ def chain_full_loop_summary(
                 "note": "chain not in coherent-anomaly set",
             }
         return {"in_coherent_set": True, "entry": match}
+
     coherent_block = _safe(_coherent_lookup)
 
     # Step 2 — witness intersection
     if include_witness:
-        witness_block = _safe(lambda: nav.chain_witness_intersection(
-            chain_id,
-            chain_pattern=chain_pattern_id,
-            member_pattern=anchor_pattern_id,
-        ))
+        witness_block = _safe(
+            lambda: nav.chain_witness_intersection(
+                chain_id,
+                chain_pattern=chain_pattern_id,
+                member_pattern=anchor_pattern_id,
+            )
+        )
     else:
         witness_block = _skipped
 
     # Step 3 — drift trajectory
     if include_drift:
-        drift_block = _safe(lambda: nav.chain_drift_trajectory(
-            chain_id,
-            chain_pattern=chain_pattern_id,
-            member_pattern=anchor_pattern_id,
-        ))
+        drift_block = _safe(
+            lambda: nav.chain_drift_trajectory(
+                chain_id,
+                chain_pattern=chain_pattern_id,
+                member_pattern=anchor_pattern_id,
+            )
+        )
     else:
         drift_block = _skipped
 
     # Step 4 — typology (always)
-    typology_block = _safe(lambda: nav.classify_chain_typology(
-        chain_id,
-        chain_pattern_id,
-        anchor_pattern_id=anchor_pattern_id,
-    ))
+    typology_block = _safe(
+        lambda: nav.classify_chain_typology(
+            chain_id,
+            chain_pattern_id,
+            anchor_pattern_id=anchor_pattern_id,
+        )
+    )
 
     # Step 5 — extend_chain (forward + backward, combined)
     if include_extension:
-        forward_block = _safe(lambda: nav.extend_chain(
-            chain_id,
-            chain_pattern_id,
-            anchor_pattern_id=anchor_pattern_id,
-            direction="forward",
-            max_results=top_n_extensions,
-        ))
-        backward_block = _safe(lambda: nav.extend_chain(
-            chain_id,
-            chain_pattern_id,
-            anchor_pattern_id=anchor_pattern_id,
-            direction="backward",
-            max_results=top_n_extensions,
-        ))
+        forward_block = _safe(
+            lambda: nav.extend_chain(
+                chain_id,
+                chain_pattern_id,
+                anchor_pattern_id=anchor_pattern_id,
+                direction="forward",
+                max_results=top_n_extensions,
+            )
+        )
+        backward_block = _safe(
+            lambda: nav.extend_chain(
+                chain_id,
+                chain_pattern_id,
+                anchor_pattern_id=anchor_pattern_id,
+                direction="backward",
+                max_results=top_n_extensions,
+            )
+        )
         # Combine: each direction keeps its own ok/data — caller still
         # sees per-direction failure granularity.
         extension_block: dict[str, Any] = {
@@ -4897,19 +4924,23 @@ def chain_full_loop_summary(
         extension_block = _skipped
 
     # Step 6 — investigate_chain (always; full R9 loop)
-    investigate_block = _safe(lambda: nav.investigate_chain(
-        chain_id,
-        chain_pattern_id,
-        anchor_pattern_id=anchor_pattern_id,
-    ))
-
-    # Step 7 — SAR rationale (gated, expensive)
-    if include_sar_rationale:
-        sar_block = _safe(lambda: nav.generate_sar_rationale(
+    investigate_block = _safe(
+        lambda: nav.investigate_chain(
             chain_id,
             chain_pattern_id,
             anchor_pattern_id=anchor_pattern_id,
-        ))
+        )
+    )
+
+    # Step 7 — SAR rationale (gated, expensive)
+    if include_sar_rationale:
+        sar_block = _safe(
+            lambda: nav.generate_sar_rationale(
+                chain_id,
+                chain_pattern_id,
+                anchor_pattern_id=anchor_pattern_id,
+            )
+        )
     else:
         sar_block = _skipped
 
@@ -4917,11 +4948,13 @@ def chain_full_loop_summary(
     # signed_confidence ranking on the anchor pattern. Soft-failure:
     # any exception leaves rollup_block ok=False so the summary still
     # produces, with the four rollup fields = None.
-    rollup_block = _safe(lambda: nav.chain_signed_confidence_rollup(
-        chain_id,
-        chain_pattern=chain_pattern_id,
-        anchor_pattern=anchor_pattern_id,
-    ))
+    rollup_block = _safe(
+        lambda: nav.chain_signed_confidence_rollup(
+            chain_id,
+            chain_pattern=chain_pattern_id,
+            anchor_pattern=anchor_pattern_id,
+        )
+    )
 
     # Score + classify
     score = _score_chain_full_loop(
@@ -4945,6 +4978,27 @@ def chain_full_loop_summary(
         fired.append("low-confidence-chain penalty -10")
         score["fired"] = fired
     summary = _classify_chain_full_loop_summary(score)
+    # A step that errored is missing evidence, not negative evidence: when the
+    # points the failed steps could have scored would move the bucket, do not
+    # render a verdict.
+    extension_parts = list((extension_block.get("data") or {}).values()) or [extension_block]
+    blocks = {
+        "find_chains_with_coherent_anomaly": [coherent_block],
+        "chain_witness_intersection": [witness_block],
+        "chain_drift_trajectory": [drift_block],
+        "classify_chain_typology": [typology_block],
+        "extend_chain": extension_parts,
+        "investigate_chain": [investigate_block],
+        "generate_sar_rationale": [sar_block],
+    }
+    failed_steps = [name for name, parts in blocks.items() if any(not p.get("ok") for p in parts)]
+    if failed_steps:
+        missing = sum(_FULL_LOOP_STEP_POINTS[name] for name in failed_steps)
+        best_case = _classify_chain_full_loop_summary({"score": score["score"] + missing})
+        if best_case["investigation_strength"] != summary["investigation_strength"]:
+            summary["investigation_strength"] = "inconclusive"
+            summary["recommended_action"] = "resolve the failed steps before deciding"
+        summary["failed_steps"] = failed_steps
     # Attach the four chain-level reliability fields to the summary
     # block. Always emitted (None when label-aware unavailable / empty
     # chain / step soft-failed) so downstream consumers don't have to
@@ -4966,7 +5020,22 @@ def chain_full_loop_summary(
         "summary": summary,
         "elapsed_ms": elapsed_ms,
     }
-    return json.dumps(_sanitize_for_json(out), indent=2, default=str)
+    errors = dedupe_nested_errors(out)
+    if errors:
+        out["errors"] = errors
+    return json.dumps(sanitize_for_json(out), indent=2, default=json_default)
+
+
+# Most points each step can add to the full-loop score (see _score_chain_full_loop).
+_FULL_LOOP_STEP_POINTS = {
+    "find_chains_with_coherent_anomaly": 20,
+    "chain_witness_intersection": 15,
+    "chain_drift_trajectory": 15,
+    "classify_chain_typology": 10,
+    "extend_chain": 10,
+    "investigate_chain": 20,
+    "generate_sar_rationale": 10,
+}
 
 
 def _extract_rollup_fields(rollup_block: dict[str, Any]) -> dict[str, Any]:
@@ -5017,7 +5086,7 @@ def _score_chain_full_loop(
       +15 drift trajectory has chain_drift_score > 0.3
       +10 typology returns a non-default tag (not "no-anomalous-run" / "no-run")
       +20 investigate_chain returns substantive findings
-          (n_anomalies > 0 OR is_cyclic OR cross_bank_count > 1)
+          (an anomalous hop OR the chain itself is a shape anomaly)
       +10 extension forward+backward returns >= top_n_extensions candidates total
       +10 SAR step requested and ok
     """
@@ -5053,9 +5122,9 @@ def _score_chain_full_loop(
 
     # +10 non-default typology
     if typology.get("ok"):
-        data = typology.get("data") or {}
-        shape = (data.get("shape") or "")
-        pos = (data.get("position_in_chain") or "")
+        data = (typology.get("data") or {}).get("typology") or {}
+        shape = data.get("shape") or ""
+        pos = data.get("position_in_chain") or ""
         # Non-default = at least one of shape / position is not the
         # "no run" sentinel.
         if shape not in ("", "no-anomalous-run") and pos not in ("", "no-run"):
@@ -5066,18 +5135,9 @@ def _score_chain_full_loop(
     if investigate.get("ok"):
         data = investigate.get("data") or {}
         trace = (data.get("trace") or {}).get("data") or {}
-        n_anom = trace.get("n_anomalies") or 0
-        is_cyclic = bool(trace.get("is_cyclic"))
-        cross_bank = trace.get("cross_bank_count") or 0
-        try:
-            substantive = (
-                int(n_anom) > 0
-                or is_cyclic
-                or int(cross_bank) > 1
-            )
-        except (TypeError, ValueError):
-            substantive = is_cyclic
-        if substantive:
+        n_anom = (trace.get("summary") or {}).get("n_anomalous") or 0
+        shape_anomaly = (data.get("shape_anomaly") or {}).get("data") or {}
+        if int(n_anom) > 0 or shape_anomaly.get("is_anomaly") is True:
             score += 20
             fired.append("R9 loop findings")
 
@@ -5121,10 +5181,7 @@ def _classify_chain_full_loop_summary(
         action = "false-positive candidate"
 
     if fired:
-        rationale = (
-            f"Investigation score {score}/100 with signals from: "
-            + ", ".join(fired) + "."
-        )
+        rationale = f"Investigation score {score}/100 with signals from: " + ", ".join(fired) + "."
     else:
         rationale = (
             f"Investigation score {score}/100; no load-bearing signals "

@@ -6,13 +6,25 @@
 
 **Install:** `pip install hypertopos-mcp`
 
-**Start:** `python -m hypertopos_mcp.main` (set `HYPERTOPOS_SPHERE_PATH` to your sphere directory)
+**Start:** `python -m hypertopos_mcp.main` (set `HYPERTOPOS_SPHERE_PATH` to your sphere directory so the agent can call `open_sphere()` without a path; every tool except `open_sphere`, `close_sphere` and `get_session_stats` stays hidden until a sphere is opened)
 
-**Transport:** Defaults to `stdio` for local desktop MCP clients. Pass `--transport http --port 8080` to expose the server over the MCP streamable-HTTP transport on TCP port 8080 (host is `127.0.0.1`).
+**Transport:** Defaults to `stdio` for local desktop MCP clients. Pass `--transport http --port 8080` to serve the MCP streamable-HTTP transport on TCP port 8080 of the loopback interface (`127.0.0.1`). The HTTP transport is for local use on one machine: it has no authentication, and any session can open any sphere path the server process can read — do not expose it to a network. Over HTTP each client session keeps its own sphere, session and call statistics, keyed by the `Mcp-Session-Id` the server assigns at `initialize`; a request without a session id is rejected. A session's tool calls run one at a time; calls of different sessions run concurrently. Each session has its own tool phase: `tools/list` shows only that session's tools, and a call to a tool its phase has not unlocked is refused. When an HTTP session ends — the client disconnects, or it stays idle longer than `--session-idle-timeout` seconds (default 1800) — the server closes its sphere and forgets it. `--max-sessions` (default 10000) caps concurrent HTTP sessions.
 
 **Concepts:** See [hypertopos core concepts](https://github.com/hypertopos/hypertopos-py/blob/main/docs/concepts.md) for Point, Edge, Polygon, Solid, Pattern, Alias, Manifest.
 
 All tool responses include `elapsed_ms` (float, milliseconds).
+
+**Strict JSON:** every tool response parses under a strict JSON parser; a number that is not finite (±infinity, NaN) is returned as `null`.
+
+**Failed parts:** when an optional part of a response cannot be loaded (entity `properties` of a line, `temporal_hint`, `dead_dimensions`), the tool still answers without it and adds one top-level `failed_parts` list of `{part, error}` entries, so a missing part that failed is told apart from one that does not exist. `omitted` names parts left out on purpose; `failed_parts` names parts that failed.
+
+**Response format (compact / full):** the default `compact` format leaves out two kinds of subtree an agent rarely needs: positional `delta` vectors where a labelled form is present (`anomaly_dimensions`, cluster `label`, `dim_labels`), and numeric columns of entity `properties` tables (text columns, the ranked property and filtered properties stay). Every response that leaves something out carries one `omitted` map naming what was dropped and how to get it. `full` returns everything. Precedence: an explicit per-call `summary=` / `verbose=` > the session's `open_sphere(response_format=)` > the `HYPERTOPOS_MCP_FORMAT` environment variable (`compact` or `full`, read per call) > `compact`. `summary=True` stays the smallest payload (no delta, edges or properties at all); `summary=False` and `verbose=True` ask for everything.
+
+**Response encoding:** responses are compact JSON. Floats carry `max(7, integer_digits + 2)` significant digits, so amounts keep their integer part and cents. Non-ASCII text is sent as-is.
+
+**Properties table:** tools that return a list of entities (`find_anomalies`, `find_clusters`, `find_hubs`, `find_similar_entities`, `find_drifting_entities`) put entity properties in one top-level `properties` table instead of a dict on every item: `{"columns": [<key field>, <property>, …], "rows": [[<key>, <value>, …], …]}`. The first column is the item's key field (`primary_key` or `key`), cells are `null` where an entity lacks a property, and entities with no known properties have no row. The table is absent when no entity has properties.
+
+**Related properties:** tools that return polygons with edges (`find_anomalies`, `get_event_polygons`) keep only the structural edge fields (`line_id`, `point_key`, `status`, `direction`, `is_jumpable`) and put the properties of the entities at the other end of each edge in `related_properties`: one table per line, `{"<line_id>": {"columns": ["point_key", …], "rows": [[key, …], …]}}`, one row per entity however many edges reference it.
 
 ---
 
@@ -37,16 +49,14 @@ Opens a sphere and creates a session.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `path` | string | required | Relative path to the sphere directory |
-| `force_reload` | bool | `false` | Reload all hypertopos.* Python modules before opening. Use during development after editing library code — eliminates the need for a full MCP server restart. Not safe in production (module reload is not thread-safe). |
+| `path` | string | `HYPERTOPOS_SPHERE_PATH` | Relative path to the sphere directory. Omitted, the server's `HYPERTOPOS_SPHERE_PATH` is used; with neither, the call is an error. |
+| `force_reload` | bool | `false` | Reload all hypertopos.* Python modules before opening. Use during development after editing library code — eliminates the need for a full MCP server restart. Not safe in production (module reload is not thread-safe). Refused while another client session has a sphere open. |
+| `branch` | string | `null` | Open the sphere on a named branch instead of main. When null, opens main. All tools in the session then read that branch. |
+| `response_format` | `"compact"` \| `"full"` | `null` | Session response format (see [Response format](#hypertopos-mcp--tool-reference)). `null` uses `HYPERTOPOS_MCP_FORMAT`, else `compact`. Resets on `close_sphere` and on the next `open_sphere`. Any other value is an error. |
 
-**Returns:** `status`, `path`, `sphere_id`, `name`, `summary: {lines, patterns, aliases}`, `hint`
+**Returns:** `status`, `path`, `ref` (`"main"` or the branch name, echoes which ref is active), `response_format` (the active format), `sphere_id`, `name`, `summary: {lines, patterns, aliases}`, `hint`, `capabilities` (`{has_temporal, multi_pattern, has_trajectory_index}`), `available_tools` (the tools the session can call at that point), `patterns` (`{pattern_id: {type, entities, dimensions}}`), `suggested_queries` (starter `detect_pattern` queries)
 
-**Notes:** Always use relative paths — absolute Windows paths fail. Returns status only; call `sphere_overview()` for population health and `get_sphere_info()` for full schema.
-
-```python
-open_sphere("benchmark/berka/sphere/gds_berka_banking")
-```
+**Notes:** Always use relative paths — absolute Windows paths fail. Returns a short summary only; call `sphere_overview()` for population health and `get_sphere_info()` for full schema.
 
 ---
 
@@ -70,7 +80,7 @@ Returns full schema: lines, patterns, aliases, column schemas, and FTS index ava
 |-----------|------|---------|-------------|
 | _(none)_ | — | — | — |
 
-**Returns:** `lines[]` (with `columns[]` — `{name, type}` — and `total_rows`), `patterns[]` (with `relations[]`, `event_dimensions[]`), `aliases[]`, `label_aware_available`
+**Returns:** `lines[]` (with `columns` — a `{name: type}` map — and `total_rows`), `derived_dimension_lines` (names of the builder-derived `_d_*` dimension lines, which hold only a key column, instead of one `lines` entry each), `patterns[]` (with `relations[]`, `event_dimensions[]`), `aliases[]`, `label_aware_available`
 
 **Notes:** `columns` per line lists all searchable entity properties. `total_rows` is the entity count. `has_fts_index` on each line indicates FTS availability. `relations[].edge_max > 0` means that relation uses continuous edges (see [Continuous Edges](#continuous-edges)). `label_aware_available` is `true` when the sphere carries a top-level `label_audit` block (format 3.1+) and `false` otherwise.
 
@@ -84,7 +94,7 @@ Returns performance and cache statistics for the current session.
 |-----------|------|---------|-------------|
 | _(none)_ | — | — | — |
 
-**Returns:** `total_tool_calls`, `total_elapsed_ms`, `wall_clock_ms`, `per_tool`, plus a `points_handle_cache` block (`points_handle_cache_hits` / `points_handle_cache_misses`) that reports whether repeated entity lookups reuse the open dataset handle.
+**Returns:** `total_tool_calls`, `total_elapsed_ms`, `wall_clock_ms`, `per_tool`, `response_format` (the active format), `session_key` (this client session: `local` on stdio, `http:<id>` / `header:<value>` / `anonymous` over HTTP), `sessions_live` (client sessions with a sphere open), plus a `points_handle_cache` block (`points_handle_cache_hits` / `points_handle_cache_misses`) that reports whether repeated entity lookups reuse the open dataset handle. With a sphere open it also returns `snapshot`: `{pinned_at, stale, metadata_changed, pinned_versions, latest_versions, hint}`. The session reads the sphere as it was when `open_sphere` ran; `stale: true` means another process changed it since (an ingest or recalibration), and `hint` says to call `open_sphere(path)` to read the newer state.
 
 ---
 
@@ -101,7 +111,7 @@ Population summary for all patterns (or one pattern). Returns anomaly rates, cal
 | `pattern_id` | string | `null` | Scope to one pattern; omit for all |
 | `detail` | string | `"summary"` | `"summary"` = O(1), no I/O; `"full"` = adds temporal_quality and calibration staleness (**slow on large spheres**) |
 
-**Response shape:** `{"patterns": [...per-pattern entries...], "cross_pattern_discrepancy": dict | null}`. The `cross_pattern_discrepancy` field is populated only when `pattern_id` is omitted and the sphere has at least two patterns sharing the same `entity_line`; otherwise it is `null`. Each `pairs[]` entry carries `pattern_a`, `pattern_b`, `shared_line`, the four bucket counts (`n_anomalous_only_in_a`, `n_anomalous_only_in_b`, `n_anomalous_in_both`, `n_anomalous_in_neither`), and `jaccard_anomaly_overlap` (intersection-over-union of anomalous primary_keys, `null` when both anomaly sets are empty).
+**Response shape:** `{"patterns": [...per-pattern entries...], "cross_pattern_discrepancy": dict | null, "advice_by_warning_type": {type: advice}}`. `advice_by_warning_type` holds the remediation text for each `dim_quality_warnings[].type` once; it is absent when no pattern has warnings. The `cross_pattern_discrepancy` field is populated only when `pattern_id` is omitted and the sphere has at least two patterns sharing the same `entity_line`; otherwise it is `null`. Each `pairs[]` entry carries `pattern_a`, `pattern_b`, `shared_line`, the four bucket counts (`n_anomalous_only_in_a`, `n_anomalous_only_in_b`, `n_anomalous_in_both`, `n_anomalous_in_neither`), and `jaccard_anomaly_overlap` (intersection-over-union of anomalous primary_keys, `null` when both anomaly sets are empty).
 
 **Returns per pattern:**
 
@@ -119,10 +129,10 @@ Population summary for all patterns (or one pattern). Returns anomaly rates, cal
 | `calibration_blocked` | `true` when drift exceeds hard threshold (20%); appends blocked |
 | `inactive_ratio` | Fraction of anchor entities at the dominant low-activity mode (only reported when >25% of population is below median). See below. |
 | `has_temporal` | `true` when the pattern has temporal slices |
-| `profiling_alerts[]` | Dimension-level outlier clusters detected at build time. Each entry: `{dimension, max, p99, ratio, alert}` where `alert` is `"extreme cluster"` (ratio > 3.0) or `"moderate cluster"` (ratio 1.5–3.0). Absent = no outlier concentration. |
-| `dim_quality_warnings[]` | Silent build-time failures of z-score / `delta_norm` semantics. Each entry: `{type, dim_label, reason, advice}` (pattern-level auditors also carry `evidence_value` + `threshold`). Five `type` values: `"dead_dim"` (sigma_diag below 1e-10 — zero variance, z-score undefined, the dim contributes nothing meaningful and silently dilutes other dims' signal), `"sparse_dim"` (median == 0 with p99 > 0 — mostly-zero with rare nonzero, gaussian z-score assumption is wrong; Bregman divergence with poisson / bernoulli kind tag is the correct distance), `"dominant_dim_mass"` (pattern-level: one dim accounts for ≥70% of population p99-tail variance — the pattern is effectively a one-dim detector; cross-check per-polygon `reliability_flags.single_dim_driven` incidence on top-N anomalies), `"negative_space"` (gaussian-declared dim with median == 0 — the gaussian z-score is wrong because the empirical distribution is point-mass-at-zero rather than centered on the mode; re-declare with `kind='bernoulli'` or `kind='poisson'`), and `"heteroscedasticity"` (pattern-level, fires only when the pattern carries `group_by_property`: Brown-Forsythe Levene `p < 0.01` on `delta_norm` partitioned by the grouping column — the global θ assumption is statistically violated for this pattern. `dim_label` is the grouping variable name, not a δ-dim. Per-group θ calibration is statistically warranted; consider variance-stabilizing transform `log1p` as alternative). `reason` carries the offending value; `advice` is concrete remediation. Use the pattern-level types (`dominant_dim_mass`, `negative_space`, `heteroscedasticity`) to spot sphere-level calibration problems before drilling into per-entity anomalies. Computed from cached pattern state, sub-millisecond, no storage scan. Absent = no failure mode detected. |
+| `profiling_alerts[]` | Dimension-level outlier clusters detected at build time. Each entry: `{entity_line, dimension, p25, p50, p75, p99, max, ratio, alert}` where `alert` is `"extreme cluster"` (ratio > 3.0) or `"moderate cluster"` (ratio 1.5–3.0). Absent = no outlier concentration. |
+| `dim_quality_warnings[]` | Silent build-time failures of z-score / `delta_norm` semantics. Each entry: `{type, dim_label, reason}` (pattern-level auditors also carry `evidence_value` + `threshold`); the remediation text is in the top-level `advice_by_warning_type[type]` (kept inline as `advice` only when one type carries different texts). Five `type` values: `"dead_dim"` (sigma_diag below 1e-10 — zero variance, z-score undefined, the dim contributes nothing meaningful and silently dilutes other dims' signal), `"sparse_dim"` (median == 0 with p99 > 0 — mostly-zero with rare nonzero, gaussian z-score assumption is wrong; Bregman divergence with poisson / bernoulli kind tag is the correct distance), `"dominant_dim_mass"` (pattern-level: one dim accounts for ≥70% of population p99-tail variance — the pattern is effectively a one-dim detector; cross-check per-polygon `reliability_flags.single_dim_driven` incidence on top-N anomalies), `"negative_space"` (gaussian-declared dim with median == 0 — the gaussian z-score is wrong because the empirical distribution is point-mass-at-zero rather than centered on the mode; re-declare with `kind='bernoulli'` or `kind='poisson'`), and `"heteroscedasticity"` (pattern-level, fires only when the pattern carries `group_by_property`: Brown-Forsythe Levene `p < 0.01` on `delta_norm` partitioned by the grouping column — the global θ assumption is statistically violated for this pattern. `dim_label` is the grouping variable name, not a δ-dim. Per-group θ calibration is statistically warranted; consider variance-stabilizing transform `log1p` as alternative). `reason` carries the offending value; the advice text is concrete remediation. Use the pattern-level types (`dominant_dim_mass`, `negative_space`, `heteroscedasticity`) to spot sphere-level calibration problems before drilling into per-entity anomalies. Computed from cached pattern state, sub-millisecond, no storage scan. Absent = no failure mode detected. |
 | `trends[]` | Per-metric population forecasts when pre-computed data exists: `{metric, current_value, forecast_value, direction, horizon, reliability}`. Metrics: `anomaly_rate`, `mean_delta_norm`, `entity_count`. Direction: `"rising"`, `"falling"`, `"stable"`. Uses Holt's double exponential smoothing (alpha=0.3). |
-| `temporal_quality` | (`detail="full"` only) `{signal_quality: "persistent"/"volatile"/"mixed"}` — persistence of anomaly signals across time slices |
+| `temporal_quality` | (`detail="full"` only) `{signal_quality: "persistent"/"volatile"/"mixed"/"insufficient_data"}` (`"insufficient_data"` = no anomalous slice is followed by another slice, so persistence cannot be measured) — persistence of anomaly signals across time slices |
 | `event_rate_divergence_alerts[]` | (`detail="full"`, anchor patterns only) Entities with high event anomaly rate (>15%) but below-theta static delta_norm — invisible to `find_anomalies`. Each entry: `{pattern_id, event_pattern_id, entity_key, event_anomaly_rate, delta_norm, theta_norm, alert}`. Top 20 by rate. Absent = no divergence detected. |
 | `suggested_next_step` | (`detail="full"`, only when `event_rate_divergence_alerts` present) Actionable hint to run windowed `aggregate(time_from, time_to)` to confirm when the event burst happened. |
 | `dimension_kinds` | Compact summary of per-dimension distribution families, e.g. `"bernoulli x4, poisson x2, gaussian x8"`. Absent on pre-2.3 spheres. |
@@ -151,7 +161,7 @@ Evaluates 6 built-in geometric health checks across all patterns and returns any
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| _(none)_ | — | — | — |
+| `pattern_id` | string | `null` | Pattern to check. When `null`, all patterns are scanned. |
 
 **Returns:** `alerts[]` sorted by severity (HIGH first). Alert types: `anomaly_rate_spike`, `population_size_shock`, `high_anomaly_rate` (>30%), `theta_miscalibration` (includes >20% detection), `regime_changepoint`, `calibration_drift`.
 
@@ -164,6 +174,7 @@ Scans a pattern for **geometric integrity** issues: coverage gaps, degenerate po
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `pattern_id` | string | required | Pattern to inspect |
+| `sample_size` | int | `null` | Subsample N entities before scanning. Ignored when `sample_pct` is set and resolves to a smaller sample. |
 | `sample_pct` | float | `null` | Fraction of geometry to scan (e.g. `0.05` for 5%) |
 
 **Returns:** `issues[]` with type, severity, and description.
@@ -321,11 +332,11 @@ Exact-match entity lookup by a single property value.
 | `line_id` | string | required | Entity line to search |
 | `property_name` | string | required | Column name |
 | `value` | string | required | Exact value (case-sensitive). Bool columns accept `"true"`/`"false"`. |
-| `limit` | int | `20` | Max results to return |
+| `top_n` | int | `20` | Max results to return |
 
-**Returns:** `results[]` (entity records), `total` (all matches), `returned` (slice size). On zero matches the response adds a `hint` (the match is case-sensitive — suggests `search_entities_fts` for a token match and `get_line_schema` to confirm the column).
+**Returns:** `entities[]` (`primary_key`, `status`), their properties in one table `properties` = `{columns: [primary_key, …], rows}`, `total` (all matches), `returned` (slice size). On zero matches the response adds a `hint` (the match is case-sensitive — suggests `search_entities_fts` for a token match and `get_line_schema` to confirm the column).
 
-Use `limit=1` to count matches cheaply without fetching full payloads.
+Use `top_n=1` to count matches cheaply without fetching full payloads.
 
 ---
 
@@ -337,9 +348,9 @@ Full-text BM25 search across all indexed string columns of a line.
 |-----------|------|---------|-------------|
 | `line_id` | string | required | Entity line to search |
 | `query` | string | required | Token query — space-separated tokens are OR'd |
-| `limit` | int | `20` | Max results; ordered by relevance (highest BM25 score first) |
+| `top_n` | int | `20` | Max results; ordered by relevance (highest BM25 score first) |
 
-**Returns:** `results[]` (no `total` field — FTS returns only the top-limit matches).
+**Returns:** `entities[]` (`primary_key`, `status`) and their properties in one table `properties` = `{columns: [primary_key, …], rows}` (storage bookkeeping columns `version` / `created_at` / `changed_at` are not returned); no `total` field — FTS returns only the top-`top_n` matches.
 
 **Notes:** Requires INVERTED index built by GDSBuilder. Manually constructed spheres without this index raise an error; use `search_entities` instead. Check `has_fts_index` in `get_sphere_info`.
 
@@ -358,7 +369,7 @@ Fuses ANN vector similarity and BM25 full-text search into one ranked result.
 | `top_n` | int | `10` | Number of results |
 | `filter_expr` | string | `null` | Lance SQL predicate for pre-filtering candidates |
 
-**Returns:** `results[]` sorted by `final_score` desc, each with `vector_score`, `text_score`, `final_score`, and optionally `properties`.
+**Returns:** `results[]` sorted by `final_score` desc, each with `vector_score`, `text_score`, `final_score`; anchor-line properties in one table `properties` = `{columns: [primary_key, …], rows}` (compact format keeps text columns, dropped names in `omitted`).
 
 **Notes:** Requires INVERTED index. Check `has_fts_index` in `get_sphere_info`.
 
@@ -387,7 +398,7 @@ Profiles a single property column directly from the points table — no event sc
 | `line_id` | string | required | Entity line |
 | `property_name` | string | required | Column to profile |
 | `group_by` | string | `null` | Column to group numeric stats by |
-| `limit` | int | `50` | Max distinct values to return (string/bool columns) |
+| `top_n` | int | `50` | Max distinct values to return (string/bool columns) |
 
 **Returns by column type:**
 
@@ -433,7 +444,7 @@ Walks one step along a line to the next or previous entity (π1).
 
 **Returns:** Current entity position after the step.
 
-**Notes:** Requires current position to be a Point on the given line. On large lines (100k+ points) this reads the full points table on every call — prefer `search_entities` or `aggregate` for bulk traversal.
+**Notes:** Requires current position to be a Point on the given line; from a Polygon or Solid position (after `get_polygon` jumps or `dive_solid`) the error says to call `goto(primary_key, line_id)` first. On large lines (100k+ points) this reads the full points table on every call — prefer `search_entities` or `aggregate` for bulk traversal.
 
 ---
 
@@ -500,11 +511,15 @@ Reads the polygon (current geometric shape) for the entity at the current naviga
 
 | Field | Description |
 |-------|-------------|
-| `delta` | Z-scored delta vector — each component is `(shape − mu) / sigma` |
+| `delta` | Z-scored delta vector — each component is `(shape − mu) / sigma`. Full format only (and compact when two dims share a label) |
+| `delta_by_dim` | Compact format: the same delta as a `{dim: value}` map |
 | `delta_norm` | L2 norm of delta vector |
 | `delta_rank_pct` | Percentile in population delta_norm distribution (0–100) |
 | `is_anomaly` | `true` when `delta_norm > theta_norm` |
 | `edges[]` | Alive edges: `{line_id, point_key, direction}` |
+| `related_properties` | Properties of the entities the edges point to, one `{columns: [point_key, …], rows}` table per line (event polygons) |
+| `properties` | The entity's own row; for anchor entities compact format keeps text values (dropped names in `omitted.properties`), an event keeps its whole row |
+| `dim_edges[]` | Compact format: the alive dimension-line edges (no point key, not jumpable) as a list of line ids instead of one `edges[]` entry each; `edges[]` then holds the entity edges only. The full format keeps them in `edges[]`. |
 | `anomaly_dimensions[]` | When `is_anomaly=true`: top dimensions driving the anomaly — `{dim, label, delta, contribution_pct}`. `contribution_pct` = % of `delta_norm²` from this dimension; dimensions < 5% excluded; top 3 shown. |
 | `witness` | Minimal subset of dimensions that certifies the anomaly alone: `{witness_size, witness_dims[], delta_norm}` |
 | `repair` | Minimal subset of dimensions to fix to become non-anomalous: `{repair_size, repair_dims[], residual_norm}` |
@@ -525,7 +540,7 @@ Reads the temporal solid (deformation history) for an entity without changing na
 | `timestamp_from` | string | `null` | ISO-8601 lower bound (inclusive) to reduce payload |
 | `timestamp_to` | string | `null` | ISO-8601 upper bound (exclusive) to reduce payload |
 
-**Returns:** `slices[]` (temporal snapshots), `num_slices`, `base_polygon` (shape at first observation).
+**Returns:** `slices[]` (temporal snapshots, oldest first), `num_slices`, `base_polygon` (the entity's current polygon, as `get_polygon`). Compact format: `base_polygon` compacted as in `get_polygon`, slices without null `changed_property` / `changed_line_id`, and one `slice_dim_labels` header naming the components of every slice's positional `delta_snapshot` (slices may carry fewer dims than the pattern — the leading ones).
 
 When `num_slices >= 3`, also returns `forecast`:
 
@@ -536,8 +551,9 @@ When `num_slices >= 3`, also returns `forecast`:
 | `current_is_anomaly` | Is it anomalous now? |
 | `reliability` | `"high"` (≥10 slices, r²≥0.7), `"medium"` (≥5 slices or r²≥0.4), `"low"` |
 | `stale_forecast_warning` | Present when last temporal slice is >180 days old; `reliability` overridden to `"low"` |
+| `forecast_dims` / `forecast_theta_norm` | Present when the slices carry fewer dims than the pattern: the dims the prediction covers and the anomaly threshold over those same dims, which `forecast_is_anomaly` is judged against |
 
-**Notes:** Does not change navigator position. Event patterns are immutable (`num_slices` always 0). For current geometric state use `get_polygon`; `base_polygon.delta_norm` reflects the entity at first observation, not current state.
+**Notes:** Does not change navigator position. Event patterns are immutable (`num_slices` always 0). `base_polygon` is the current state; the history is in `slices`.
 
 ---
 
@@ -547,9 +563,9 @@ Lists polygons for a specific entity in an event pattern.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `entity_key` | string | required | Entity key |
+| `primary_key` | string | required | Entity key |
 | `pattern_id` | string | required | Event pattern |
-| `limit` | int | `10` | Max polygons to return |
+| `top_n` | int | `10` | Max polygons to return |
 | `offset` | int | `0` | Skip first N polygons (pagination) |
 | `filters` | list[dict] | `null` | Record-level field filters on the event line: `[{"line": "company_codes", "key": "CC-PL"}]`. Do not use for `is_anomaly` — use `geometry_filters` instead. |
 | `geometry_filters` | dict | `null` | Filter by geometry columns before returning. See [Geometry Filters](#geometry-filters). |
@@ -557,13 +573,13 @@ Lists polygons for a specific entity in an event pattern.
 | `sample_pct` | float | `null` | Draw a fraction (0.0–1.0) of polygons. Mutually exclusive with `sample`. |
 | `seed` | int | `null` | Random seed for reproducible sampling |
 
-**Returns:** `polygons[]`, `total` (unfiltered count for entity), `total_unfiltered` (all entries regardless of filters), `capped_warning` when limit was reduced by the adaptive cap.
+**Returns:** `polygons[]` (no per-polygon `type`; `pattern_id` only when it differs from the requested one), `properties` (each event's own row from the event line — amount, date, … — keyed by `primary_key`), `related_properties` (the referenced entities' properties, one table per line; see [Related properties](#hypertopos-mcp--tool-reference)), `total` (unfiltered count for entity), `total_unfiltered` (all entries regardless of filters), `capped_warning` when `top_n` was reduced by the adaptive cap. Anomalous polygons carry `anomaly_dimensions`; compact format drops their positional `delta`, and `dim_labels` is attached while any polygon keeps one.
 
 **Hard cap:** Adaptive — computed from edge count to stay under ~50K chars (e.g. 15 for 10-edge patterns, 18 for 8-edge patterns). Use `offset` for pagination or `aggregate` for bulk counts.
 
 ```python
-get_event_polygons("2", "tx_pattern", limit=10, offset=0)   # page 1
-get_event_polygons("2", "tx_pattern", limit=10, offset=10)  # page 2
+get_event_polygons("2", "tx_pattern", top_n=10, offset=0)   # page 1
+get_event_polygons("2", "tx_pattern", top_n=10, offset=10)  # page 2
 ```
 
 ---
@@ -580,24 +596,29 @@ Finds the most anomalous polygons in a pattern, ranked by `delta_norm` descendin
 | `top_n` | int | `10` | Max results (subject to adaptive hard cap) |
 | `offset` | int | `0` | Skip first N anomalies (pagination) |
 | `radius` | float | `1.0` | Multiplies `theta_norm` threshold. >1 = looser boundary. ≤0 treated as 1. |
-| `property_filters` | dict | `null` | Filter anomalous entities by property before ranking. Anchor/composite only. Syntax: `{"col": {"gt": X, "lt": Y}}` or `{"col": "value"}`. AND semantics. |
-| `rank_by_property` | string | `null` | Re-rank by raw property value (DESC) instead of delta_norm |
+| `property_filters` | dict | `null` | Filter anomalous entities by property before ranking. Anchor/composite only. Syntax: `{"col": {"gt": X, "lt": Y}}`, `{"col": {"in": ["A", "B"]}}` or `{"col": "value"}`. AND semantics. |
+| `rank_by_property` | string | `null` | Re-rank by raw property value instead of delta_norm (direction set by `rank_order`; missing values last) |
+| `rank_order` | string | `"desc"` | Direction of the `rank_by_property` ranking: `"desc"` (highest first) or `"asc"` (lowest first). `detect_pattern` picks `"asc"` for queries about low / lowest / few values |
 | `rank_by` | string | `"delta_norm"` | `"delta_norm"` (default, sort by `||delta||` desc), `"min_q_per_dim"` (smallest per-dim q first; requires `fdr_alpha` and `fdr_axis ∈ {"per_dim", "both"}`; incompatible with `select="diverse"`), or `"signed_confidence"` (fuse `delta_norm_signed × \|lda_alignment\| × (1 − reliability_penalty)` descending; sign-preserving — anti-aligned polygons get negative scores and land at the bottom; requires a pattern rebuilt with `label_audit:` enabled, fails with a structured `GDSNavigationError` otherwise; incompatible with `select="diverse"`). |
 | `missing_edge_to` | string | `null` | Keep only anomalies with NO edge to this line (orphan detection) |
 | `include_emerging` | bool | `false` | Append `emerging[]`: non-anomalous entities whose forecast crosses the threshold. Scans up to 100 entities. Only evaluated when `offset=0`. |
 | `fdr_alpha` | float | `null` | Apply Benjamini-Hochberg FDR control at this level (0-1 exclusive). Returns only entities with `q_value <= alpha`. Each retained entity carries a `q_value` field. `null` = no FDR filtering (legacy behavior). |
-| `fdr_method` | string | `"bh"` | FDR method. `"bh"` (Benjamini-Hochberg, assumes pi0=1) or `"storey"` (Storey LSL estimator of the true null proportion; shrinks q-values by pi0 and typically recovers 10–15% more discoveries when combined with `p_value_method="chi2"` on spheres that have a genuine null mass). With the default `p_value_method="rank"`, `"storey"` collapses to `"bh"` — rank p-values are uniform by construction and carry no null signal. |
-| `p_value_method` | string | `"rank"` | p-value construction. `"rank"` (default, empirical from `delta_rank_pct` — uniform by construction) or `"chi2"` (upper-tail χ²(df) survival on `||delta||²`, the parametric null assuming `delta_i ~ N(0, 1)`). Pair with `fdr_method="storey"` for power recovery on moderate-super-anomaly patterns; on over-compressed or extreme patterns the uplift collapses to zero. |
+| `fdr_method` | string | `"bh"` | FDR method. `"bh"` (Benjamini-Hochberg, assumes pi0=1) or `"storey"` (Storey LSL estimator of the true null proportion; shrinks q-values by pi0 and typically recovers 10–15% more discoveries when combined with `p_value_method="chi2"` on spheres that have a genuine null mass). |
+| `fdr_axis` | string | `"entity"` | FDR correction axis: `"entity"` (flat FDR over per-entity p-values, default), `"per_dim"` (independent BH/Storey per dimension — entity survives if any dim's q ≤ alpha; each polygon gains `q_values_per_dim` (`{dim: q}`, dims with q = 1 omitted), `min_q_per_dim`, `dominant_q_dim` (dim name)), or `"both"` (entity-level AND ≥1 dim must survive per-dim FDR). |
+| `fdr_resolution` | string | `null` | Spatial hierarchy level name declared on the pattern's `fdr_hierarchy`. When set, survivors are also gated by per-cell BH/Storey FDR at this level. Requires `fdr_alpha`. Survivors gain `cell_q_spatial` and `cell_path`. |
+| `fdr_temporal_resolution` | string | `null` | Temporal hierarchy level name declared on the pattern's `fdr_temporal_hierarchy`. Same semantics as `fdr_resolution` on the temporal axis. Requires `fdr_alpha`. Survivors gain `cell_q_temporal` and `cell_path`. |
+| `p_value_method` | string | `"chi2"` | p-value construction. `"chi2"` is the only accepted value: upper-tail χ²(df) survival on `||delta||²`, the parametric null assuming `delta_i ~ N(0, 1)`. Rank-derived p-values are not offered — they only encode an entity's position in the result set. Pair with `fdr_method="storey"` for power recovery on moderate-super-anomaly patterns; on over-compressed or extreme patterns the uplift collapses to zero. |
 | `select` | string | `"top_norm"` | `"top_norm"` ranks by score descending. `"diverse"` applies submodular facility location to pick the K most geometrically diverse representatives — each result includes a `representativeness` count. |
-| `metric` | string | `"L2"` | `"L2"` (pre-computed delta_norm, fast), `"Linf"` (max single-dimension \|delta\|, runtime scan), or `"bregman"` (distribution-aware Bregman divergence, runtime scan). Linf catches single-dimension spikes that L2 dilutes. Bregman uses per-dimension kind-aware scoring (poisson KL for counts, bernoulli KL for binary, gaussian for continuous) — can improve ranking on mixed-type patterns. |
+| `metric` | string | `"L2"` | `"L2"` (pre-computed delta_norm, fast) or `"Linf"` (max single-dimension \|delta\|, runtime scan). Linf catches single-dimension spikes that L2 dilutes. Every result also carries `bregman_divergence` (per-dimension kind-aware scoring: poisson KL for counts, bernoulli KL for binary, gaussian for continuous), worth comparing with `delta_norm` on mixed-type patterns. |
 | `min_confidence` | float | `0.0` | Keep only entities with `anomaly_confidence >= min_confidence` (0–1). `0.0` = no filter. Has no effect when `anomaly_confidence` is `None` (bootstrap was skipped). |
 | `dimension_weights` | dict | `null` | Optional `{dim_name: float}` mapping. Each weight multiplies the corresponding dim's contribution to the rank score before computing `delta_norm`. Missing dims default to `1.0`; explicit `0.0` silences a dim. Requires `metric` in `"L2"` or `"Linf"` (Bregman is precomputed and cannot be reweighted). Use to discount dims that fail a stratified correlation gate (NOISE → `0.0`, HEAVY-TAIL → `0.5`). Validates dim names against the pattern's labels and rejects negative / non-finite / non-numeric weights. |
 | `sample_size` | int | `null` | Cap on geometry rows scanned. When set below the population size, a random sample is drawn before threshold filtering and ranking. Forces the in-process scan path. `null` = scan full population. |
 | `boundary_aware` | bool | `false` | Stratified sampling — when `true`, half of `sample_size` is drawn from entities within `[0.8 × theta_norm, 1.2 × theta_norm]` (boundary band), the rest from the complement. Requires `sample_size`. Surfaces boundary cases under-represented under uniform sampling — useful for calibration audits. |
+| `summary` | bool | `null` | `null` follows the session response format: compact drops positional `delta` (polygons and clusters; `anomaly_dimensions` and labels stay) and numeric `properties` columns except the ranked / filtered ones, listed in `omitted`; full keeps everything and adds `dim_labels`. `true`: no delta (polygons and clusters), edges or properties (smallest). `false`: everything. |
 
-**Returns:** `polygons[]`, `total_found` (total above threshold), `capped_warning` when top_n was reduced.
+**Returns:** `polygons[]`, `properties` (entity properties keyed by `primary_key`, see [Properties table](#hypertopos-mcp--tool-reference); absent with `summary=true`), `related_properties` (properties of entities referenced by polygon edges, one table per line), `clusters[]`, `total_found` (total above threshold), `capped_warning` when top_n was reduced.
 
-Each polygon in `polygons[]` includes:
+Each polygon in `polygons[]` includes (no per-polygon `type` or `pattern_id`; both are constant for the call):
 
 | Field | Description |
 |-------|-------------|
@@ -605,7 +626,7 @@ Each polygon in `polygons[]` includes:
 | `anomaly_confidence` | Bootstrap stability score (0–1): fraction of bootstrap resamples in which the entity is classified as anomalous. `null` when bootstrap was skipped (N > 50K, `group_by_property`, `use_mahalanobis`). |
 | `total_impact` | M4 additive — aggregate L2 norm of leave-one-out impact on coordinate calibration. `null` when pattern is event-type, `N<2`, or storage backend lacks shape reconstruction prerequisites. Use `find_calibration_influencers` for the full per-dim breakdown + classification context. |
 | `classification` | M4 additive — one of `"hidden"` / `"distorter"` / `"standard_anomaly"` / `"normal"`. Same null rules as `total_impact`. Use `find_calibration_influencers` for ranked entries within a specific cell. |
-| `reliability_flags` | Per-polygon triage dict: `single_dim_driven` (bool — dominant dim contributes >70 % of total anomaly attribution, likely a data-quality artefact rather than a multi-dim fraud signal), `dominant_dim` (string label, agrees with `explain_anomaly.top_dimensions[0].dim` on the same polygon), `dominant_dim_share` (float), `low_confidence_bucket` (bool — bootstrap-derived `anomaly_confidence` is below 0.5, the anomaly flag is fragile to population resampling), `confidence` (float or `null` — sanitises `NaN`/`±inf` to `null`), `flags` (list of triggered flag names). |
+| `reliability_flags` | Per-polygon triage dict: `single_dim_driven` (bool — dominant dim carries >70 % of `delta_norm²`, likely a data-quality artefact rather than a multi-dim fraud signal), `dominant_dim` (string label, agrees with `explain_anomaly.top_dimensions[0].dim` on the same polygon), `dominant_dim_share` (float — the dominant dim's share of `delta_norm²`), `low_confidence_bucket` (bool — bootstrap-derived `anomaly_confidence` is below 0.5, the anomaly flag is fragile to population resampling), `confidence` (float or `null` — sanitises `NaN`/`±inf` to `null`), `flags` (list of triggered flag names). |
 | `signed_confidence_score`, `lda_alignment`, `reliability_penalty` | Present only when `rank_by="signed_confidence"`. `signed_confidence_score` is `delta_norm_signed × \|lda_alignment\| × (1 − reliability_penalty)` (sign-preserved); `lda_alignment` ∈ `[-1, 1]` is the cosine on the LDA direction; `reliability_penalty` ∈ `[0, 1]` is `0.5 × single_dim_driven + 0.5 × low_confidence_bucket`. Non-finite values sanitised to `null`. |
 
 **Hard cap:** Adaptive — edge-count-based, typically 15–51. Use `offset` to paginate, `anomaly_summary` for counts, or `aggregate_anomalies` for distribution analysis.
@@ -630,7 +651,7 @@ Statistical overview of the anomaly population for a pattern.
 | `pattern_id` | string | required | Pattern to summarize |
 | `max_clusters` | int | `20` | Maximum anomaly clusters to return. Continuous-dimension patterns can produce 50k+ unique cluster shapes — the default cap keeps response size manageable. Set `0` for unlimited. |
 
-**Returns:** `count`, `rate`, `clusters[]` (anomaly shape clusters), `delta_norm_percentiles` (`p50/p75/p90/p95/p99/max`), `top_driving_dimensions[]` (aggregate per-dimension contribution across all anomalies).
+**Returns:** `count`, `rate`, `clusters[]` (anomaly shape clusters; each `label` names up to three elevated and three missing dimensions, as in `find_anomalies`; compact format drops each cluster's positional `delta`), `delta_norm_percentiles` (`p50/p75/p90/p95/p99/max`), `top_driving_dimensions[]` (aggregate per-dimension contribution across all anomalies).
 
 ---
 
@@ -664,13 +685,13 @@ Full structured explanation combining severity, witness, repair, top dimensions,
 
 **Returns:** `severity` (`"normal"` / `"low"` 1.0–1.1× / `"medium"` 1.1–1.5× / `"high"` 1.5–2.5× / `"extreme"` >2.5× theta), `ratio`, `witness`, `repair`, `conformal_p`, `reputation` (`{value, anomaly_tenure}`), `composite_risk`, `top_dimensions[]`, `reliability_flags` (per-polygon triage dict matching the `find_anomalies` field: `single_dim_driven`, `dominant_dim`, `dominant_dim_share`, `low_confidence_bucket`, `confidence`, `flags` — the `dominant_dim` value agrees with `top_dimensions[0]["dim"]` for the same polygon by construction).
 
-Each entry in `top_dimensions[]` has `dim` (dimension index), `label` (dimension name), `kind` (`"gaussian"`, `"poisson"`, or `"bernoulli"`, present when sphere has dimension kinds), `bregman` (raw per-dimension Bregman value), and `pct_of_total` (% of total `bregman_divergence` from this dimension). Absent on pre-2.3 spheres.
+Each entry in `top_dimensions[]` is `{dim, kind, delta, pct_of_total}`: `dim` (dimension name), `kind` (`"gaussian"`, `"poisson"`, or `"bernoulli"` — the dim's distribution family, present when the sphere has dimension kinds), `delta` (signed stored delta for the dim), and `pct_of_total` (the dim's share of `delta_norm²`, i.e. `delta²` over the sum of all dims' `delta²`, in `[0, 1]`). Entries are sorted by share, so `top_dimensions[0]` is the dim whose return to its population mean drops `delta_norm` most. This is the same metric behind `is_anomaly`, `witness`, `repair`, `find_anomalies.anomaly_dimensions` and `simulate_dimension_change`; on a pattern without Cholesky whitening, setting a dim to its mean lowers `delta_norm²` by exactly its `pct_of_total`. On a Cholesky-whitened pattern the stored delta is in whitened coordinates, so the share attributes to whitened coordinate *i*. Dimensions with a zero share are omitted.
 
 ---
 
 ### `find_diverse_explanations`
 
-K diverse hypotheses for why an entity is anomalous. Greedy selection over per-dim Bregman contributions: hypotheses are strict disjoint (each dim appears in at most one hypothesis) — the greedy adds dims to a hypothesis until joint contribution meets `min_contribution_pct`, then moves to the next. Use after `explain_anomaly` to broaden investigation paths when the single ranking is not enough — e.g. when `reliability_flags.single_dim_driven` is `true` and you want to know "what else is going on" beyond the dominant dim.
+K diverse hypotheses for why an entity is anomalous. Greedy selection over per-dim shares of `delta_norm²` (each dim's `delta²`, the metric behind `is_anomaly`): hypotheses are strict disjoint (each dim appears in at most one hypothesis) — the greedy adds dims to a hypothesis until joint contribution meets `min_contribution_pct`, then moves to the next. Use after `explain_anomaly` to broaden investigation paths when the single ranking is not enough — e.g. when `reliability_flags.single_dim_driven` is `true` and you want to know "what else is going on" beyond the dominant dim.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -694,7 +715,7 @@ K diverse hypotheses for why an entity is anomalous. Greedy selection over per-d
 | `diversity_score` | Mean pairwise `(1 - Jaccard)` over hypothesis dim sets, or `null` when fewer than two hypotheses are returned (no pair to compare) |
 | `degraded_reason` | `null` when K hypotheses returned, `"insufficient_diverse_mass"` when graceful degradation kicked in |
 
-**Notes:** Pure recomputation over the stored polygon; no storage scan. Hypotheses are strict disjoint — each dim appears in at most one hypothesis. When remaining mass can't meet the `min_contribution_pct` floor, fewer hypotheses are emitted with `degraded_reason="insufficient_diverse_mass"` — the correct semantic for single-dim-driven entities (no alternative diverse explanation exists). Routes through the same per-dim contribution primitive that `explain_anomaly.top_dimensions` and `reliability_flags.dominant_dim` use, so the multi-hypothesis ranking stays semantically aligned with the single-explanation surface. `validate=true` adds a `validation` sub-block per hypothesis (`{delta_norm_after, drops_below_theta}`). Non-finite floats sanitised to `null` on the wire. Invalid input returned as `{"error": ..., "primary_key": ...}` JSON.
+**Notes:** Pure recomputation over the stored polygon; no storage scan. Hypotheses are strict disjoint — each dim appears in at most one hypothesis. When remaining mass can't meet the `min_contribution_pct` floor, fewer hypotheses are emitted with `degraded_reason="insufficient_diverse_mass"` — the correct semantic for single-dim-driven entities (no alternative diverse explanation exists). Routes through the same per-dim contribution primitive that `explain_anomaly.top_dimensions` and `reliability_flags.dominant_dim` use, so the multi-hypothesis ranking stays semantically aligned with the single-explanation surface. `validate=true` adds a `validation` sub-block per hypothesis (`{delta_norm_after_override, neutralizes_anomaly}`); on a pattern without Cholesky whitening a hypothesis with joint share `s` leaves `delta_norm_after_override² = (1 − s) · delta_norm²`, so whether it neutralizes the anomaly follows from its share. Non-finite floats sanitised to `null` on the wire. Invalid input returned as `{"error": ..., "primary_key": ...}` JSON.
 
 ---
 
@@ -751,14 +772,14 @@ Agent-correctness composer — single-entity view over the population sweep `cla
 |-----------|------|---------|-------------|
 | `primary_key` | string | required | Entity to classify |
 | `pattern_id` | string | required | Pattern covering the entity (needs ≥2 patterns on the entity line for cross-detector consensus) |
-| `sample_size` | int \| null | `10000` | Cap on geometry rows scored; raise (or pass `null` for the full population) when the entity falls outside the random sample. `top_n` is forced high internally so a scored entity is never lost to list truncation |
+| `sample_size` | int \| null | `10000` | Cap on geometry rows scored (`null` = full population). The focal entity is always scored, added to the sample when the draw missed it; `top_n` is forced high internally so a scored entity is never lost to list truncation |
 
 **Returns:**
 
 | Field | Description |
 |-------|-------------|
 | `primary_key` / `pattern_id` | Echoed identifiers |
-| `found` | `true` when the entity was in the scored sample; `false` (with a `note`) when not — never an empty/None payload |
+| `found` | `true` when the entity was scored; `false` (with a `note`) only when it has no geometry row in the pattern — never an empty/None payload |
 | `classification` | `"mixed_signal"` / `"anomalous_consensus"` / `"single_detector_signal"` / `"normal_consensus"` / `"insufficient_data"` (`null` when not found) |
 | `anomalous_detectors` / `normal_detectors` / `borderline_detectors` | Detector-name lists |
 | `n_detectors_fired` | Detectors that returned a p-value (incl. borderline) |
@@ -874,6 +895,8 @@ Multi-hop root-cause DAG for an anomalous entity. Composes `explain_anomaly` (to
 | `contagion_min_threshold` | float | `0.10` | Below this score, the contagion branch is not attached. Set to `0.0` to always attach when the entity has counterparties, or above `0.5` to keep only high-signal contagion |
 | `max_total_nodes` | int | `50` | Hard cap on total nodes expanded across the whole DAG; guards against recursion blowups on `max_depth` × `max_branches` combos |
 | `edge_counterparty_top_n` | int | `1` | How many of the most-anomalous counterparties to expand as edge_counterparty branches. Raise to 2–3 when you want multiple distinct counterparty chains traced; each adds one candidate competing for `max_branches` slots |
+| `contagion_min_counterparties` | int | `3` | Minimum number of counterparties required to attach a contagion branch. Below this count, contagion is skipped regardless of the score. |
+| `branches_enabled` | list[string] | `null` | Whitelist of branch types to enable. `null` enables all branch types: `["edge_counterparty", "hub", "neighbor_contamination"]`. Pass a subset to limit which branches are explored. |
 
 **Returns:**
 
@@ -927,7 +950,7 @@ Finds the top-N entities nearest to a given entity by geometric distance.
 | `dim_mask` | list[string] | `null` | Compute distance only on named dimensions (from `pattern.dim_labels`). Focuses similarity on specific aspects of geometry. |
 | `metric` | string | `"L2"` | `"L2"` (Euclidean, default) or `"cosine"` (1 - cos_sim — shape similarity ignoring magnitude) |
 
-**Returns:** `reference` (the queried entity's metadata), `similar[]` with `primary_key`, `distance`, optional `properties`, and `is_anomaly` (stored anomaly flag for each neighbour), plus top-level `neighbor_anomaly_count` and `neighbor_anomaly_rate` (share of returned neighbours with `is_anomaly=true`; both fields are omitted when no neighbours were returned). When >50% of results have `distance=0` (inactive entities), response includes `degenerate_warning` and `population_diversity_note` — ANN search is unreliable on patterns with high `inactive_ratio`.
+**Returns:** `reference` (the queried entity's metadata), `similar[]` with `primary_key`, `distance` and `is_anomaly` (stored anomaly flag for each neighbour), the neighbours' `properties` table, plus top-level `neighbor_anomaly_count` and `neighbor_anomaly_rate` (share of returned neighbours with `is_anomaly=true`; both fields are omitted when no neighbours were returned). When >50% of results have `distance=0` (inactive entities), response includes `degenerate_warning` and `population_diversity_note` — ANN search is unreliable on patterns with high `inactive_ratio`.
 
 ---
 
@@ -942,13 +965,13 @@ Measures geometric distance between two entities.
 | `pattern_id` | string | required | Pattern |
 | `mode` | string | `"intraclass"` | `"intraclass"` = Euclidean delta distance; `"temporal"` = DTW over slice sequences |
 
-**Returns:** `distance`, `interpretation`, plus polygon details (intraclass) or slice counts (temporal).
+**Returns:** `key_a`, `key_b`, `distance`, `interpretation`, plus polygon details (intraclass) or slice counts (temporal); both entities' properties in one table `properties` = `{columns: [primary_key, …], rows}` (compact format keeps text columns, dropped names in `omitted`).
 
 ---
 
 ### `compare_calibrations`
 
-Per-dimension μ/σ/θ drift between two calibration epochs of one pattern. Diagnostic for inspecting how a pattern's calibration shifted between two builder rebuilds.
+Per-dimension μ/σ/θ drift between two calibration epochs of one pattern. Diagnostic for inspecting how a pattern's calibration shifted between two re-fits (builder rebuilds or `recalibrate` calls — each writes a new epoch).
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -956,7 +979,7 @@ Per-dimension μ/σ/θ drift between two calibration epochs of one pattern. Diag
 | `v_from` | int | `null` | Starting epoch. `null` resolves to second-to-last epoch on disk |
 | `v_to` | int | `null` | Ending epoch. `null` resolves to latest epoch on disk |
 | `top_n` | int | `10` | Number of top-drifted dimensions to return |
-| `verbose` | bool | `false` | When true, also include the full per-dimension breakdown in `per_dimension` |
+| `verbose` | bool | `null` | `null` follows the session response format (`full` → true). When true, also include the full per-dimension breakdown in `per_dimension` |
 
 **Returns:** JSON-encoded `CalibrationDriftReport` with `pattern_id`, `v_from`, `v_to`, `schema_hash`, `population_size_from`, `population_size_to`, `overall_drift_rms` (RMS in σ units, comparable across patterns), `top_drifted` (ranked list of `DimensionDrift`), `per_dimension` (full list when `verbose=true`, else `null`), and `edge_dim_threshold_drift` — per-source-dim `{from, to, delta}` map of `_count_above_threshold` cutoffs. Populated only when both compared epochs declared `edge_dim_aggregations:` on the anchor pattern; `null` otherwise. Each `DimensionDrift` carries `dim_index`, `dim_kind`, the from/to/delta triples for `mu`, `sigma`, `theta`, and `mu_delta_normalized` (z-score with sigma-safe guard for degenerate dims).
 
@@ -995,14 +1018,14 @@ Per-entity intrinsic vs extrinsic decomposition of geometric drift between two t
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `entity_key` | string | required | Which entity to decompose |
+| `primary_key` | string | required | Which entity to decompose |
 | `pattern_id` | string | required | Anchor pattern with temporal data |
 | `v_from` | int | `null` | Starting calibration epoch. `null` resolves to oldest retained on disk |
 | `v_to` | int | `null` | Ending calibration epoch. `null` resolves to latest on disk |
 | `timestamp_from` | float | `null` | Unix-seconds lower bound for slice window. `null` → first slice |
 | `timestamp_to` | float | `null` | Unix-seconds upper bound for slice window. `null` → last slice |
 | `top_n` | int | `10` | Number of top dimensions (by `|total|`) to return |
-| `verbose` | bool | `false` | When true, also include full per-dimension breakdown |
+| `verbose` | bool | `null` | `null` follows the session response format (`full` → true). When true, also include full per-dimension breakdown |
 
 **Returns:** JSON-encoded `IntrinsicExtrinsicReport` with `pattern_id`, `entity_key`, `v_from`, `v_to`, `schema_hash`, `timestamp_from`, `timestamp_to`, aggregate `intrinsic_displacement` / `extrinsic_displacement` / `total_displacement` / `intrinsic_fraction` (sum-of-squares ratio in `[0, 1]`), ranked `top_dimensions`, and optional `per_dimension` (when `verbose=true`). Each `DimensionDecomposition` carries `dim_index`, `dim_kind`, `dim_label`, `total` (delta_b - delta_a), `intrinsic` ((s_b - s_a) / σ_v1), `extrinsic` (residual), and per-dim `intrinsic_fraction`.
 
@@ -1025,9 +1048,11 @@ Detect entities with high influence on the population-relative coordinate system
 | `classify` | string | `"hidden"` | Filter: `"hidden"` / `"distorter"` / `"standard_anomaly"` / `"normal"` / `"all"`. |
 | `high_threshold_pct` | float | `90.0` | Percentile cutoff for "high impact" classification. |
 | `sample_size` | int | `null` | Subsample N entities before leave-one-out scan. |
-| `verbose` | bool | `false` | When true, each entry gains `cascading_flip_count` — count of OTHER entities that flip is_anomaly classification after this entity's removal. Adds O(top_n × N × D) recompute. |
+| `verbose` | bool | `null` | `null` follows the session response format (`full` → true). When true, each entry gains `cascading_flip_count` — count of OTHER entities that flip is_anomaly classification after this entity's removal. Adds O(top_n × N × D) recompute. |
+| `auto_discover` | bool | `false` | When `true`, partition the population via k-means++ and rank only cluster representatives (one per cluster). Useful on large populations where a full leave-one-out scan is too slow. Each entry gains `cluster_size` and `cluster_centroid_distance`. |
+| `auto_k` | int | `10` | Number of clusters when `auto_discover=true` (hard cap 50). |
 
-**Returns:** JSON-encoded `InfluenceReport` with `pattern_id`, `pattern_version`, `population_size`, `high_threshold_pct`, `total_impact_threshold` (absolute value at percentile), `theta_norm` (echoed), `classify_filter` (echoed), `cell_counts` (population-level distribution: `{hidden: K1, distorter: K2, standard_anomaly: K3, normal: K4}` summing to N), and `entries` (filtered + sorted by `total_impact` desc, ≤ top_n). Each `InfluenceEntry` carries `entity_key`, `mu_impact`, `sigma_impact`, `total_impact`, `delta_norm` (current anomaly score), `classification`, `top_dim_contributions` (top 5 by `|contribution|`), and `cascading_flip_count` (null unless verbose=True). Each `DimensionContribution` carries `dim_index`, `dim_kind`, `dim_label`, `mu_shift`, `sigma_shift`, `contribution`.
+**Returns:** JSON-encoded `InfluenceReport` with `pattern_id`, `pattern_version`, `population_size`, `high_threshold_pct`, `total_impact_threshold` (absolute value at percentile), `theta_norm` (echoed), `classify_filter` (echoed), `cell_counts` (population-level distribution: `{hidden: K1, distorter: K2, standard_anomaly: K3, normal: K4}` summing to N), and `entries` (filtered + sorted by `total_impact` desc, ≤ top_n). Each `InfluenceEntry` carries `entity_key`, `mu_impact`, `sigma_impact`, `total_impact`, `delta_norm` (current anomaly score), `classification`, `top_dim_contributions` (top 5 by `|contribution|`), and `cascading_flip_count` (only with verbose=True); `cluster_size` / `cluster_centroid_distance` only with `auto_discover=True` — fields that do not apply are omitted. Each `DimensionContribution` carries `dim_index`, `dim_kind`, `dim_label`, `mu_shift`, `sigma_shift`, `contribution`.
 
 **Math:** exact leave-one-out via rolling Σs/Σs². For each entity E:
 - `μ_without[i] = (Σs[i] - s_E[i]) / (N-1)`
@@ -1044,6 +1069,21 @@ Classification: `high_impact = total_impact ≥ percentile(total_impact, high_th
 
 ---
 
+### `calibration_influencer_history`
+
+Per-epoch μ-impact history for a known calibration influencer. Returns chronological records written by `find_calibration_influencers` without recomputing the leave-one-out scan.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `primary_key` | string | required | Entity identifier to retrieve history for |
+| `pattern_id` | string | required | Anchor pattern whose calibration history to query |
+
+**Returns:** JSON-encoded `InfluencerHistoryReport` with `history[]` (chronological list of `{epoch, calibrated_at, mu_impact, delta_norm_impact}` records), `n_epochs`, `elapsed_ms`, and an optional `hint` when the cache is empty (populate via `find_calibration_influencers` first).
+
+**Raises:** `ValueError` on unknown `pattern_id`.
+
+---
+
 ### `find_group_influence`
 
 Per-group leave-set-out impact + reinforcing/canceling factor (caller-supplied form). Detects coordinated population-shift attacks where individual entities have small impact but a group of coordinated entities together moves μ/σ.
@@ -1053,7 +1093,7 @@ Per-group leave-set-out impact + reinforcing/canceling factor (caller-supplied f
 | `pattern_id` | string | required | Anchor pattern. |
 | `groups` | `list[list[string]]` | required | List of groups; each group is a list of entity_keys. |
 
-**Returns:** JSON-encoded `list[GroupInfluenceReport]` (input order preserved). Each report carries `pattern_id`, `pattern_version`, `group_index`, `member_count`, `members` (echoed entity_keys), `mu_impact_set`, `sigma_impact_set`, `total_impact_set`, `sum_individual_impacts` (Σ of per-entity total_impact), `reinforcing_factor = total_impact_set / sum_individual_impacts` (>1.0 reinforcing, <1.0 canceling), and `top_dim_contributions` (top 5 dims of group's collective shift).
+**Returns:** `results[]` — one `GroupInfluenceReport` per input group, input order preserved. Each report carries `pattern_id`, `pattern_version`, `group_index`, `member_count`, `members` (echoed entity_keys), `mu_impact_set`, `sigma_impact_set`, `total_impact_set`, `sum_individual_impacts` (Σ of per-entity total_impact), `reinforcing_factor = total_impact_set / sum_individual_impacts` (>1.0 reinforcing, <1.0 canceling), and `top_dim_contributions` (top 5 dims of group's collective shift).
 
 **Errors:** `ValueError` on event pattern, `N<3`, empty groups list, group with `<2` members, group `≥ N`, missing entity_key, duplicate entity in group, or undefined reinforcing factor (sum of individual impacts = 0).
 
@@ -1070,11 +1110,11 @@ Declarative motif API — escape hatch from the closed-vocab motif registry (`sc
 | `pattern_id` | string | required | Event pattern with edge_table |
 | `hops` | list of dict | required | 1..8 per-hop predicate dicts |
 | `seed_keys` | list of string | `null` | Restrict to these seeds; `null` = all `from_key`s |
-| `max_results` | int | `100` | Cap on returned motif instances |
+| `top_n` | int | `100` | Cap on returned motif instances |
 | `score` | bool | `false` | When set, score each motif as the product of event-aware edge_potential (`delta_distance × (1/effective_pair_count) × (1 + event_norm)`) across its edges using the resolved anchor-companion's per-entity geometry plus the event pattern's per-transaction polygons. Distinct transactions between the same accounts now produce distinct motif scores (no rank collapse on shared node sequences). Each scored motif gains `score`, `score_breakdown` (per-edge `event_factor` included), and `anchor_pattern_id` fields together. Output sorted descending on score, unscored motifs at tail. Raises when no anchor companion is configured for the queried event pattern. |
 | `time_window_hours` | float | `null` | Optional total-chain-span cap. When set, every hop after the first must satisfy `abs(current_edge_ts - first_edge_ts) <= time_window_hours`. Independent of per-hop `time_delta_max_hours`; both apply when both are set. Must be strictly positive when not `null` |
 
-**Per-hop dict fields:** `amount_min: float`, `amount_max: float`, `time_delta_max_hours: float`, `amount_ratio_to_prev: float` (decreasing-chain ratio in `(0, 1.0]`; rejects edge unless `current_amount / prev_hop_amount ≤ ratio`; must be omitted on `hops[0]`), `direction: "forward"|"reverse"|"any"`, `edge_dim_predicates: {dim_name: [op, value]}` (op ∈ `<`, `<=`, `>`, `>=`, `==`), `require_anomalous_entity: bool` (when `true`, the hop's destination entity — `nodes[i+1]` of the motif — must satisfy `is_anomaly=true` in the resolved anchor companion's geometry; multiple hops AND together; raises if no anchor companion configured; `max_results` applies AFTER the filter).
+**Per-hop dict fields:** `amount_min: float`, `amount_max: float`, `time_delta_max_hours: float`, `amount_ratio_to_prev: float` (decreasing-chain ratio in `(0, 1.0]`; rejects edge unless `current_amount / prev_hop_amount ≤ ratio`; must be omitted on `hops[0]`), `direction: "forward"|"reverse"|"any"`, `edge_dim_predicates: {dim_name: [op, value]}` (op ∈ `<`, `<=`, `>`, `>=`, `==`), `require_anomalous_entity: bool` (when `true`, the hop's destination entity — `nodes[i+1]` of the motif — must satisfy `is_anomaly=true` in the resolved anchor companion's geometry; multiple hops AND together; raises if no anchor companion configured; `top_n` applies AFTER the filter).
 
 **Returns:** JSON object with `pattern_id`, `n_results`, `motifs` (each carrying `nodes`, `edges`, `timestamps`, `amounts`, optional `dim_values_per_hop`; when `score=true` succeeds for the motif, also `score`, `score_breakdown`, and `anchor_pattern_id` together).
 
@@ -1122,8 +1162,8 @@ Cross-pattern temporal lead-lag in population-relative coordinates. Population-a
 | `max_lag` | int | `null` | Default = `(N - 1) // 4` |
 | `fdr_alpha` | float | `0.05` | FDR level for the per-dim matrix |
 | `fdr_method` | string | `"storey"` | `"bh"` or `"storey"` |
-| `verbose` | bool | `false` | Include full `D_A × D_B` matrix in `per_dim_pairs` |
-| `entity_key` | string | `null` | Per-entity drill-down: replace population centroid by this entity's delta trajectory |
+| `verbose` | bool | `null` | `null` follows the session response format (`full` → true). Include full `D_A × D_B` matrix in `per_dim_pairs` |
+| `primary_key` | string | `null` | Per-entity drill-down: replace population centroid by this entity's delta trajectory |
 
 **Returns:** JSON-encoded `LeadLagReport` with:
 
@@ -1143,11 +1183,11 @@ Cross-pattern temporal lead-lag in population-relative coordinates. Population-a
 | `centroid_drift_series_a/b`, `volatility_series_a/b`, `correlation_by_lag` | Raw arrays for downstream agent analysis |
 | `n_epochs_used`, `n_dropped_a/b`, `cohort_size`, `cohort_dropped`, `coverage_warning` | Window + cohort diagnostic |
 
-**Use cases:** "behavior leads stress" workflows on shared-entity-space patterns (e.g. Berka `account_behavior_pattern` × `account_stress_pattern`); cross-pattern monitoring when both patterns flag drift simultaneously; per-entity timelines via `entity_key`.
+**Use cases:** "behavior leads stress" workflows on shared-entity-space patterns (e.g. Berka `account_behavior_pattern` × `account_stress_pattern`); cross-pattern monitoring when both patterns flag drift simultaneously; per-entity timelines via `primary_key`.
 
-**Limits:** Cross-pattern lead-lag is well-defined only when both patterns share entity population (same account PKs etc.). On completely disjoint entity spaces (e.g. AML accounts vs chain entities) `cohort="fixed"` raises "empty cohort — no entities present at every epoch in both patterns" and `cohort="all"` raises "tensor budget exceeded". Use `entity_key=<id>` for per-entity drill-down if a specific entity appears in both patterns' temporal histories.
+**Limits:** Cross-pattern lead-lag is well-defined only when both patterns share entity population (same account PKs etc.). On completely disjoint entity spaces (e.g. AML accounts vs chain entities) `cohort="fixed"` raises "empty cohort — no entities present at every epoch in both patterns" and `cohort="all"` raises "tensor budget exceeded". Use `primary_key=<id>` for per-entity drill-down if a specific entity appears in both patterns' temporal histories.
 
-**Errors:** Raises `ValueError` on event pattern, `pattern_a == pattern_b`, intersection below `min_epochs`, empty fixed cohort (disjoint entity populations — use `entity_key=<id>` for per-entity drill-down), `entity_key` not present in both patterns over the window, `max_lag` too large for trimmed window, or tensor budget exceeded (>1 GB for cross-population queries).
+**Errors:** Raises `ValueError` on event pattern, `pattern_a == pattern_b`, intersection below `min_epochs`, empty fixed cohort (disjoint entity populations — use `primary_key=<id>` for per-entity drill-down), `primary_key` not present in both patterns over the window, `max_lag` too large for trimmed window, or tensor budget exceeded (>1 GB for cross-population queries).
 
 ---
 
@@ -1161,7 +1201,7 @@ Finds shared alive edges between two entities in a pattern.
 | `key_b` | string | required | Second entity key |
 | `pattern_id` | string | required | Pattern |
 
-**Returns:** `common_count`, `common_relations[]` (`{line_id, point_key}`).
+**Returns:** `common_count`, `common_relations[]` (shared entity edges: `{line_id, point_key, …that entity's properties}`), `common_dim_lines[]` (shared continuous-mode dimension lines, which carry no entity key — `common_count` counts both), `edges_a` / `edges_b`, `interpretation`, and both entities' properties in one table `properties` = `{columns: [primary_key, …], rows}`.
 
 ---
 
@@ -1169,19 +1209,20 @@ Finds shared alive edges between two entities in a pattern.
 
 ### `aggregate`
 
-Aggregates event polygon data. Equivalent to SQL `SELECT metric FROM pattern GROUP BY line`.
+Aggregates event polygon data. Equivalent to SQL `SELECT metric FROM pattern GROUP BY line`. `sum` and `avg` over a floating-point column are the correctly rounded exact sum per group, so repeated calls return the same digits.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `event_pattern_id` | string | required | Event pattern to aggregate |
 | `group_by_line` | string | required (unless `group_by_property`) | Line to group by (one row per entity on this line) |
+| `group_by_relation` | string | `null` | Display name of the relation to group by when the event pattern relates to `group_by_line` more than once (e.g. `"sender"` / `"receiver"`); required in that case |
 | `group_by_line_2` | string | `null` | Second grouping line — two-dimensional aggregation |
 | `group_by_property` | string | `null` | `"line_id:column"` — group by entity property value instead of entity key |
 | `metric` | string | `"count"` | Metric to compute — see metric types below |
 | `filters` | list[dict] | `null` | Edge filters: `[{"line": "districts", "key": "Prague"}]` or `{"line": "transactions", "key": "type:PRIJEM"}`. AND semantics. |
-| `property_filters` | dict | `null` | Filter `group_by_line` entities by their own properties: `{"col": {"gt": X}}` or `{"col": "value"}`. AND semantics. |
+| `property_filters` | dict | `null` | Filter `group_by_line` entities by their own properties: `{"col": {"op": ">", "value": X}}`, `{"col": {"op": "in", "value": [...]}}` or `{"col": "value"}`. AND semantics. See [property_filters](#property_filters). |
 | `geometry_filters` | dict | `null` | Filter by geometry columns before aggregation. See [Geometry Filters](#geometry-filters). |
-| `event_filters` | dict | `null` | Filter event-line rows by column predicates. Operators: `gt`, `gte`, `lt`, `lte`, `eq`, `null`, `not_null`. See [Event Filters](#event-filters). |
+| `event_filters` | dict | `null` | Filter event-line rows by column predicates. Operators: `gt`, `gte`, `lt`, `lte`, `eq`, `in`, `null`, `not_null`. See [Event Filters](#event-filters). |
 | `time_from` | string | `null` | ISO-8601 lower bound (inclusive) on the event's timestamp column. Requires `timestamp_col` on the event pattern (set via `temporal` config in sphere.yaml). |
 | `time_to` | string | `null` | ISO-8601 upper bound (exclusive). Half-open interval `[time_from, time_to)`. Use for windowed frequency analysis. |
 | `entity_filters` | dict | `null` | Filter polygon scope by the pattern's own root entity properties. Same dict syntax as `property_filters`. Returns `entity_filtered_count` in response. |
@@ -1193,7 +1234,7 @@ Aggregates event polygon data. Equivalent to SQL `SELECT metric FROM pattern GRO
 | `collapse_by_property` | bool | `false` | Collapse `group_by_property` results to per-tier rows. Requires `group_by_property`. Incompatible with `distinct=True`. |
 | `pivot_event_field` | string | `null` | Pivot by event line column — wide output. Cannot combine with `group_by_property`. |
 | `sort` | string | `"desc"` | `"desc"` = highest first; `"asc"` = lowest first (bottom-N queries) |
-| `limit` | int | `20` | Max groups to return |
+| `top_n` | int | `20` | Max groups to return |
 | `offset` | int | `0` | Skip first N results (pagination) |
 | `sample_size` | int | `null` | Random subsample of N polygons before aggregation |
 | `sample_pct` | float | `null` | Fraction to sample (mutually exclusive with `sample_size`) |
@@ -1278,7 +1319,7 @@ Compares two entity groups by computing per-dimension Cohen's d effect sizes. An
 | `{"alias": "id", "side": "in"}` | Alias inside/outside | Cutting-plane segment |
 | `{"edge": {"line_id": "l", "key": "K"}}` | Edge-linked | All events referencing entity K on line l — preferred for entity-based splits |
 
-**Returns:** `dimensions[]` sorted by `|effect_size|` desc — each with `dim_label`, `effect_size`, `diff`. Also `dead_dimensions[]` — dim indices with near-zero variance (exclude from interpretation).
+**Returns:** `group_a_spec` (and `group_b_spec` when given), `dimensions[]` sorted by `|effect_size|` desc — each with `dim_label`, `effect_size`, `diff`. Also `dead_dimensions[]` — dim indices with near-zero variance (exclude from interpretation).
 
 **Reading results:** `diff > 0` = group_a has higher mean. `|effect_size| > 2` = large separation. `effect_size ≈ 0` on a `required=true` relation is expected (all entities share that value).
 
@@ -1296,19 +1337,22 @@ Reveals how entity groups are distributed in delta-space.
 | `include_distances` | bool | `true` | Include `inter_centroid_distances` (set `false` for quick overview, avoids O(k²) output) |
 | `top_n_distances` | int | `20` | Limit to N closest pairs (sorted ascending by distance). Set `null` to return all pairs (O(k²) — avoid for high-cardinality lines). |
 | `sample_size` | int | `null` | Subsample N entities before computing centroids |
-| `max_groups` | int | `100` | Hard cap on returned `group_centroids`. High-cardinality groupings (e.g. an identifier column with tens of thousands of unique values) otherwise blow the per-tool token budget. Truncation keeps the top groups by member count; the `structural_outlier` is always retained even when it falls outside the top-N. When truncated, the response carries `groups_truncated_warning`, `n_groups_total`, and `n_groups_returned`. |
+| `sample_pct` | float | `null` | Fraction of entities to sample (e.g. `0.1` for 10%). Converted to `sample_size` using the pattern population. Ignored when `sample_size` is also set. |
+| `max_groups` | int | `100` | Hard cap on returned `group_centroids`. High-cardinality groupings (e.g. an identifier column with tens of thousands of unique values) otherwise blow the per-tool token budget. Truncation keeps the top groups by member count; the `structural_outlier` is always retained even when it falls outside the top-N. When truncated, the response carries `groups_truncated_warning`, `n_groups_total`, and `n_groups_returned`. Distances and centroid drift are computed for the returned groups only, so the cost stays bounded however many groups the property has. |
 
 **Returns:**
 
 | Field | Description |
 |-------|-------------|
-| `global_centroid.vector` | Population center of gravity (near zero for well-calibrated mu) |
-| `group_centroids[].vector` | Mean delta of group — positive = more edges than average on that dimension |
+| `group_by` | The grouping: the property (`line:property`) when `group_by_property` is given, else the line |
+| `global_centroid.vector` | Population center of gravity (near zero for well-calibrated mu) — a `{dim: value}` map (positional when two dims share a label) |
+| `group_centroids[].vector` | Mean delta of group as a `{dim: value}` map — positive = more edges than average on that dimension |
+| `properties` | When grouping by a line's edges: the group entities' properties in one `{columns: [key, …], rows}` table (compact format keeps text columns) |
 | `group_centroids[].radius` | Mean `‖delta‖` within group — high = dispersed group |
 | `group_centroids[].distance_to_global` | How far the group sits from the population center |
-| `inter_centroid_distances` | Pairwise L2 between group centroids — low = structurally similar groups |
+| `inter_centroid_distances` | Pairwise L2 between the returned group centroids — low = structurally similar groups |
 | `structural_outlier` | Group with highest `distance_to_global` |
-| `centroid_drift` | Per group: `{predicted_delta_norm, current_delta_norm, drift_direction, reliability}` when representative entity has ≥3 slices |
+| `centroid_drift` | Per group, anchor patterns, when sampled members have ≥3 temporal slices: `{direction: {dim: value}, magnitude, reliability}` — the mean next-step change of the members' deltas. `direction` names only the dims temporal slices carry (the leading structural dims; edge-derived dims are absent); `reliability` is `medium` with ≥3 contributing members, else `low` |
 | `dead_dimensions[]` | Dim indices with near-zero variance — exclude from interpretation |
 | `groups_truncated_warning` | Present only when group cardinality exceeded `max_groups` — string explaining the truncation, paired with `n_groups_total` / `n_groups_returned`. Re-run with a lower-cardinality grouping property or raise `max_groups`. |
 
@@ -1326,8 +1370,9 @@ Discovers intrinsic geometric archetypes via k-means++ (π8). No external groupi
 | `n_clusters` | int | `5` | Number of clusters. Set to `0` for auto-detection via silhouette analysis (searches k=2–15, picks highest mean silhouette, subsamples to 5000 entities). Response includes `auto_k: true` when used. |
 | `top_n` | int | `10` | Members per cluster (hard bound: `n_clusters × top_n ≤ 100`). `capped_warning` when reduced. |
 | `sample_size` | int | `null` | Subsample N entities before clustering. Recommended for N > 100K. |
+| `summary` | bool | `null` | `null` follows the session response format (compact: numeric member-property columns omitted, listed in `omitted`). `true`: drop `centroid_delta` and the `properties` table, keep cluster scalars and member keys. `false`: everything. |
 
-**Returns:** `clusters[]` each with `centroid`, `members[]`, `size`, `dead_dimensions[]`.
+**Returns:** `clusters[]` each with `cluster_id`, `size`, `anomaly_rate`, `centroid_delta` (`{dim: value}`), `delta_norm_mean`, `delta_norm_std`, `representative_key`, `members[]` (entity keys, representative first); top-level `properties` (`{columns: ["key", …], rows: [[key, …], …]}`, one row per member with known properties) and `dead_dimensions[]`.
 
 ---
 
@@ -1342,8 +1387,8 @@ Finds entities nearest to a geometric cutting plane defined on an alias (π6).
 | `direction` | string | `"both"` | `"in"` = inside segment, `"out"` = outside, `"both"` = both sides |
 | `top_n` | int | `10` | Number of results |
 | `fdr_alpha` | float | `null` | Apply Benjamini-Hochberg FDR control at this level (0-1 exclusive). Returns only entities with `q_value <= alpha`. Each retained entity carries a `q_value` field. `null` = no FDR filtering (legacy behavior). |
-| `fdr_method` | string | `"bh"` | FDR method. `"bh"` (Benjamini-Hochberg, assumes pi0=1) or `"storey"` (Storey LSL estimator of the true null proportion; shrinks q-values by pi0 and typically recovers 10–15% more discoveries when combined with `p_value_method="chi2"` on spheres that have a genuine null mass). With the default `p_value_method="rank"`, `"storey"` collapses to `"bh"` — rank p-values are uniform by construction and carry no null signal. |
-| `p_value_method` | string | `"rank"` | p-value construction. `"rank"` (default, empirical from `delta_rank_pct` — uniform by construction) or `"chi2"` (upper-tail χ²(df) survival on `||delta||²`, the parametric null assuming `delta_i ~ N(0, 1)`). Pair with `fdr_method="storey"` for power recovery on moderate-super-anomaly patterns; on over-compressed or extreme patterns the uplift collapses to zero. |
+| `fdr_method` | string | `"bh"` | FDR method. `"bh"` (Benjamini-Hochberg, assumes pi0=1) or `"storey"` (Storey LSL estimator of the true null proportion; shrinks q-values by pi0 and typically recovers 10–15% more discoveries when combined with `p_value_method="chi2"` on spheres that have a genuine null mass). |
+| `p_value_method` | string | `"chi2"` | p-value construction. `"chi2"` is the only accepted value: upper-tail χ²(df) survival on `||delta||²`, the parametric null assuming `delta_i ~ N(0, 1)`. Rank-derived p-values are not offered — they only encode an entity's position in the result set. Pair with `fdr_method="storey"` for power recovery on moderate-super-anomaly patterns; on over-compressed or extreme patterns the uplift collapses to zero. |
 | `select` | string | `"top_norm"` | `"top_norm"` ranks by boundary distance ascending. `"diverse"` applies submodular facility location to pick the K most geometrically diverse representatives — each result includes a `representativeness` count. |
 
 **Returns per entity:** `primary_key`, `signed_distance` (>0 = inside, <0 = outside, ≈0 = at boundary), `is_in_segment`, `delta_norm`, `is_anomaly`.
@@ -1363,14 +1408,11 @@ Ranks entities by geometric connectivity — shape-vector footprint (π7).
 | `pattern_id` | string | required | Pattern |
 | `top_n` | int | `10` | Max results (hard cap: 25). `capped_warning` when reduced. |
 | `line_id_filter` | string | `null` | Restrict hub score to edges of one line. When set, `score_stats` reflects the filtered distribution. |
-| `fdr_alpha` | float | `null` | Apply Benjamini-Hochberg FDR control at this level (0-1 exclusive). Returns only entities with `q_value <= alpha`. Each retained entity carries a `q_value` field. `null` = no FDR filtering (legacy behavior). |
-| `fdr_method` | string | `"bh"` | FDR method. `"bh"` (Benjamini-Hochberg, assumes pi0=1) or `"storey"` (Storey LSL estimator of the true null proportion; shrinks q-values by pi0 and typically recovers 10–15% more discoveries when combined with `p_value_method="chi2"` on spheres that have a genuine null mass). With the default `p_value_method="rank"`, `"storey"` collapses to `"bh"` — rank p-values are uniform by construction and carry no null signal. |
-| `p_value_method` | string | `"rank"` | p-value construction. `"rank"` (default, empirical from `delta_rank_pct` — uniform by construction) or `"chi2"` (upper-tail χ²(df) survival on `||delta||²`, the parametric null assuming `delta_i ~ N(0, 1)`). Pair with `fdr_method="storey"` for power recovery on moderate-super-anomaly patterns; on over-compressed or extreme patterns the uplift collapses to zero. |
 | `select` | string | `"top_norm"` | `"top_norm"` ranks by hub score descending. `"diverse"` applies submodular facility location to pick the K most geometrically diverse representatives — each result includes a `representativeness` count. |
 
-**Returns per entity:** `key`, `properties`, `alive_edges`, `hub_score`, `hub_score_pct`.
+**Returns per entity:** `key`, `alive_edges` (binary mode), `hub_score`, `hub_score_pct`; entity properties in the top-level `properties` table keyed by `key`. On binary patterns `alive_edges` is the count of alive edges. On continuous patterns `hub_score` is the capacity-weighted sum of the clipped edge shapes and `alive_edges` is not returned (there is no edge count).
 
-**Top-level fields:** `mode` (`"continuous"` or `"binary"`), `max_hub_score` (null in binary mode), `score_stats` (`mean, std, p25–p95, max, total_entities`).
+**Top-level fields:** `mode` (`"continuous"` or `"binary"`), `line_id_filter` (only when set), `max_hub_score` (absent in binary mode), `score_stats` (`mean, std, p25–p95, max, total_entities`).
 
 `hub_score_pct` = `hub_score / max_hub_score × 100` — relative to global theoretical max regardless of `line_id_filter`. Use `score_stats.max` to benchmark within a filtered scope.
 
@@ -1387,26 +1429,9 @@ Shows hub score evolution reconstructed from temporal slices.
 | `primary_key` | string | required | Entity key |
 | `pattern_id` | string | required | Anchor pattern with `edge_max` (binary mode returns empty history with explanation `note`) |
 
-**Returns:** `history[]` (`{timestamp, hub_score, alive_edges_est, changed_line_id, deformation_type, delta_norm}`), `base_state` (`{hub_score, alive_edges_est}`).
+**Returns:** `history[]` (`{timestamp, hub_score, changed_line_id, deformation_type, delta_norm}`), `base_state` (`{hub_score}`). The continuous hub score is the capacity-weighted sum of the clipped edge shapes, not an edge count, so no edge-count estimate is returned.
 
 `base_state.hub_score` is consistent with `find_hubs.hub_score` for the same entity.
-
----
-
-### `find_neighborhood`
-
-BFS traversal through polygon edges, returning entities within N hops with anomaly enrichment.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `primary_key` | string | required | Center entity |
-| `pattern_id` | string | required | Pattern (binary FK mode only — `point_key != ""`) |
-| `max_hops` | int | `2` | BFS depth limit |
-| `max_entities` | int | `100` | Cap on returned neighbors |
-
-**Returns:** `center`, `entities[]` (`{key, hop, is_anomaly, delta_rank_pct}`), `summary` (`{total, anomalous, max_hop_reached, capped}`).
-
-**Limitation:** Only works for binary FK mode patterns. Continuous-mode patterns (edge_max > 0) have `point_key=""` — use `find_counterparties` instead.
 
 ---
 
@@ -1425,22 +1450,24 @@ Finds counterparty entities via an event line (outgoing targets and incoming sou
 | `use_edge_table` | bool | `true` | Set `false` to force full points scan instead of edge table |
 | `timestamp_cutoff` | float | `null` | Unix seconds. Edge-table fast path only — consider only edges with `timestamp <= cutoff`. As-of reconstruction. **Raises** `GDSNavigationError` when supplied with the points-scan fallback (no `pattern_id` or `use_edge_table=False`). |
 
-**Returns:** `outgoing[]` (entity sends TO), `incoming[]` (entity receives FROM), each with `key`, `tx_count`, and optionally `is_anomaly`, `delta_rank_pct`. Edge table fast path adds `amount_sum`, `amount_max` per entry. Plus `summary` (`{total_outgoing, anomalous_outgoing, ...}`).
+**Returns:** `outgoing[]` (entity sends TO), `incoming[]` (entity receives FROM), each with `key`, `tx_count`, and optionally `is_anomaly`, `delta_rank_pct`. Edge table fast path adds `amount_sum`, `amount_max` per entry. Plus `summary` (`{total_outgoing, anomalous_outgoing, ...}`). Each direction is sorted by `tx_count` descending; ties are broken by `amount_sum` descending (edge table fast path) and then by `key` ascending, so a `top_n` cut inside a tie is deterministic.
 
 ---
 
 ### `extract_chains`
 
-Extracts chain patterns from an event line.
+Extracts chain patterns from an event line. With `seed_nodes=[key]` the traversal starts from specific entities and uses every event (exact, no sampling). Without `seed_nodes`, start nodes are sampled for population-wide extraction. No edge table required. `from_col`/`to_col`/`time_col`/`amount_col` default to the event pattern's edge-table column configuration, so passing just `event_pattern_id` is sufficient for most event patterns.
+
+The `chain_id` values it returns (`CHAIN-000000`, …) number the chains of this one call only; they change with `seed_nodes`, `sample_size`, `max_chains` and the time window, and do not name the chains of the sphere's chain line. Tools that take a `chain_id` (`classify_chain_typology`, `extend_chain`, `anomaly_propagation_in_chain`, `investigate_chain`) expect ids from the chain line — use `find_chains_for_entity` or `find_chains_with_coherent_anomaly` to get them.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `event_pattern_id` | string | required | Pattern ID or line ID containing the event data |
-| `from_col` | string | required | Column naming the sender entity key |
-| `to_col` | string | required | Column naming the receiver entity key |
-| `time_col` | string | `null` | Timestamp column — when set, chains are filtered by `time_window_hours` |
+| `from_col` | string | `null` | Column naming the sender entity key. Defaults to the edge-table `from_col` configured for the pattern. |
+| `to_col` | string | `null` | Column naming the receiver entity key. Defaults to the edge-table `to_col` configured for the pattern. |
+| `time_col` | string | `null` | Timestamp column. Defaults to the edge-table `timestamp_col` (or the pattern's timestamp column). When resolved, chains are filtered by `time_window_hours`. |
 | `category_col` | string | `null` | Categorical column tracked per hop (e.g. `"currency"`) |
-| `amount_col` | string | `null` | Numeric column tracked per hop (e.g. `"amount"`) |
+| `amount_col` | string | `null` | Numeric column tracked per hop (e.g. `"amount"`). Defaults to the edge-table `amount_col` configured for the pattern. |
 | `time_window_hours` | int | `168` | Max hours between hops to be considered part of the same chain |
 | `max_hops` | int | `15` | Maximum chain length (hops) |
 | `min_hops` | int | `2` | Minimum chain length — chains shorter than this are discarded |
@@ -1448,11 +1475,11 @@ Extracts chain patterns from an event line.
 | `sort_by` | string | `"hop_count"` | Sort criterion: `"hop_count"` or `"amount_decay"` |
 | `sample_size` | int | `50000` | Max event rows to use for chain extraction. Pass `null` for no limit (risk of OOM on >5M events). |
 | `max_chains` | int | `100000` | Global cap on chains produced by DFS — prevents hang/OOM on dense graphs |
-| `seed_nodes` | list[string] | `null` | Restrict BFS starting nodes to this list (targeted extraction from specific entities) |
-| `bidirectional` | bool | `false` | When true, each edge A→B also creates reverse edge B→A (for undirected relationship analysis) |
+| `seed_nodes` | list[string] | `null` | Restrict starting nodes to this list. When set, every event is used (no subsampling) — chains from those entities are exact. When `null`, start nodes are sampled from the full population. |
+| `bidirectional` | bool | `false` | When true, each edge A→B also creates reverse edge B→A (for undirected relationship analysis). The sphere's built chain line uses the YAML `chain_lines[].bidirectional`, which defaults to `true`, so its chains can differ from this tool's default; with `true` a hop may run against the transaction, so `is_cyclic` and amount-decay features no longer describe fund flow |
 | `anchor_pattern_id` | string | `null` | Anchor pattern over the entity line referenced by `from_col`/`to_col`. When set, each chain carries a per-hop `edge_potentials` list — Euclidean distance between consecutive entities' polygon delta vectors against that pattern. When null, `edge_potentials` is a list of nulls per hop. |
 
-**Returns:** `chains[]` with `{hop_count, is_cyclic, keys, n_distinct_categories, amount_decay, edge_potentials}`, `total_chains`, `returned`, `summary` (`{total_chains, cyclic_chains, hop_count_mean, hop_count_max}`). `edge_potentials` length equals `len(keys) - 1`; each element is `null` on missing polygon, mismatched delta shapes, or non-finite distance (NaN / inf strict-JSON sanitised). Bad input is reported as an `{"error": ...}` body (both an unrecognised `event_pattern_id` and a missing `from_col`/`to_col`), not a thrown protocol error.
+**Returns:** `chains[]` with `{hop_count, is_cyclic, keys, n_distinct_categories, amount_decay, edge_potentials}`, `total_chains`, `returned`, `summary` (`{total_chains, cyclic_chains, hop_count_mean, hop_count_max}`). `edge_potentials` length equals `len(keys) - 1`; each element is `null` on missing polygon, mismatched delta shapes, or non-finite distance (NaN / inf strict-JSON sanitised). Bad input is reported as an `{"error": ...}` body (both an unrecognised `event_pattern_id` and a missing `from_col`/`to_col`), not a thrown protocol error. An unknown `anchor_pattern_id` is reported the same way when any chain is found.
 
 ---
 
@@ -1464,6 +1491,7 @@ Finds which chains involve a specific entity — reverse lookup via chain keys.
 |-----------|------|---------|-------------|
 | `primary_key` | string | required | Entity key |
 | `pattern_id` | string | required | Chain pattern (entity line must have `chain_keys` column) |
+| `top_n` | int | `20` | Maximum number of chains to return |
 
 **Returns:** `chains[]` (`{chain_id, is_anomaly, delta_norm, delta_rank_pct}`), `summary` (`{total, anomalous}`).
 
@@ -1477,8 +1505,8 @@ Find chains where ≥`min_hops` strictly consecutive entity-anchor positions are
 |-----------|------|---------|-------------|
 | `pattern_id` | string | required | Chain anchor pattern id (built from `chain_lines:` block) |
 | `anchor_pattern_id` | string | required | Entity anchor pattern whose primary_keys match the chain hops (e.g. an account pattern when chains hop through accounts) |
-| `min_hops` | int | `3` | Strict consecutive run length; must be ≥ 2 |
-| `max_results` | int | `100` | Cap on returned runs |
+| `min_hops` | int | `3` | Strict consecutive run length counted in entities, not edges (`3` = three consecutive anomalous entities = two hops); must be ≥ 2 |
+| `top_n` | int | `100` | Cap on returned runs |
 
 **Returns:** `chains[]` (`{chain_id, run_start_idx, run_length, top_dim, run_keys, max_delta_norm}`), `diagnostics` (`{n_chains_total, n_anomaly_entities, elapsed_ms}`). Sorting: `(run_length DESC, max_delta_norm DESC)`.
 
@@ -1520,7 +1548,7 @@ Five-dimensional typology classification for a single chain. Wraps `anomaly_prop
 
 ### `extend_chain`
 
-Suggest candidate extension entities at the boundary of a chain's anomalous run. Forward looks at entities that follow the run-end key in OTHER chains in the same chain pattern (via the chain reverse index); backward looks at predecessors. Use after the inspector to find "where to look next" in the surrounding entity network.
+Suggest candidate extension entities at the boundary of a chain's anomalous run. Forward looks at entities that follow the run-end key in OTHER chains in the same chain pattern (via the chain reverse index); backward looks at predecessors. The chain's own next / previous hop is never a candidate (it is already in the trace); another member of the chain can be, when a ring closes. Use after the inspector to find "where to look next" in the surrounding entity network.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -1528,7 +1556,7 @@ Suggest candidate extension entities at the boundary of a chain's anomalous run.
 | `pattern_id` | string | required | Chain anchor pattern id |
 | `anchor_pattern_id` | string | required | Entity anchor pattern |
 | `direction` | string | `"forward"` | `"forward"` (extend past run-end) or `"backward"` (extend before run-start) |
-| `max_results` | int | `20` | Cap on returned candidates |
+| `top_n` | int | `20` | Cap on returned candidates |
 
 **Returns:** `boundary_key`, `boundary_position` (`run-start` / `run-end`), `candidates[]` (`{entity_key, is_anomaly, delta_norm, delta_rank_pct, n_source_chains, source_chain_ids}`), `summary` (`{n_candidates, n_anomalous_candidates, n_unique_keys}`). Sorting: `(is_anomaly DESC, delta_norm DESC, n_source_chains DESC)`.
 
@@ -1548,9 +1576,9 @@ Coordinated-witness diagnosis for the members of one chain. Resolves the chain's
 | `min_jaccard` | float | `0.5` | Threshold for `coordinated=True` — applied to `mean_pairwise_witness_jaccard` |
 | `top_k_witness` | int | `5` | Per-member top-k witness dims to intersect |
 
-**Returns:** `chain_id`, `chain_pattern`, `member_pattern`, `n_members`, `n_members_explained`, `n_members_skipped`, `intersected_witness_dims` (alphabetical), `union_witness_dims` (alphabetical), `mean_pairwise_witness_jaccard` (null when every pair has empty union), `coordinated` (bool), `interpretation` (one-line string), `per_member_top_dims` (sorted by `primary_key`).
+**Returns:** `chain_id`, `chain_pattern`, `member_pattern`, `n_members`, `n_members_explained`, `n_members_without_witness` (explained members with no witness dims, left out of the agreement score), `n_members_skipped`, `intersected_witness_dims` (alphabetical), `union_witness_dims` (alphabetical), `mean_pairwise_witness_jaccard` (null when every pair has empty union), `coordinated` (bool), `interpretation` (one-line string), `per_member_top_dims` (sorted by `primary_key`).
 
-**Notes:** Pure composition over `explain_anomaly` — no new engine math. Members not present in `member_pattern`'s geometry are counted in `n_members_skipped` without aborting; jaccard is computed over successfully explained members. Returns `{"error": ..., "chain_id": ...}` JSON when fewer than two members are explainable, when `chain_pattern` is not anchor type, or when the `chain_keys` column is missing. Non-finite floats sanitised to `null` on the wire.
+**Notes:** Pure composition over `explain_anomaly` — no new engine math. Members not present in `member_pattern`'s geometry are counted in `n_members_skipped` without aborting; jaccard is computed over explained members that carry witness dims. Returns `{"error": ..., "chain_id": ...}` JSON when fewer than two members are explainable, when `chain_pattern` is not anchor type, or when the `chain_keys` column is missing. Non-finite floats sanitised to `null` on the wire.
 
 ---
 
@@ -1584,7 +1612,8 @@ Pre-investigation triage diagnostic for a chain pattern. Use as the FIRST call w
 
 **Returns:**
 - `n_chains_total` — total chains in the chain pattern
-- `n_chains_with_coherent_anomaly_run` — chains with a coherent run >= `min_hops`
+- `n_chains_with_coherent_anomaly_run` — distinct chains with a coherent run >= `min_hops`
+- `n_coherent_runs` — coherent runs found (a chain can hold more than one, so this can exceed the chain count)
 - `coherent_run_rate` — ratio of coherent chains to total
 - `n_chains_with_shape_anomaly` — chains flagged anomalous on chain-level shape features (i.e. `find_anomalies(chain_pattern)` set)
 - `shape_anomaly_rate` — ratio of shape-anomalous chains to total
@@ -1599,7 +1628,7 @@ Pre-investigation triage diagnostic for a chain pattern. Use as the FIRST call w
 - `coherent_run_rate > 0.05` → expect a productive R9 loop; proceed.
 - `recommended_min_hops > min_hops` → re-run `find_chains_with_coherent_anomaly` at the recommended threshold to focus on the strongest cases.
 
-**Notes:** Cost is one `find_chains_with_coherent_anomaly` sweep + a chain geometry scan — roughly the same as a single coherent-anomaly call at `max_results=10000`. Surfaces aggregates that the agent would otherwise compute manually after running the four R9 primitives separately.
+**Notes:** Cost is one `find_chains_with_coherent_anomaly` sweep + a chain geometry scan — roughly the same as a single coherent-anomaly call at `top_n=10000`. Surfaces aggregates that the agent would otherwise compute manually after running the four R9 primitives separately.
 
 ---
 
@@ -1612,7 +1641,7 @@ One-shot orchestrator for the full R9 investigative loop on a single chain. Runs
 | `chain_id` | string | required | Primary key of the chain in the chain anchor pattern |
 | `pattern_id` | string | required | Chain anchor pattern id (built from `chain_lines:`) |
 | `anchor_pattern_id` | string | required | Entity anchor pattern (e.g. `account_pattern`) |
-| `extension_max_results` | int | `20` | Cap on each extension's candidate list |
+| `extension_top_n` | int | `20` | Cap on each extension's candidate list |
 
 **Returns:**
 - `trace` — `{ok, data}` wrapper around `anomaly_propagation_in_chain` output (per-hop progression + run summary)
@@ -1620,7 +1649,7 @@ One-shot orchestrator for the full R9 investigative loop on a single chain. Runs
 - `shape_anomaly` — `{ok, data}` with `{chain_id, is_anomaly, delta_norm, delta_rank_pct}` for the chain in the chain pattern's geometry
 - `extension_forward` — `{ok, data}` wrapper around `extend_chain(direction='forward')`
 - `extension_backward` — `{ok, data}` wrapper around `extend_chain(direction='backward')`
-- `summary` — `{investigation_strength, recommended_action, score, rationale}`. Strength buckets: `score >= 3` → `strong` → `recommended_action="escalate to SAR"`; `score == 2` → `moderate` → `continue investigation`; `score 0-1` → `weak` → `false-positive candidate`. The four 0/1 chain-composition signals: coherent run length >= 3, typology position not "no-run", forward extension surfaces an anomalous candidate, backward extension surfaces an anomalous candidate. `chain_shape_anomaly` is intentionally NOT in the score — R9's value proposition is catching what `find_anomalies(<chain_pattern>)` misses, so composition-anomalous-but-shape-normal is the textbook R9 sweet spot; the shape block stays in the report as evidence and surfaces in the rationale when it agrees, but does not drive the verdict. Rationale concatenates the firing signals as a single paragraph for paste into investigator notes.
+- `summary` — `{investigation_strength, recommended_action, score, rationale}`. Strength buckets: `score >= 3` → `strong` → `recommended_action="escalate to SAR"`; `score == 2` → `moderate` → `continue investigation`; `score 0-1` → `weak` → `false-positive candidate`. When scored steps failed and their missing points could change the bucket, strength is `inconclusive` (`recommended_action="resolve the failed steps before deciding"`) and `failed_steps` names them. The four 0/1 chain-composition signals: coherent run length >= 3, typology position not "no-run", forward extension surfaces an anomalous candidate, backward extension surfaces an anomalous candidate. `chain_shape_anomaly` is intentionally NOT in the score — R9's value proposition is catching what `find_anomalies(<chain_pattern>)` misses, so composition-anomalous-but-shape-normal is the textbook R9 sweet spot; the shape block stays in the report as evidence and surfaces in the rationale when it agrees, but does not drive the verdict. Rationale concatenates the firing signals as a single paragraph for paste into investigator notes.
 - `elapsed_ms`
 
 **Per-step failure handling:** each per-step block is wrapped in `{ok: True, data: ...}` or `{ok: False, error: "<ExceptionType>: <message>"}` so a partial failure (e.g. extension lookup raises because the chain has no anomalous run, or the chain_id is unknown to the geometry) does not abort the whole report. Summary derivation skips `ok=False` blocks.
@@ -1642,9 +1671,9 @@ Chain-side investigation orchestrator — chain-side mirror of `investigate_enti
 | `include_drift` | bool | `true` | Run `chain_drift_trajectory` |
 | `include_witness` | bool | `true` | Run `chain_witness_intersection` |
 | `include_sar_rationale` | bool | `false` | Run `generate_sar_rationale` (expensive — re-runs the R9 loop server-side a second time) |
-| `top_n_extensions` | int | `3` | `max_results` per direction for `extend_chain` |
+| `top_n_extensions` | int | `3` | `top_n` per direction for `extend_chain` |
 
-**Returns:** one `{ok, data | error}` block per step (`{ok: True, skipped: True}` when gated off):
+**Returns:** one `{ok, data | error}` block per step (`{ok: True, skipped: True}` when gated off; an error text repeated across steps appears once in a top-level `errors` map `{ref: text}` and the step blocks carry `error_ref`):
 - `find_chains_with_coherent_anomaly` — coherence-set membership check (informational)
 - `chain_witness_intersection` — coordinated-anomaly mechanism (gated on `include_witness`)
 - `chain_drift_trajectory` — per-position temporal regime (gated on `include_drift`)
@@ -1654,8 +1683,9 @@ Chain-side investigation orchestrator — chain-side mirror of `investigate_enti
 - `generate_sar_rationale` — narrative draft (gated on `include_sar_rationale`)
 
 Plus a `summary` block:
-- `investigation_strength` — `strong` / `moderate` / `weak`
-- `recommended_action` — `escalate to SAR` / `continue investigation` / `false-positive candidate`
+- `investigation_strength` — `strong` / `moderate` / `weak`, or `inconclusive` when steps that errored could change the bucket
+- `recommended_action` — `escalate to SAR` / `continue investigation` / `false-positive candidate` / `resolve the failed steps before deciding`
+- `failed_steps` — names of the steps that errored (present only when any did)
 - `score` — investigation score `[0, 100]`; `strong` at `>= 70`, `moderate` at `>= 40`, `weak` below 40
 - `rationale` — concatenated string listing the firing signals
 - `chain_mean_signed_confidence` — mean of per-member `signed_confidence_score` across the chain's deduped members (null when anchor lacks `label_aware_calibration` OR when no members resolved)
@@ -1695,7 +1725,7 @@ Template-based composition (no LLM call) of a SAR-ready narrative from R9 eviden
 
 ### `find_geometric_path`
 
-Find paths between two entities scored by geometric coherence. Uses bidirectional BFS on polygon edges, then ranks discovered paths by a configurable scoring function.
+Find paths between two entities scored by geometric coherence. Uses bidirectional BFS on polygon edges, then ranks discovered paths by a configurable scoring function. The search ignores edge direction, so a path may follow a transaction against its flow; the same inputs return the same paths on every call.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -1709,26 +1739,6 @@ Find paths between two entities scored by geometric coherence. Uses bidirectiona
 **Returns:** `paths[]` — each with `keys[]`, `hop_count`, `geometric_score`. Higher `geometric_score` = more coherent path.
 
 **Notes:** Requires a pattern with an edge table. Raises an error if the pattern has no edges.
-
----
-
-### `discover_chains`
-
-Discover entity chains from a starting point via runtime temporal BFS. Unlike `extract_chains` (which scans the full event line), this tool starts from a specific entity and traverses the edge table at query time — no pre-built chain lines required.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `primary_key` | string | required | Starting entity key |
-| `pattern_id` | string | required | Pattern with edge table |
-| `time_window_hours` | int | `168` | Max hours between consecutive hops |
-| `max_hops` | int | `10` | Maximum chain length |
-| `min_hops` | int | `2` | Minimum chain length — shorter chains discarded |
-| `max_chains` | int | `20` | Max chains to return |
-| `direction` | string | `"forward"` | Traversal direction: `"forward"`, `"backward"`, `"both"` |
-
-**Returns:** `chains[]` (each `{chain_id, keys, hop_count, is_cyclic, time_span_hours, total_amount, geometric_score}`, sorted by `geometric_score` desc) plus a `summary` (`{total, cyclic, avg_hops}`). `is_cyclic` is `true` when the chain returns to the originating entity (A→…→A round trip — a money-laundering typology); `summary.cyclic` counts those.
-
-**Notes:** Does NOT require pre-built chain lines. Operates directly on the pattern's edge table via temporal BFS.
 
 ---
 
@@ -1784,7 +1794,7 @@ Contagion score for multiple entities in one call.
 | `max_keys` | int | `200` | Max entities to process |
 | `timestamp_cutoff` | float | `null` | Unix seconds. Forwarded to each per-entity `contagion_score`. |
 
-**Returns:** Per-entity `results[]` plus `summary` with `mean_score`, `max_score`, `high_contagion_count`.
+**Returns:** `pattern_id`, per-entity `results[]` (without a repeated `pattern_id`) plus `summary` with `mean_score`, `max_score`, `high_contagion_count`.
 
 ---
 
@@ -1843,6 +1853,7 @@ Find entities bridging geometric clusters via edge table. Runs π8 clustering th
 | `pattern_id` | string | required | Event pattern with edge table |
 | `n_clusters` | int | `5` | Number of geometric clusters |
 | `top_n_bridges` | int | `10` | Max bridge pairs to return |
+| `sample_size` | int | `null` | Cap k-means input. Set to 50000 for faster results on large populations. `null` = full population (accurate but slower on 500K+ entities). |
 
 **Returns:** `clusters[]` (with `cluster_id`, `size`, `anomaly_rate`), `bridges[]` (with `cluster_a`, `cluster_b`, `edge_count`, `bridge_entities[]`), `summary`.
 
@@ -1872,6 +1883,7 @@ Geometric anomaly score for a single edge. Formula: `||δ_from − δ_to|| × (1
 | `from_key` | string | required | Source entity primary key |
 | `to_key` | string | required | Destination entity primary key |
 | `pattern_id` | string | required | Anchor pattern whose geometry provides delta vectors |
+| `include_ranking` | bool | `false` | When `true`, also compute this edge's population percentile (`score_rank_pct`, `is_high_potential`) via full-population edge ranking. Much slower on large graphs. |
 
 **Returns:** `{score, delta_distance, pair_tx_count, effective_weight, interpretation}`. High score = distant endpoints + rare pair (classic AML layering signature).
 
@@ -1891,17 +1903,17 @@ Rank all edges in the pattern's companion event table by geometric edge potentia
 | `to_key` | string | `null` | Scope to edges ending at this entity |
 | `min_pair_count` | int | `1` | Filter out pairs appearing fewer times than this |
 
-**Returns:** list of `{from_key, to_key, score, delta_distance, pair_tx_count}`.
+**Returns:** `results[]` of `{from_key, to_key, score, delta_distance, pair_tx_count, score_rank_pct_global, is_high_potential}` (plus `score_rank_pct_in_filter` when `from_key` / `to_key` / `min_pair_count` filter the ranking).
 
 ---
 
 ### `score_motif`
 
-Score the best structural motif seeded at `entity_key`. Composes `edge_potential` across the edges of the motif via product — a motif of rare edges is rare. Closed vocabulary of eight motif types covering the structural atoms of 25 documented AML typologies.
+Score the best structural motif seeded at `primary_key`. Composes `edge_potential` across the edges of the motif via product — a motif of rare edges is rare. Closed vocabulary of eight motif types covering the structural atoms of 25 documented AML typologies.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `entity_key` | string | required | Seed entity primary key (source for fan_out/chain_k/structuring, sink for fan_in, pivot for cycle_2/cycle_3, source/sink for split_recombine depending on `direction`, source-or-sink for bipartite_burst) |
+| `primary_key` | string | required | Seed entity primary key (source for fan_out/chain_k/structuring, sink for fan_in, pivot for cycle_2/cycle_3, source/sink for split_recombine depending on `direction`, source-or-sink for bipartite_burst) |
 | `motif_type` | string | required | One of `fan_out`, `fan_in`, `cycle_2`, `cycle_3`, `structuring`, `chain_k`, `split_recombine`, `bipartite_burst` |
 | `pattern_id` | string | required | **Anchor pattern** whose geometry provides delta vectors. Passing the event pattern (e.g. `tx_pattern`) raises `GDSNavigationError` pointing at the anchor companion — the geometry's `primary_key` column on event patterns carries event keys, but the adjacency index is keyed on entities, so a direct event-pattern call would silently match zero seeds. |
 | `time_window_hours` | int | `null` | Override default: fan_out=168h, fan_in=168h, cycle_2=24h, cycle_3=72h, structuring=1h, chain_k=168h, split_recombine=168h, bipartite_burst=24h |
@@ -1995,7 +2007,7 @@ Rank all motifs of a given type across the pattern's companion event table, high
 
 **Latency note:** first call per `(pattern, motif_type, window, amt1_min, amt2_max, k, direction, min_m)` is cold — enumerates motifs across all seeds in the pattern. Cold call can take 30–90s on patterns with >500k entities. Subsequent calls hit an LRU cache (cap 8). `cycle_3` is deduplicated by canonical ring; `structuring` and `chain_k` are deduplicated by canonical path tuple; `split_recombine` is deduplicated by `(direction, source, sink, sorted intermediaries)`; `bipartite_burst` is deduplicated by `(frozenset sources, frozenset sinks)`. `chain_k` cost scales with out-degree and `k`; prefer `k=3` for fast scans and `k≥6` only for targeted deep-layering investigations.
 
-**Returns:** list of motif instances with `score`, `log_score`, `score_clamped`, `score_rank_pct`, `is_high_potential` (p95 threshold within motif_type), motif-specific fields (see `score_motif` above for the per-type field list, including `frontier_truncated` on `chain_k`). The same large-motif truncation rules from `score_motif` apply — motifs with > 50 edges carry top-50 `edges` / `breakdown` plus `breakdown_summary` population stats; the envelope `count` (number of motif instances) is unaffected.
+**Returns:** `motif_type` (once, not per instance) and `results[]` of motif instances with `score`, `log_score`, `score_clamped`, `score_rank_pct`, `is_high_potential` (p95 threshold within motif_type), motif-specific fields (see `score_motif` above for the per-type field list, including `frontier_truncated` on `chain_k`). The same large-motif truncation rules from `score_motif` apply — motifs with > 50 edges carry top-50 `edges` / `breakdown` plus `breakdown_summary` population stats; the envelope `count` (number of motif instances) is unaffected.
 
 ---
 
@@ -2070,7 +2082,7 @@ Per-pattern-version sidecar Lance cache at `_gds_meta/topology_cache/anomalies/{
 
 ### `investigate_entity`
 
-One-call entity investigation orchestrator — entity-side analog of `investigate_chain` (0.6.7). Chains the existing entity-side primitives (polygon shape, `explain_anomaly`, `find_witness_cohort`, `find_chains_for_entity`, `trace_root_cause`, `find_graph_geometry_tension`) into one aggregated report. Each step is wrapped in a safe-call envelope so a partial failure on one primitive does not abort the whole investigation — the caller sees `steps_status[step].ok = False` with the error string instead.
+One-call entity investigation orchestrator — entity-side analog of `investigate_chain`. Chains the existing entity-side primitives (polygon shape, `explain_anomaly`, `find_witness_cohort`, `find_chains_for_entity`, `trace_root_cause`, `find_graph_geometry_tension`) into one aggregated report. Each step is wrapped in a safe-call envelope so a partial failure on one primitive does not abort the whole investigation — the caller sees `steps_status[step].ok = False` with the error string instead.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -2085,12 +2097,11 @@ One-call entity investigation orchestrator — entity-side analog of `investigat
 | `include_root_cause` | bool | `true` | `trace_root_cause` DAG |
 | `include_graph_geometry_tension` | bool | `true` | `find_graph_geometry_tension` 2×2 cross-tab |
 | `include_per_edge_counterfactual` | bool | `false` | Opt-in for the per-edge counterfactual block. Wires through to `simulate_edge_removal` (see below). |
-| `include_reliability_flags` | bool | `true` | Dedicated `reliability_flags` step independent of `include_explain` — callers who skip explain still get the dominant-dim + low-confidence triage metadata. Builds one polygon; set false to skip when running the orchestrator in a tight loop. |
 | `top_n_witnesses` | int | `5` | Witness cohort cap |
 | `top_n_chains` | int | `3` | Chain membership cap |
 | `top_n_edges` | int | `5` | Per-edge counterfactual cap (when included) |
 
-**Returns:** structured dict with one block per included step plus `primary_key`, `pattern_id`, `line_id`, `steps_status` (mapping step name to `{ok, error}` — partial failures surface here without aborting the call), and `elapsed_ms`. When `include_reliability_flags=true`, the response carries a top-level `reliability_flags` block matching the dict surfaced by `find_anomalies` polygons; the `explain_anomaly` block (when included) carries the same flags under its own `reliability_flags` field — both views resolve to the same values for the same polygon.
+**Returns:** structured dict with one block per included step plus `primary_key`, `pattern_id`, `line_id`, `steps_status` (mapping step name to `{ok, error}` — partial failures surface here without aborting the call), and `elapsed_ms`. When `include_reliability_flags=true`, the response carries a top-level `reliability_flags` block matching the dict surfaced by `find_anomalies` polygons; the `explain_anomaly` block (when included) does not repeat those flags, the entity's `primary_key` / `pattern_id`, or dimensions with a zero share.
 
 ---
 
@@ -2105,9 +2116,8 @@ Per-edge counterfactual for one entity. For each candidate edge in the entity's 
 | `line_id` | string | required | Line whose adjacency carries the entity's candidate edges |
 | `top_n` | int | `5` | Cap on returned edges (sorted by `|drop_pct|` desc) |
 | `edge_ids` | list[string] / null | `null` | If not null, restrict simulation to candidates whose `event_key` is in this list |
-| `max_edges_loaded` | int | `2000` | Hard cap on candidate edges before engine evaluation. Hub entities with very large adjacencies are truncated (adjacency order) to keep per-call latency bounded; lower this to trade coverage for speed, raise it when exhaustive coverage on a specific hub is required and you can budget the wall clock. |
 
-**Returns:** an envelope `{edges, edges_total, edges_evaluated, truncated}`. `edges` is the ranked list sorted by `|drop_pct|` descending, tie-broken ascending by `min_pvalue` — each entry: `edge_id`, `edge_partner_key`, `edge_direction`, `edge_line_id`, `delta_norm_before`, `delta_norm_after`, `drop_pct`, `dominant_dim_idx`, `dominant_dim_label`, `dimensions_simulated`, `dimensions_skipped`, `source_value_pvalues` (per-source-dim upper-tail p-value vs population ECDF), `min_pvalue` (most extreme dim for the edge), `dominant_significance_dim`. `edges_total` is the entity's full candidate-edge count; `edges_evaluated` is how many were scored after the `max_edges_loaded` cap; `truncated` is `true` when `edges_evaluated < edges_total` — the candidate set was capped in adjacency order BEFORE ranking, so the ranking reflects only the evaluated subset, not the full edge set. (Mirrors the `candidates_truncated` signal on `select_minimal_joint_edge_removal`.)
+**Returns:** an envelope `{edges, edges_total, edges_evaluated, truncated}`. `edges` is the ranked list sorted by `|drop_pct|` descending, tie-broken ascending by `min_pvalue` — each entry: `edge_id`, `edge_partner_key`, `edge_direction`, `edge_line_id`, `delta_norm_before`, `delta_norm_after`, `drop_pct`, `dominant_dim_idx`, `dominant_dim_label`, `dimensions_simulated`, `dimensions_skipped`, `source_value_pvalues` (per-source-dim upper-tail p-value vs population ECDF), `min_pvalue` (most extreme dim for the edge), `dominant_significance_dim`. `edge_line_id` and `dimensions_simulated` move to the envelope when every edge shares them. `edges_total` is the entity's full candidate-edge count; `edges_evaluated` is how many were scored after the `max_edges_loaded` cap; `truncated` is `true` when `edges_evaluated < edges_total` — the candidate set was capped in adjacency order BEFORE ranking, so the ranking reflects only the evaluated subset, not the full edge set. (Mirrors the `candidates_truncated` signal on `select_minimal_joint_edge_removal`.)
 
 **Significance discipline:** the per-edge p-values resolve the within-tied-`drop_pct` flat-ranking degeneracy that affects high-volume entities. When `drop_pct` is uniform across an entity's edges (the robust-tail regime — `p95` with duplicates), `min_pvalue` still discriminates because edges differ in their source values; the tie-break carries the most extreme source-value edge to the top of the returned slice.
 
@@ -2172,7 +2182,7 @@ Resolves the high-degree-entity flat-ranking surface: when an entity has many ed
 | `top_n` | int | `5` | Cap on returned counterparties (sorted by `sum_abs_drop_pct` desc) |
 | `edge_top_n` | int / null | `500` | Internal cap on per-edge work pre-rollup. Bounds per-call latency on hub entities whose full adjacency would otherwise push the call past several minutes; raise it (or set to `null` for the legacy exhaustive behaviour) when exhaustive coverage on a specific hub is required and you can budget the wall clock. |
 
-**Returns:** list sorted by `sum_abs_drop_pct` descending, each entry with `partner_key`, `n_edges`, `sum_drop_pct`, `sum_abs_drop_pct`, `max_abs_drop_pct`, `dominant_dim_label`, `edge_ids`.
+**Returns:** `results[]` sorted by `sum_abs_drop_pct` descending, each entry with `partner_key`, `n_edges`, `sum_drop_pct`, `sum_abs_drop_pct`, `max_abs_drop_pct`, `dominant_dim_label`, `edge_ids`.
 
 ---
 
@@ -2213,7 +2223,7 @@ Dives into an entity's temporal history and sets navigator position to Solid (π
 | `timestamp` | string | `null` | ISO-8601 upper bound — only slices at or before this time are returned |
 | `counterfactual_frozen_population` | bool | `false` | When `true`, each returned slice gains an additional `delta_norm_frozen_pop` field — the per-slice L2 norm recomputed against the FIRST slice's raw shape as the entity-relative reference (sigma stays at the current pattern's diagonal). Answers "is this entity moving, or is the population drifting around a stationary entity?" — a stationary entity yields `delta_norm_frozen_pop = 0` across all slices. Default `false` keeps the existing response shape. |
 
-**Returns:** `slices[]`, `num_slices`, `base_polygon`, `forecast` (same fields as `get_solid` when ≥3 slices), `stale_forecast_warning`, `base_polygon_note` (when temporal slices exist, reminds that `base_polygon.delta_norm` reflects first observation not current state), `reputation` (`{value: Bayesian posterior 0–1, anomaly_tenure: longest consecutive anomalous streak}`), `trajectory_shape` (one of `arch` / `V` / `linear` / `flat`, emitted when the solid has ≥3 slices). The shape is computed locally from the entity's own `delta_norm_snapshot` series: `arch` when the series rises then falls (interior maximum), `V` when it falls then rises (interior minimum), `linear` when monotone within `1e-9` tolerance, and `flat` when the range is under 10% of the mean.
+**Returns:** `slices[]`, `num_slices`, `base_polygon`, `forecast` (same fields as `get_solid` when ≥3 slices), `stale_forecast_warning`, `base_polygon_note` (when temporal slices exist: `base_polygon` is the current state, `slices` the history), `reputation` (`{value: Bayesian posterior 0–1, anomaly_tenure: longest consecutive anomalous streak}`), `trajectory_shape` (one of `arch` / `V` / `linear` / `flat`, emitted when the solid has ≥3 slices). The shape is computed locally from the entity's own `delta_norm_snapshot` series: `arch` when the series rises then falls (interior maximum), `V` when it falls then rises (interior minimum), `linear` when monotone within `1e-9` tolerance, and `flat` when the range is under 10% of the mean.
 
 **get_solid vs dive_solid:**
 - `get_solid` reads temporal data without changing navigator position
@@ -2233,9 +2243,6 @@ Finds entities with the highest temporal drift — geometric velocity over recor
 | `sample_size` | int | `null` | Subsample N entities before scanning. Recommended for large populations. |
 | `forecast_horizon` | int | `null` | When set, each result includes `drift_forecast` with predicted displacement and anomaly status at `t + horizon`. Requires ≥3 slices. |
 | `rank_by_dimension` | string | `null` | When set, re-rank by the absolute change on this specific dimension name instead of overall displacement. Use dimension display names or line IDs from the pattern relations. |
-| `fdr_alpha` | float | `null` | Apply Benjamini-Hochberg FDR control at this level (0-1 exclusive). Returns only entities with `q_value <= alpha`. Each retained entity carries a `q_value` field. `null` = no FDR filtering (legacy behavior). |
-| `fdr_method` | string | `"bh"` | FDR method. `"bh"` (Benjamini-Hochberg, assumes pi0=1) or `"storey"` (Storey LSL estimator of the true null proportion; shrinks q-values by pi0 and typically recovers 10–15% more discoveries when combined with `p_value_method="chi2"` on spheres that have a genuine null mass). With the default `p_value_method="rank"`, `"storey"` collapses to `"bh"` — rank p-values are uniform by construction and carry no null signal. |
-| `p_value_method` | string | `"rank"` | p-value construction. `"rank"` (default, empirical from `delta_rank_pct` — uniform by construction) or `"chi2"` (upper-tail χ²(df) survival on `||delta||²`, the parametric null assuming `delta_i ~ N(0, 1)`). Pair with `fdr_method="storey"` for power recovery on moderate-super-anomaly patterns; on over-compressed or extreme patterns the uplift collapses to zero. |
 | `select` | string | `"top_norm"` | `"top_norm"` ranks by displacement descending. `"diverse"` applies submodular facility location to pick the K most geometrically diverse representatives — each result includes a `representativeness` count. |
 
 **Returns per entity:**
@@ -2250,8 +2257,9 @@ Finds entities with the highest temporal drift — geometric velocity over recor
 | `drift_direction` | `"normalizing"` (gradient_alignment > +0.3) / `"deteriorating"` (< -0.3) / `"neutral"` (otherwise). |
 | `dimension_diffs` | Per-dimension breakdown of `displacement` |
 | `dimension_diffs_current` | Per-dimension breakdown of `displacement_current` |
-| `num_slices` | Number of temporal slices used (min 2) |
-| `first_timestamp` / `last_timestamp` | Earliest and latest recorded deformation |
+| `num_slices` | Number of active temporal slices used (min 2) |
+| `num_inactive_slices` | Windows without events, left out of the trajectory |
+| `first_timestamp` / `last_timestamp` | First and last active window |
 | `delta_norm_first` / `delta_norm_last` | Anomaly signal at start and end of recorded history |
 | `reputation` | `{value: Bayesian posterior, anomaly_tenure}` |
 | `intrinsic_displacement` | M3 additive — L2 norm of the entity-driven (σ_v1-normalised) component of drift between the oldest retained and current calibration epoch. `null` when storage backend lacks multi-epoch retention, sphere has `<2` retained epochs, schema_hash mismatch, or `<2` slices for this entity. |
@@ -2259,13 +2267,17 @@ Finds entities with the highest temporal drift — geometric velocity over recor
 | `intrinsic_fraction` | M3 additive — sum-of-squares ratio `‖I‖² / (‖I‖² + ‖E‖²)` bounded `[0, 1]`. Same null rules. Use `decompose_drift` for the full per-dimension breakdown. |
 | `drift_forecast` | (when `forecast_horizon` set) `{predicted_delta_norm, forecast_is_anomaly, current_is_anomaly, reliability, horizon}` |
 
+Entity properties are in the top-level `properties` table keyed by `primary_key`. `filters` and `forecast_horizon` are echoed only when set.
+
+**Inactive windows.** A window in which the entity had no events (every time-varying dimension at zero) is not a position in behaviour space, so it is left out of the trajectory, the endpoints and the forecast. An entity with fewer than two active windows is not a drift candidate and does not appear: absent is not the same as stable — a busy-then-silent entity is `find_anomalies` material.
+
 ---
 
 ### `find_drifting_similar`
 
 Finds entities with similar temporal change trajectory as a reference entity (π10). Uses ANN over trajectory summary vectors.
 
-**Trajectory vector** = `concat([mean(all_deltas), std(all_deltas)])` — captures both direction and volatility.
+**Trajectory vector** = `concat([mean(active_deltas), std(active_deltas)])` over the entity's active windows (the same rule as `find_drifting_entities`: a window with no events is left out) — captures both direction and volatility. An entity with fewer than two active windows has no trajectory vector and is not a candidate; querying one returns an insufficient-history warning.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -2306,7 +2318,7 @@ Detects when population geometry shifted significantly — changepoint detection
 | `timestamp_to` | string | `null` | ISO-8601 scan end |
 | `n_regimes` | int | `3` | Number of regimes to detect |
 
-**Returns:** `changepoints[]` (`{timestamp, magnitude, top_shifted_dimensions[]}`).
+**Returns:** `results[]` of changepoints (`{timestamp, magnitude, top_changed_dimensions[], description, near_data_boundary}`); a single `{warning}` entry when the data cannot support detection.
 
 ---
 
@@ -2345,7 +2357,6 @@ Combines conformal p-values across all patterns via the Wilson harmonic-mean p-v
 |-----------|------|---------|-------------|
 | `primary_key` | string | required | Entity key |
 | `line_id` | string | `null` | Entity line — when omitted, auto-resolved from all patterns |
-| `include_reliability_flags` | bool | `true` | When true and the entity has a direct anchor pattern, attaches a top-level `reliability_flags` dict for the home polygon. Set false to skip the extra polygon build. |
 
 **Returns:** `combined_p` (low = anomalous across multiple patterns), `n_patterns`, `per_pattern{}`, and `reliability_flags` for the home polygon when the kwarg is true and a direct pattern exists. Fisher-era `chi2` and `df` fields are not surfaced — HMP has no chi-squared statistic.
 
@@ -2359,7 +2370,6 @@ Runs `composite_risk` for a batch of entity keys.
 |-----------|------|---------|-------------|
 | `primary_keys` | list[string] | required | Entity keys |
 | `line_id` | string | `null` | Entity line — when omitted, auto-resolved from all patterns |
-| `include_reliability_flags` | bool | `false` | Defaults `false` on the bulk path so 200-entity loops don't pay 200 × one polygon build each. Set `true` to attach `reliability_flags` per entry. |
 
 **Returns:** `results[]` — one entry per key with same fields as `composite_risk`. Each entry carries `reliability_flags` only when the per-batch kwarg is true.
 
@@ -2374,7 +2384,7 @@ Available detectors:
 - `delta_norm` — population-relative geometry deviation (always available)
 - `neighbor_contamination` — graph-neighbour anomaly density
 - `segment_shift` — categorical-segment anomaly rate (Fisher exact, back-projected per entity)
-- `trajectory_continuous` — DTW distance vs population-median trajectory
+- `trajectory_continuous` — DTW distance vs population-median trajectory. Opt-in: not in the default set; pass it in `detectors`. It reads the temporal history of the sampled entities.
 - `density_gap` — local density-gap detector (currently aggregate-only — findings describe missing population, not per-entity attribution; contributes no per-entity p-value and is silently skipped)
 
 Detectors that fail to produce a value for a given entity are silently skipped — HMP is then computed from the remaining detectors that fired. `delta_norm` is the always-available primary path.
@@ -2387,7 +2397,24 @@ Detectors that fail to produce a value for a given entity are silently skipped �
 | `sample_size` | int | `10000` | Cap on geometry rows used per detector |
 | `top_n` | int | `50` | Maximum entries returned |
 
-**Returns:** ranked list of `{primary_key, hmp, p_per_detector, rank, reliability_flags}` ascending by `hmp`. `p_per_detector` only contains detectors that produced a valid p-value for the entity. `reliability_flags` is attached to the top-N post-truncation only — one extra `read_geometry` scoped to surviving keys, skipped silently on storage backends that don't carry a `delta` column.
+**Returns:** `results[]`, ranked `{primary_key, hmp, p_per_detector, rank, reliability_flags}` ascending by `hmp`. `p_per_detector` only contains detectors that produced a valid p-value for the entity. `reliability_flags` is attached to the top-N post-truncation only — one extra `read_geometry` scoped to surviving keys, skipped silently on storage backends that don't carry a `delta` column.
+
+---
+
+### `classify_detector_consensus`
+
+Categorical multi-detector consensus typology. Surfaces the pattern of agreement between detectors as a categorical label — an investigator-actionable alternative to the scalar HMP ranking from `combine_anomaly_pvalues`. Where `combine_anomaly_pvalues` collapses per-detector evidence to a single score, this reveals which detectors agree vs disagree on the same entity.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `pattern_id` | string | required | Pattern to score |
+| `detectors` | list[string] | `null` | Subset of detector names to include. `null` enables the default set (every detector except the opt-in `trajectory_continuous`). |
+| `sample_size` | int | `10000` | Cap on geometry rows scored |
+| `top_n` | int | `50` | Maximum entries returned |
+| `anomaly_threshold` | float | `0.01` | p-value below which a detector flags "anomalous" for this entity |
+| `normal_threshold` | float | `0.5` | p-value above which a detector flags "normal". Must be > `anomaly_threshold`. |
+
+**Returns:** `results[]`, ranked `{primary_key, classification, anomalous_detectors, normal_detectors, n_detectors_fired, hmp, p_per_detector, rank}`. Classifications (sort priority): `mixed_signal` (≥1 detector flags anomaly AND ≥1 flags normal — most actionable, surfaces hidden-mule signature) > `anomalous_consensus` (≥2 agree on anomaly, none disagree) > `single_detector_signal` (exactly one detector fires) > `normal_consensus` (≥2 agree on normal) > `insufficient_data` (no detectors fired). Within each class, entries sorted by HMP ascending.
 
 ---
 
@@ -2399,13 +2426,13 @@ Screens an entire entity population across all geometric patterns in one call. F
 |-----------|------|---------|-------------|
 | `home_line_id` | string | required | Entity line to screen |
 | `threshold` | int | `2` | Minimum source count to include in results |
-| `scoring` | string | `"count"` | `"count"` = binary source count; `"weighted"` = density-based (direct patterns use `delta_norm / theta_norm`) |
+| `scoring` | string | `"count"` | `"count"` = binary source count; `"weighted"` = density-based (direct patterns use `delta_norm / theta_norm`); any other value returns an error |
 | `sources` | string | `null` | JSON array of source specs; null = auto-discover all patterns |
 | `include_borderline` | bool | `false` | When `sources` is null (auto-discover), also register borderline sources for each pattern |
 | `borderline_rank_threshold` | int | `80` | Rank percentile threshold for borderline sources (used with `include_borderline`) |
 | `top_n` | int | `100` | Max results, sorted by score descending |
 
-**Returns:** `total_flagged`, `sources_summary{}`, `hits[]` — each hit: `{primary_key, score, weighted_score, sources{}, interpretation?}`. The `interpretation` field is emitted (scoring-mode-invariant) when the hit's flagged-source pattern is interpretable: `"anomalous in {source} only, normal in {others} — potential cross-pattern discrepancy"` when exactly one source flagged the entity and at least two sources participated, or `"anomalous across all {N} sources — coordinated multi-pattern anomaly"` when every participating source flagged the entity. Omitted for partial overlap in the middle (2 ≤ flagged < n_sources) or for single-source scans.
+**Returns:** `total_flagged` (every entity at or above the threshold, not only the `top_n` returned), `sources_summary{}`, `hits[]` — each hit: `{primary_key, score, weighted_score, sources{}, interpretation?}`. The `interpretation` field is emitted (scoring-mode-invariant) when the hit's flagged-source pattern is interpretable: `"anomalous in {source} only, normal in {others} — potential cross-pattern discrepancy"` when exactly one source flagged the entity and at least two sources participated, or `"anomalous across all {N} sources — coordinated multi-pattern anomaly"` when every participating source flagged the entity. Omitted for partial overlap in the middle (2 ≤ flagged < n_sources) or for single-source scans. A text shared by several hits is sent once: those hits carry `interpretation_ref` (e.g. `"t1"`) into the top-level `interpretations` map instead of the inline text.
 
 **Source spec formats** (dispatched by `type` field — 4 source types):
 ```json
@@ -2425,7 +2452,7 @@ Screens an entire entity population across all geometric patterns in one call. F
 - `compound` — geometry ∩ points intersection
 - `graph` — graph contagion: flags entities whose anomalous counterparty ratio exceeds `contagion_threshold`. Requires event pattern with edge table. Auto-discovered by `auto_discover()`
 
-Response includes `anomaly_intensity` per source hit for geometry sources. For chain and composite sources, `related_count` in each hit reflects the entity-specific related count (not the total pattern population).
+Each source hit carries `anomaly_intensity`, its contribution to `weighted_score`: `delta_norm / theta_norm` for geometry sources, `anomalous_count / related_count` for chain, composite and graph sources, `1.0` for points sources. For chain and composite sources, `related_count` in each hit reflects the entity-specific related count (not the total pattern population).
 
 ---
 
@@ -2433,17 +2460,80 @@ Response includes `anomaly_intensity` per source hit for geometry sources. For c
 
 ### `recalibrate`
 
-Full recalibration: reads all shape vectors, recomputes population statistics (mu/sigma/theta), rebuilds delta vectors, overwrites geometry via Lance MVCC. Active sessions remain isolated.
+Full recalibration: reads all shape vectors, recomputes population statistics (mu/sigma/theta), rebuilds delta vectors, and replaces the calibration-dependent geometry columns (`delta`, `delta_norm`, `is_anomaly`, `delta_rank_pct`, `delta_dim_*`, `conformal_p`, `bregman_divergence`, `n_anomalous_dims`) in one Lance commit. `anomaly_confidence` (bootstrap stability of the previous fit) and `delta_norm_signed` (label-aware projection) cannot be recomputed from the new fit and become null — tools then fall back to `delta_norm`; rebuild the sphere to restore them. Key and relation columns and their indexes are not rewritten; only the indexes on the replaced columns are rebuilt. The current session and every tool see the new calibration immediately; other sessions keep their snapshot until they reopen the sphere.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `pattern_id` | string | required | Pattern to recalibrate |
 | `soft_threshold` | float | `null` | Update soft drift threshold (0.0–1.0, default 5%) |
 | `hard_threshold` | float | `null` | Update hard drift threshold (0.0–1.0, default 20%) |
+| `branch` | string | `null` | Run the recalibration on this branch (created when absent) without touching main. When null, recalibrates main directly. The branch's recipe log records every recalibration call (parameters and result fingerprint). |
+| `exclude_keys` | list[string] | `null` | Entity keys to exclude from the population fit. Excluded entities are still scored against the new calibration (e.g. hide known influencers so they do not anchor the coordinate system). |
 
-**Returns:** `pattern_id`, `previous_drift_pct`, `new_theta_norm`, `old_theta_norm`, `records_recalibrated`.
+**Returns:** `pattern_id`, `previous_drift_pct`, `new_theta_norm`, `old_theta_norm`, `records_recalibrated`, `n_excluded` (count of entities omitted from the fit, 0 when `exclude_keys` is null), `branch` (branch name written to, null when main), `mu_sha256` (hex fingerprint of the resulting mu vector, for promotion verification).
 
-**When to use:** When `sphere_overview` reports `calibration_stale: true` or `calibration_blocked: true`. Check `check_alerts` first for `calibration_drift` alert type.
+**When to use:** When `sphere_overview` reports `calibration_stale: true` or `calibration_blocked: true`. Check `check_alerts` first for `calibration_drift` alert type. Use `branch=` to test a recalibration in isolation before applying it to main.
+
+---
+
+### `compare_branches`
+
+Compares one pattern between a branch and main (or between two branches). Returns anomaly counts, entities that flipped in or out of the anomaly set, Jaccard overlap of the two anomaly sets, top movers by relative `delta_norm` change, keys present on one side only, calibration drift between the two fits, and the branch's recipe log. Read-only; does not modify any ref.
+
+Anomaly membership uses each side's own global threshold — the same rule as `anomaly_summary` and `find_anomalies`.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `pattern_id` | string | required | Pattern to compare |
+| `branch` | string | required | Branch to compare (the "to" side) |
+| `other` | string | `null` | Branch for the "from" side; when null, the "from" side is main |
+| `top_n` | int | `20` | Maximum entries in `top_movers`, `flipped_in_top` and `flipped_out_top` |
+
+**Returns:**
+
+| Field | Description |
+|-------|-------------|
+| `n_from` | Entity count on the "from" side (main, or `other`) |
+| `n_to` | Entity count on the "to" side (`branch`) |
+| `anomalies_from` | Count of entities at or above the from-side threshold |
+| `anomalies_to` | Count of entities at or above the to-side threshold |
+| `flipped_in` | Among entities on both sides, those anomalous on the branch but not on the from side |
+| `flipped_out` | Among entities on both sides, those anomalous on the from side but not on the branch |
+| `theta_from` / `theta_to` | The two global thresholds |
+| `flipped_in_top` | Flipped-in entities furthest past the branch's threshold, up to `top_n`; each has `cause`: `threshold` (the threshold moved past its unchanged score), `score` (its score crossed the unchanged threshold) or `both` |
+| `flipped_out_top` | Flipped-out entities furthest past the from side's threshold, up to `top_n`, with `cause` |
+| `jaccard` | Intersection-over-union of the two anomaly sets |
+| `top_movers` | Entities with the largest relative `delta_norm` change, up to `top_n` |
+| `only_in_from` | Keys present on the from side only (not on the to side) |
+| `only_in_to` | Keys present on the to side only |
+| `calibration_drift` | `CalibrationDriftReport` for the two fits; `null` when the schemas differ |
+| `recipe` | The branch's recipe log: every write made on it (recalibrations, incremental ingests, finalizations) with parameters and result fingerprints. In the compact format, list parameters longer than 10 items (such as `exclude_keys`) are cut to their first 10 |
+| `omitted` | Compact format only, when a recipe list was cut: `{"recipe": {"<seq>.<field>": full_length}, "full_response": …}` |
+
+---
+
+### `manage_branch`
+
+Creates, lists, deletes, or promotes sphere branches. Not read-only — `create`, `delete`, and `promote` modify sphere state.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `action` | string | required | `"list"` — list all branches; `"create"` — create a branch pinning current main state; `"delete"` — delete a branch; `"promote"` — replay a branch's recipes on main and delete the branch on success |
+| `name` | string | `null` | Branch name; required for `create`, `delete`, and `promote` |
+| `purpose` | string | `null` | Free-text label stored in branch metadata (used by `create` only) |
+
+**Returns:**
+
+- `list`: `{branches: [...]}`, one entry per branch: `name`, `created_at`, `created_by`, `purpose`, `replayable`, `n_recipes`, `parent_versions`, `stale` (main geometry moved past the branch's parent version), `complete` (`false` when creation was interrupted).
+- `create`: `{created: {...}}` with the same fields. A branch is always created from main's current state, also from a session open on another branch.
+- `delete`: `{deleted: name}`.
+- `promote`: `{promoted: {name, recipes_replayed, versions_before, versions_after}}`.
+
+**Notes:**
+
+- `delete` and `promote` refuse the branch the current session is open on; reopen main with `open_sphere(path)` first.
+- `promote` replays the branch's recipe log on main and verifies that the replayed fit produces an identical mu vector (sha256 comparison). On mismatch it restores main and keeps the branch unchanged. It also refuses to promote when main has moved since the branch was created. On success it deletes the branch.
+- Branches never copy data — they pin the sphere state at creation time; recalibrations on a branch write only to that branch.
 
 ---
 
@@ -2491,10 +2581,9 @@ Detect entities with non-linear temporal trajectories (arch, V-shape, spike-reco
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `pattern_id` | string | required | Anchor pattern with temporal data |
+| `displacement_ranks` | list[int] | `null` | Rank breakpoints for trajectory displacement buckets. `null` applies the built-in breakpoints `[0, 20, 100]`. Changing these is rarely needed; prefer `null`. |
 | `top_n_per_range` | integer | 5 | Max results returned |
 | `sample_size` | int | `10000` | Max distinct entities streamed before stopping. Pass `0` to scan the full population (may be slow on large patterns). |
-
-> `displacement_ranks` parameter is deprecated and ignored.
 
 **Returns:** `pattern_id`, `top_n_per_range`, `sample_size`, `total_found`, `results[]` where each result has: `entity_key`, `trajectory_shape`, `displacement`, `path_length`, `num_slices`, `first_timestamp`, `last_timestamp`, `cohort_size`, `cohort_keys`, `interpretation`.
 
@@ -2568,11 +2657,12 @@ See [mcp-spec.md](mcp-spec.md) for the full handler table. Categories:
 | Aggregation | 1 | aggregate |
 | Observability | 5 | sphere_overview, check_alerts, detect_data_quality, anomaly_summary, aggregate_anomalies |
 | Temporal | 3 | compare_time_windows, find_drifting_similar, hub_history |
-| Network/Graph | 7 | find_counterparties, extract_chains, find_chains_for_entity, find_common_relations, find_geometric_path, discover_chains, edge_stats |
+| Network/Graph | 6 | find_counterparties, extract_chains, find_chains_for_entity, find_common_relations, find_geometric_path, edge_stats |
 | Population | 2 | get_centroid_map, attract_boundary |
 | Smart-mode exclusive | 6 | assess_false_positive, detect_event_rate_anomaly, detect_hub_anomaly_concentration, detect_composite_subgroup_inflation, detect_collective_drift, detect_temporal_burst |
 
-**Returns:** `query`, `capabilities`, `plan` (steps + rationale), `results` (per step),
+**Returns:** `query`, `capabilities`, `plan` (steps + rationale), `results` (per step,
+keyed by step name; steps sharing a name are keyed `name[pattern_id]`),
 `interpretation` (optional LLM summary), `elapsed_ms`.
 
 **Operation modes — Smart vs Manual:**
@@ -2610,7 +2700,7 @@ Every polygon exposes `delta_rank_pct` (0–100): percentile in the population's
 | Tool | Cap | Warning field |
 |------|-----|---------------|
 | `find_anomalies` | `top_n` ≤ adaptive cap (edge-count-based, typically 15–51) | `capped_warning` |
-| `get_event_polygons` | `limit` ≤ adaptive cap (edge-count-based, typically 15–51) | `capped_warning` |
+| `get_event_polygons` | `top_n` ≤ adaptive cap (edge-count-based, typically 15–51) | `capped_warning` |
 | `find_hubs` | `top_n` ≤ 25 | `capped_warning` |
 | `find_drifting_entities` | `top_n` ≤ 50 | `capped_warning` |
 | `find_drifting_similar` | `top_n` ≤ 50 | silent cap |
@@ -2675,15 +2765,24 @@ Unknown keys raise an error. Combines with edge filters (AND): geometry pre-filt
 
 ### `property_filters`
 
-Filters `group_by_line` entities (aggregate) or anomalous entities (find_anomalies) by their own properties.
+Filters entities by their own properties. AND across keys. Two syntaxes, depending on the tool.
+
+`find_anomalies` and `aggregate_anomalies` (same operators as `event_filters`):
 
 ```python
-{"credit_limit": {"gt": 100000}}         # comparison
-{"credit_limit": {"gte": 0, "lte": 100000}}  # range
-{"customer_group": "SME"}                # equality shorthand
+{"credit_limit": {"gt": 100000}}             # comparison: gt, gte, lt, lte, eq
+{"credit_limit": {"gte": 0, "lte": 100000}}  # range (ops on one key are ANDed)
+{"loan_status": {"in": ["B", "D"]}}          # membership (non-empty list)
+{"customer_group": "SME"}                    # equality shorthand
 ```
 
-Ops: `<`, `<=`, `>`, `>=`, `!=`, equality shorthand. AND across keys.
+`aggregate` (`property_filters` on `group_by_line`, `entity_filters` on the pattern's entity line):
+
+```python
+{"credit_limit": {"op": ">", "value": 100000}}   # ops: =, <, <=, >, >=, !=
+{"loan_status": {"op": "in", "value": ["B", "D"]}}  # membership (non-empty list)
+{"customer_group": "SME"}                        # equality shorthand
+```
 
 ### `event_filters`
 
@@ -2694,19 +2793,20 @@ Filters event-line rows by column predicates before aggregation.
 {"journal_type": "SA"}                   # equality shorthand
 {"shipmode": None}                       # IS NULL
 {"shipmode": {"not_null": True}}         # IS NOT NULL
+{"journal_type": {"in": ["SA", "KR"]}}   # membership (non-empty list)
 ```
 
-Operators: `gt`, `gte`, `lt`, `lte`, `eq`. Multiple keys = AND. Bypasses DataFusion acceleration.
+Operators: `gt`, `gte`, `lt`, `lte`, `eq`, `in`. Multiple keys = AND. Bypasses DataFusion acceleration.
 
 **Performance note:** For null/not-null checks on event patterns, `event_filters={"col": None}` is ~100× faster than `missing_edge_to` for columns stored on the event line (works with sampling; `missing_edge_to` scans all edges).
 
 ### `entity_filters`
 
-Filters the pattern's own root entity (anchor: the primary entity; event: the event entry) by properties. Same dict syntax as `property_filters`. Returns `entity_filtered_count` in response.
+Filters the pattern's own root entity (anchor: the primary entity; event: the event entry) by properties. Same dict syntax as `aggregate`'s `property_filters` (`{"op": …, "value": …}`). Returns `entity_filtered_count` in response.
 
 ### `having`
 
-Post-aggregation group filter (SQL HAVING equivalent). Applied after aggregation, before limit/offset.
+Post-aggregation group filter (SQL HAVING equivalent). Applied after aggregation, before top_n/offset.
 
 ```python
 having={"gt": 1000}           # groups with metric > 1000

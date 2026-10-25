@@ -29,3 +29,6 @@ htmlcov/
 .claude/
 .worktrees/
 .agents/
+
+# Generated synthetic test sphere (built by tests/conftest.py)
+tests/fixtures/gds/

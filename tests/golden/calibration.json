@@ -1,0 +1,375 @@
+{
+  "account_bank_pairs_pattern": {
+    "mu": [
+      0.08486688882,
+      0.07566569,
+      0.2990517914,
+      0.5515799522
+    ],
+    "pattern_type": "anchor",
+    "population_size": 1614,
+    "relations": [
+      {
+        "direction": "out",
+        "display_name": "pair_tx_count",
+        "edge_max": 199,
+        "line_id": "_d_pair_tx_count",
+        "required": false
+      },
+      {
+        "direction": "out",
+        "display_name": "pair_sum_amount",
+        "edge_max": 1482299,
+        "line_id": "_d_pair_sum_amount",
+        "required": false
+      },
+      {
+        "direction": "out",
+        "display_name": "pair_amount_std",
+        "edge_max": 11046,
+        "line_id": "_d_pair_amount_std",
+        "required": false
+      },
+      {
+        "direction": "out",
+        "display_name": "pair_category_diversity",
+        "edge_max": 4,
+        "line_id": "_d_pair_category_diversity",
+        "required": false
+      }
+    ],
+    "sigma_diag": [
+      0.1704292446,
+      0.1595025957,
+      0.2518450022,
+      0.2249094397
+    ],
+    "theta": [
+      1.88231492,
+      1.88231492,
+      1.88231492,
+      1.88231492
+    ]
+  },
+  "account_behavior_pattern": {
+    "mu": [
+      0.4445964992,
+      0.9527744651,
+      0.6741442084,
+      0.8691464067,
+      0.4090909064,
+      0.1833677739,
+      0.2780749202,
+      0.3229496777,
+      1.0,
+      1.0
+    ],
+    "pattern_type": "anchor",
+    "population_size": 121,
+    "relations": [
+      {
+        "direction": "out",
+        "display_name": "tx_count",
+        "edge_max": 525,
+        "line_id": "_d_tx_count",
+        "required": false
+      },
+      {
+        "direction": "out",
+        "display_name": "n_distinct_banks",
+        "edge_max": 14,
+        "line_id": "_d_n_distinct_banks",
+        "required": false
+      },
+      {
+        "direction": "out",
+        "display_name": "n_categories",
+        "edge_max": 7,
+        "line_id": "_d_n_categories",
+        "required": false
+      },
+      {
+        "direction": "out",
+        "display_name": "n_operations",
+        "edge_max": 6,
+        "line_id": "_d_n_operations",
+        "required": false
+      },
+      {
+        "direction": "out",
+        "display_name": "n_standing_orders_derived",
+        "edge_max": 2,
+        "line_id": "_d_n_standing_orders_derived",
+        "required": false
+      },
+      {
+        "direction": "out",
+        "display_name": "burst_daily",
+        "edge_max": 16,
+        "line_id": "_d_burst_daily",
+        "required": false
+      },
+      {
+        "direction": "out",
+        "display_name": "burst_weekly",
+        "edge_max": 17,
+        "line_id": "_d_burst_weekly",
+        "required": false
+      },
+      {
+        "direction": "out",
+        "display_name": "burst_monthly",
+        "edge_max": 26,
+        "line_id": "_d_burst_monthly",
+        "required": false
+      }
+    ],
+    "sigma_diag": [
+      0.1933163702,
+      0.1394377053,
+      0.152809307,
+      0.08355785906,
+      0.3636364639,
+      0.1743374765,
+      0.1742691845,
+      0.1608755887,
+      0.200000003,
+      0.200000003
+    ],
+    "theta": [
+      6.851864815,
+      6.851864815,
+      6.851864815,
+      6.851864815,
+      6.851864815,
+      6.851864815,
+      6.851864815,
+      6.851864815,
+      6.851864815,
+      6.851864815
+    ]
+  },
+  "account_stress_pattern": {
+    "mu": [
+      0.4334061742,
+      0.1318128705,
+      0.07438017428,
+      0.05641166493,
+      0.04130146652,
+      0.09615083039,
+      0.3719008267,
+      0.3719008267
+    ],
+    "pattern_type": "anchor",
+    "population_size": 121,
+    "relations": [
+      {
+        "direction": "out",
+        "display_name": "amount_std",
+        "edge_max": 12965,
+        "line_id": "_d_amount_std",
+        "required": false
+      },
+      {
+        "direction": "out",
+        "display_name": "mean_balance",
+        "edge_max": 121985,
+        "line_id": "_d_mean_balance",
+        "required": false
+      },
+      {
+        "direction": "out",
+        "display_name": "Penalty Interest Count",
+        "edge_max": 14,
+        "line_id": "_d_penalty_interest_count",
+        "required": false
+      },
+      {
+        "direction": "out",
+        "display_name": "Balance Volatility (CV)",
+        "edge_max": 31,
+        "line_id": "_d_balance_volatility",
+        "required": false
+      },
+      {
+        "direction": "out",
+        "display_name": "Minimum Balance",
+        "edge_max": 1943,
+        "line_id": "_d_min_balance",
+        "required": false
+      },
+      {
+        "direction": "out",
+        "display_name": "Balance Trend",
+        "edge_max": 5298,
+        "line_id": "_d_balance_trend",
+        "required": false
+      }
+    ],
+    "sigma_diag": [
+      0.1469689161,
+      0.2305219918,
+      0.1981098652,
+      0.1369893402,
+      0.1600145698,
+      0.1894382685,
+      0.4833119214,
+      0.4833119214
+    ],
+    "theta": [
+      7.303016186,
+      7.303016186,
+      7.303016186,
+      7.303016186,
+      7.303016186,
+      7.303016186,
+      7.303016186,
+      7.303016186
+    ]
+  },
+  "loan_stress_pattern": {
+    "mu": [
+      0.5713374615,
+      0.05699568987,
+      0.1793650985,
+      0.119896479,
+      0.0,
+      0.04737138748,
+      0.03991724923,
+      0.1304210126,
+      1.0
+    ],
+    "pattern_type": "anchor",
+    "population_size": 45,
+    "relations": [
+      {
+        "direction": "out",
+        "display_name": "amount_std",
+        "edge_max": 9672,
+        "line_id": "_d_amount_std",
+        "required": false
+      },
+      {
+        "direction": "out",
+        "display_name": "mean_balance",
+        "edge_max": 127115,
+        "line_id": "_d_mean_balance",
+        "required": false
+      },
+      {
+        "direction": "out",
+        "display_name": "Penalty Interest Count",
+        "edge_max": 14,
+        "line_id": "_d_penalty_interest_count",
+        "required": false
+      },
+      {
+        "direction": "out",
+        "display_name": "Balance Volatility (CV)",
+        "edge_max": 8,
+        "line_id": "_d_balance_volatility",
+        "required": false
+      },
+      {
+        "direction": "out",
+        "display_name": "Minimum Balance",
+        "edge_max": 1,
+        "line_id": "_d_min_balance",
+        "required": false
+      },
+      {
+        "direction": "out",
+        "display_name": "Balance Trend",
+        "edge_max": 5242,
+        "line_id": "_d_balance_trend",
+        "required": false
+      },
+      {
+        "direction": "out",
+        "display_name": "Balance-to-Loan Ratio",
+        "edge_max": 1,
+        "line_id": "_d_balance_to_loan",
+        "required": false
+      },
+      {
+        "direction": "out",
+        "display_name": "Income Coverage Ratio",
+        "edge_max": 35,
+        "line_id": "_d_income_coverage",
+        "required": false
+      }
+    ],
+    "sigma_diag": [
+      0.1933915615,
+      0.1908114105,
+      0.2945545614,
+      0.1433242112,
+      0.009999999776,
+      0.1690786332,
+      0.1231833994,
+      0.1968277097,
+      0.200000003
+    ],
+    "theta": [
+      6.213290691,
+      6.213290691,
+      6.213290691,
+      6.213290691,
+      6.213290691,
+      6.213290691,
+      6.213290691,
+      6.213290691,
+      6.213290691
+    ]
+  },
+  "tx_pattern": {
+    "mu": [
+      1.0,
+      1.0,
+      0.9153290987,
+      0.420971483,
+      0.2513875663,
+      0.08269406855
+    ],
+    "pattern_type": "event",
+    "population_size": 28534,
+    "relations": [
+      {
+        "direction": "in",
+        "line_id": "accounts",
+        "required": true
+      },
+      {
+        "direction": "in",
+        "line_id": "tx_types",
+        "required": true
+      },
+      {
+        "direction": "in",
+        "line_id": "operations",
+        "required": false
+      },
+      {
+        "direction": "in",
+        "line_id": "cpty_banks",
+        "required": false
+      }
+    ],
+    "sigma_diag": [
+      0.009999999776,
+      0.009999999776,
+      0.2783920467,
+      0.4937558174,
+      0.2516655922,
+      0.169809103
+    ],
+    "theta": [
+      4.828801155,
+      4.828801155,
+      4.828801155,
+      4.828801155,
+      4.828801155,
+      4.828801155
+    ]
+  }
+}

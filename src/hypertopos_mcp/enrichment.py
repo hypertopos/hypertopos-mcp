@@ -6,39 +6,18 @@ from __future__ import annotations
 
 from typing import Any
 
+from hypertopos_mcp._format import _EDGE_FIELDS, record_failure
+
 _META_COLUMNS = frozenset({"primary_key", "version", "status", "created_at", "changed_at"})
-
-
-def build_entity_lookups(
-    reader: Any,
-    sphere: Any,
-    line_ids: set[str],
-) -> dict[str, dict[str, dict]]:
-    lookups: dict[str, dict[str, dict]] = {}
-    for line_id in line_ids:
-        line = sphere.lines.get(line_id)
-        if line is None:
-            continue
-        try:
-            table = reader.read_points(line_id, line.versions[-1])
-        except Exception:
-            continue
-        keep = [c for c in table.schema.names if c not in _META_COLUMNS]
-        if not keep:
-            continue
-        keys = table["primary_key"].to_pylist()
-        col_data = {c: table[c].to_pylist() for c in keep}
-        lookups[line_id] = {keys[i]: {c: col_data[c][i] for c in keep} for i in range(len(keys))}
-    return lookups
 
 
 def build_batch_lookups(
     reader: Any,
     sphere: Any,
     keys_by_line: dict[str, set[str]],
-) -> dict[str, dict[str, dict]]:
+) -> dict[str, dict[str, dict[str, Any]]]:
     """Batch lookup — fetches only specified keys per line (O(k) vs O(n) full scan)."""
-    lookups: dict[str, dict[str, dict]] = {}
+    lookups: dict[str, dict[str, dict[str, Any]]] = {}
     for line_id, keys in keys_by_line.items():
         if not keys:
             continue
@@ -47,7 +26,8 @@ def build_batch_lookups(
             continue
         try:
             table = reader.read_points_batch(line_id, line.versions[-1], list(keys))
-        except Exception:
+        except Exception as exc:
+            record_failure(f"properties of line {line_id}", exc)
             continue
         keep = [c for c in table.schema.names if c not in _META_COLUMNS]
         if not keep or len(table) == 0:
@@ -65,7 +45,7 @@ def lookup_entity(
     sphere: Any,
     line_id: str,
     primary_key: str,
-) -> dict | None:
+) -> dict[str, Any] | None:
     """Fetch properties for a single entity by key. Returns None if not found."""
     result = build_batch_lookups(reader, sphere, {line_id: {primary_key}})
     props = result.get(line_id, {}).get(primary_key)
@@ -73,10 +53,10 @@ def lookup_entity(
 
 
 def enrich_polygon(
-    serialized: dict,
-    lookups: dict[str, dict[str, dict]],
+    serialized: dict[str, Any],
+    lookups: dict[str, dict[str, dict[str, Any]]],
     entity_line_id: str | None = None,
-) -> dict:
+) -> dict[str, Any]:
     bk = serialized.get("primary_key")
     if entity_line_id and bk:
         props = lookups.get(entity_line_id, {}).get(bk, {})
@@ -88,12 +68,13 @@ def enrich_polygon(
         edge_props = lookups.get(lid, {}).get(pk, {})
         for k, v in edge_props.items():
             if v is not None:
-                edge[k] = v
+                # An endpoint column named like a structural edge field keeps a prefix.
+                edge[f"prop_{k}" if k in _EDGE_FIELDS else k] = v
     return serialized
 
 
 def _collect_required_keys(
-    serialized_polygons: list[dict],
+    serialized_polygons: list[dict[str, Any]],
     entity_line_id: str | None,
 ) -> dict[str, set[str]]:
     """Collect {line_id: {point_key, ...}} for all keys needed to enrich polygons."""
@@ -108,11 +89,11 @@ def _collect_required_keys(
 
 
 def enrich_polygons(
-    serialized_polygons: list[dict],
+    serialized_polygons: list[dict[str, Any]],
     reader: Any,
     sphere: Any,
     entity_line_id: str | None = None,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Enrich polygons with point properties.
 
     Uses read_points_batch — fetches only the specific keys referenced by the
@@ -120,14 +101,15 @@ def enrich_polygons(
     lines (e.g. gl_values with 1M rows).
     """
     required_keys = _collect_required_keys(serialized_polygons, entity_line_id)
-    lookups: dict[str, dict[str, dict]] = {}
+    lookups: dict[str, dict[str, dict[str, Any]]] = {}
     for line_id, keys in required_keys.items():
         line = sphere.lines.get(line_id)
         if line is None:
             continue
         try:
             table = reader.read_points_batch(line_id, line.versions[-1], list(keys))
-        except Exception:
+        except Exception as exc:
+            record_failure(f"properties of line {line_id}", exc)
             continue
         keep = [c for c in table.schema.names if c not in _META_COLUMNS]
         if not keep:
@@ -142,4 +124,5 @@ def enrich_polygons(
 
 def resolve_entity_line_id(sphere: Any, pattern_id: str) -> str | None:
     """Delegate to Sphere.entity_line() — kept for backward compatibility."""
-    return sphere.entity_line(pattern_id)
+    line_id: str | None = sphere.entity_line(pattern_id)
+    return line_id

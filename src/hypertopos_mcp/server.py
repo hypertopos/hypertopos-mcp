@@ -6,18 +6,31 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
+import dataclasses
+import difflib
 import importlib
 import json as _json
+import math
 import os
 import sys
 import time
+from collections.abc import Callable, Iterator, MutableMapping
 from functools import wraps
-from typing import Any
+from typing import Any, cast
 
+import anyio
 from hypertopos.sphere import HyperSphere  # eager import — avoids first-call latency
-from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.lowlevel.server import NotificationOptions
+from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.models import InitializationOptions
+from mcp.shared.exceptions import MCPError
 from mcp.types import SamplingMessage, TextContent
+from mcp_types import INVALID_PARAMS
+from pydantic import create_model, model_validator
+
+import hypertopos_mcp._format as _response_format
 
 # ---------------------------------------------------------------------------
 # Anthropic API fallback for sampling when client doesn't support it
@@ -25,7 +38,7 @@ from mcp.types import SamplingMessage, TextContent
 _anthropic_client: object | None = None  # None=untried, False=unavailable
 
 
-def _get_anthropic_client():
+def _get_anthropic_client() -> Any:
     global _anthropic_client
     if _anthropic_client is False:
         return None  # negative cache — don't retry failed imports
@@ -33,6 +46,7 @@ def _get_anthropic_client():
         return _anthropic_client
     try:
         from anthropic import AsyncAnthropic
+
         _anthropic_client = AsyncAnthropic()
         return _anthropic_client
     except Exception:
@@ -43,8 +57,37 @@ def _get_anthropic_client():
 # ---------------------------------------------------------------------------
 # Server instance
 # ---------------------------------------------------------------------------
-def _record_timing(fn_name: str, elapsed_ms: float, result: str) -> str:
-    """Record call stats and inject elapsed_ms into JSON result."""
+def _round_float(x: float) -> float:
+    """Keep max(7, integer digits + 2) significant digits.
+
+    Drops float32 noise (0.10000000149011612 -> 0.1) without touching the
+    integer digits or cents of large amounts, or the magnitude of tiny
+    p-values.
+    """
+    if x == 0.0 or not math.isfinite(x):
+        return x
+    integer_digits = max(0, math.floor(math.log10(abs(x))) + 1)
+    return float(f"{x:.{max(7, integer_digits + 2)}g}")
+
+
+def _compact_numbers(node: Any) -> Any:
+    """Round floats; non-finite ones become null so the response is strict JSON."""
+    if isinstance(node, float):
+        return _round_float(node) if math.isfinite(node) else None
+    if isinstance(node, dict):
+        return {k: _compact_numbers(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_compact_numbers(v) for v in node]
+    return node
+
+
+def _record_timing(
+    fn_name: str,
+    elapsed_ms: float,
+    result: str,
+    failed_parts: list[dict[str, str]] | None = None,
+) -> str:
+    """Record call stats; inject elapsed_ms and any failed_parts into the JSON result."""
     _call_stats["call_count"] += 1
     _call_stats["total_elapsed_ms"] += elapsed_ms
     if fn_name not in _call_stats["per_tool"]:
@@ -53,36 +96,129 @@ def _record_timing(fn_name: str, elapsed_ms: float, result: str) -> str:
     _call_stats["per_tool"][fn_name]["total_ms"] += elapsed_ms
     with contextlib.suppress(Exception):
         data = _json.loads(result)
+        if isinstance(data, list):
+            # A bare list has nowhere to carry elapsed_ms / failed_parts.
+            data = {"results": data}
         if isinstance(data, dict):
             data["elapsed_ms"] = elapsed_ms
-            return _json.dumps(data, separators=(",", ":"))
+            if failed_parts:
+                data["failed_parts"] = failed_parts
+        if isinstance(data, (dict, list)):
+            return _json.dumps(_compact_numbers(data), separators=(",", ":"), ensure_ascii=False)
     return result
 
 
-def timed(fn):
+_TOOL_ERROR_TYPES: dict[type[Exception], type[ToolError] | None] = {}
+
+
+def _as_tool_error(exc: Exception) -> ToolError:
+    """Report a tool failure as a ToolError that keeps its message.
+
+    The SDK passes only a ToolError's text to the model; any other exception
+    reaches it as a bare "Error executing tool X", losing hints such as
+    "unknown pattern" or "call sphere_overview() first". The returned error is
+    also an instance of the original exception type, so code calling a tool
+    function directly can still catch ValueError, GDSError and the like.
+    """
+    cls = type(exc)
+    if cls not in _TOOL_ERROR_TYPES:
+        try:
+            combined: type[ToolError] | None = type(
+                cls.__name__, (ToolError, cls), {"__module__": cls.__module__}
+            )
+        except TypeError:  # incompatible exception layouts
+            combined = None
+        _TOOL_ERROR_TYPES[cls] = combined
+    message = f"{cls.__name__}: {exc}"
+    combined = _TOOL_ERROR_TYPES[cls]
+    if combined is None:
+        return ToolError(message)
+    error = combined.__new__(combined)
+    Exception.__init__(error, message)
+    return error
+
+
+def timed[F: Callable[..., Any]](fn: F) -> F:
     """Inject elapsed_ms into the JSON response and accumulate call stats."""
 
     if asyncio.iscoroutinefunction(fn):
-        @wraps(fn)
-        async def async_wrapper(*args, **kwargs):
-            t0 = time.perf_counter()
-            result = await fn(*args, **kwargs)
-            elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
-            return _record_timing(fn.__name__, elapsed_ms, result)
 
-        return async_wrapper
+        @wraps(fn)
+        async def async_wrapper(*args: Any, **kwargs: Any) -> str:
+            t0 = time.perf_counter()
+            token = _response_format.collect_failures()
+            try:
+                result = await fn(*args, **kwargs)
+            except ToolError:
+                raise
+            except Exception as exc:
+                raise _as_tool_error(exc) from exc
+            finally:
+                failed_parts = _response_format.take_failures(token)
+            elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
+            return _record_timing(fn.__name__, elapsed_ms, result, failed_parts)
+
+        return cast(F, async_wrapper)
 
     @wraps(fn)
-    def wrapper(*args, **kwargs):
+    def wrapper(*args: Any, **kwargs: Any) -> str:
         t0 = time.perf_counter()
-        result = fn(*args, **kwargs)
+        token = _response_format.collect_failures()
+        try:
+            result = fn(*args, **kwargs)
+        except ToolError:
+            raise
+        except Exception as exc:
+            raise _as_tool_error(exc) from exc
+        finally:
+            failed_parts = _response_format.take_failures(token)
         elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
-        return _record_timing(fn.__name__, elapsed_ms, result)
+        return _record_timing(fn.__name__, elapsed_ms, result, failed_parts)
 
-    return wrapper
+    return cast(F, wrapper)
 
 
-mcp = FastMCP(
+# The SDK runs synchronous tools on worker threads, so calls could overlap.
+# Each client session holds one sphere/session/navigator in ``_state`` and
+# shares its Lance handles, so a session's tool calls run one at a time;
+# calls of different sessions run concurrently.
+_SERIALIZED_METHODS = frozenset({"tools/call", "resources/read", "prompts/get"})
+
+
+async def _serialize_tool_calls(ctx: Any, call_next: Callable[[Any], Any]) -> Any:
+    """Server middleware: bind the request to its client session; show and allow
+    only the tools of the session's phase; run a session's requests that read its
+    state one at a time."""
+    key = session_key(ctx)
+    if key.startswith("http:"):
+        connection = ctx.session._connection
+        if not connection.state.get("hypertopos_evict"):
+            # The SDK closes this stack when the HTTP session ends (DELETE or
+            # idle timeout): release that session's sphere with it.
+            connection.state["hypertopos_evict"] = True
+            connection.exit_stack.push_async_callback(_evict_session_when_idle, key)
+    with session_scope(key) as state:
+        if ctx.method == "tools/list":
+            result = await call_next(ctx)
+            if isinstance(result, dict) and isinstance(result.get("tools"), list):
+                shown = visible_tools()
+                result["tools"] = [t for t in result["tools"] if t.get("name") in shown]
+            return result
+        if ctx.method == "tools/call":
+            name = (getattr(ctx, "params", None) or {}).get("name")
+            if name is not None and name not in visible_tools():
+                raise MCPError(
+                    INVALID_PARAMS,
+                    f"Tool {name!r} is not available yet: call open_sphere(path), "
+                    "then sphere_overview() to unlock the full toolset.",
+                )
+        if ctx.method not in _SERIALIZED_METHODS:
+            return await call_next(ctx)
+        async with state.lock:
+            return await call_next(ctx)
+
+
+mcp = MCPServer(
     "hypertopos",
     instructions=(
         "Navigate a Geometric Data Sphere (GDS). "
@@ -92,45 +228,276 @@ mcp = FastMCP(
         "When 0 results, rephrase with different dimensions not same words. "
         "For manual drill-down: call sphere_overview() to unlock all tools."
     ),
+    middleware=[_serialize_tool_calls],
 )
+
+# Every tool returns a JSON string; without this the SDK also attaches the same
+# JSON as structuredContent and an outputSchema, doubling each response.
+_register_tool = mcp.tool
+
+
+def _strip_schema_titles(node: Any) -> None:
+    """Drop the generated ``title`` keywords from a JSON schema in place.
+
+    Only string-valued ``title`` keys are schema keywords; a parameter that
+    is itself named "title" maps to a dict and stays.
+    """
+    if isinstance(node, dict):
+        if isinstance(node.get("title"), str):
+            del node["title"]
+        for value in node.values():
+            _strip_schema_titles(value)
+    elif isinstance(node, list):
+        for value in node:
+            _strip_schema_titles(value)
+
+
+def _reject_unknown_args(tool: Any) -> None:
+    """Make an argument the tool does not declare an error naming the closest one.
+
+    Pydantic ignores unknown keys by default, so a misspelled parameter
+    (``limit`` for ``top_n``) would silently fall back to its default.
+    """
+    base = tool.fn_metadata.arg_model
+    names = sorted(field.alias or name for name, field in base.model_fields.items())
+    tool_name = tool.name
+
+    def check(cls: Any, data: Any) -> Any:
+        if isinstance(data, dict):
+            for key in data:
+                if key not in names:
+                    close = difflib.get_close_matches(key, names, n=1)
+                    hint = f"; did you mean '{close[0]}'?" if close else "."
+                    raise ValueError(
+                        f"unknown parameter '{key}' for tool '{tool_name}'{hint} "
+                        f"Valid parameters: {', '.join(names)}"
+                    )
+        return data
+
+    tool.fn_metadata.arg_model = create_model(
+        base.__name__,
+        __base__=base,
+        __validators__={
+            # pydantic types the decorated validator as a descriptor proxy
+            "reject_unknown_args": cast("Callable[..., Any]", model_validator(mode="before")(check))
+        },
+    )
+
+
+def _tool(*args: Any, **kwargs: Any) -> Any:
+    kwargs.setdefault("structured_output", False)
+    register = _register_tool(*args, **kwargs)
+
+    def decorator(fn: Any) -> Any:
+        name = kwargs.get("name") or (args[0] if args and isinstance(args[0], str) else None)
+        name = name or fn.__name__
+        # The SDK keeps the first Tool registered under a name. A module that
+        # registers the name again is being reloaded (open_sphere(force_reload=True)):
+        # serve its new body. A same-name tool from another module stays a duplicate.
+        existing = mcp._tool_manager._tools.get(name)
+        if existing is not None and getattr(existing.fn, "__module__", None) == getattr(
+            fn, "__module__", None
+        ):
+            mcp._tool_manager.remove_tool(name)
+        registered = register(fn)
+        # The generated titles repeat each parameter name; they are sent with
+        # every tool schema in every conversation.
+        tool = mcp._tool_manager._tools.get(name)
+        if tool is not None:
+            _strip_schema_titles(tool.parameters)
+            _reject_unknown_args(tool)
+        return registered
+
+    return decorator
+
+
+mcp.tool = _tool  # type: ignore[method-assign]
 
 # Advertise tools/list_changed capability — dynamic tool loading changes
 # the tool list after open_sphere / close_sphere.
-_orig_create_init_opts = mcp._mcp_server.create_initialization_options
+_orig_create_init_opts = mcp._lowlevel_server.create_initialization_options
 
 
-def _create_init_opts_with_tools_changed(**kwargs):
+def _create_init_opts_with_tools_changed(**kwargs: Any) -> InitializationOptions:
     return _orig_create_init_opts(
         notification_options=NotificationOptions(tools_changed=True),
         **kwargs,
     )
 
 
-mcp._mcp_server.create_initialization_options = _create_init_opts_with_tools_changed  # type: ignore[assignment]
+mcp._lowlevel_server.create_initialization_options = _create_init_opts_with_tools_changed  # type: ignore[assignment]  # monkeypatch: advertise tools/list_changed
+
 
 # ---------------------------------------------------------------------------
-# Global state — one sphere / session / navigator per server process
+# Session state — one sphere / session / navigator per client session.
+# stdio and in-memory clients use the process's own "local" session; HTTP
+# clients get one per Mcp-Session-Id (or X-Hypertopos-Session header).
 # ---------------------------------------------------------------------------
-_state: dict[str, Any] = {
-    "sphere": None,
-    "session": None,
-    "navigator": None,
-    "engine": None,
-    "manifest": None,
-    "path": None,
-    "manual_mode": False,
-}
+def _new_state() -> dict[str, Any]:
+    return {
+        "sphere": None,
+        "session": None,
+        "navigator": None,
+        "engine": None,
+        "manifest": None,
+        "path": None,
+        "manual_mode": False,
+        "response_format": None,
+        "phase": 1,
+        "capabilities": None,
+    }
+
+
+def _new_stats() -> dict[str, Any]:
+    return {"call_count": 0, "total_elapsed_ms": 0.0, "per_tool": {}, "session_start": None}
+
+
+@dataclasses.dataclass
+class SessionState:
+    """Everything one client session reads and writes through ``_state``."""
+
+    key: str
+    data: dict[str, Any] = dataclasses.field(default_factory=_new_state)
+    stats: dict[str, Any] = dataclasses.field(default_factory=_new_stats)
+    lock: anyio.Lock = dataclasses.field(default_factory=anyio.Lock)
+
+
+_LOCAL_KEY = "local"
+_sessions: dict[str, SessionState] = {_LOCAL_KEY: SessionState(_LOCAL_KEY)}
+_current_session: contextvars.ContextVar[SessionState | None] = contextvars.ContextVar(
+    "hypertopos_session", default=None
+)
+
+
+def current_session() -> SessionState:
+    """The session the running request belongs to (the local one outside requests)."""
+    return _current_session.get() or _sessions[_LOCAL_KEY]
+
+
+def session_key(ctx: Any) -> str:
+    """Key of the client session a request belongs to.
+
+    Stateful HTTP connections carry ``Mcp-Session-Id``; duplex transports
+    (stdio, in-memory clients) have no HTTP request and map to the process's
+    own session; HTTP without a session id uses ``X-Hypertopos-Session`` when
+    sent, else one shared anonymous session.
+    """
+    connection = getattr(getattr(ctx, "session", None), "_connection", None)
+    session_id = getattr(connection, "session_id", None)
+    if session_id:
+        return f"http:{session_id}"
+    request = getattr(ctx, "request", None)
+    if request is None:
+        return _LOCAL_KEY
+    header = (getattr(request, "headers", None) or {}).get("x-hypertopos-session")
+    return f"header:{header}" if header else "anonymous"
+
+
+def live_session_keys() -> list[str]:
+    """Keys of the client sessions that have a sphere open."""
+    return [key for key, state in _sessions.items() if state.data.get("session") is not None]
+
+
+def forget_session(key: str) -> None:
+    """Drop a client session from the registry (the local session always stays)."""
+    if key != _LOCAL_KEY:
+        _sessions.pop(key, None)
+
+
+def _evict_session(key: str) -> None:
+    """Close a client session's sphere and drop the session from the registry."""
+    state = _sessions.pop(key, None)
+    session = state.data.get("session") if state is not None else None
+    if session is not None:
+        with contextlib.suppress(Exception):
+            session.close(purge_temporal=True)
+
+
+# The SDK gives a connection's exit stack a few seconds to unwind; eviction
+# waits a little less than that for a running call before closing anyway.
+_EVICT_WAIT_SECONDS = 4.0
+
+
+async def _evict_session_when_idle(key: str) -> None:
+    """Evict ``key`` once its running call (if any) has finished."""
+    state = _sessions.get(key)
+    if state is not None:
+        with anyio.move_on_after(_EVICT_WAIT_SECONDS):
+            async with state.lock:
+                _evict_session(key)
+                return
+    _evict_session(key)
+
+
+@contextlib.contextmanager
+def session_scope(key: str) -> Iterator[SessionState]:
+    """Run the enclosed block in session ``key`` (created on first use)."""
+    state = _sessions.setdefault(key, SessionState(key))
+    token = _current_session.set(state)
+    try:
+        yield state
+    finally:
+        _current_session.reset(token)
+
+
+class _SessionMapping(MutableMapping[str, Any]):
+    """Module-level name that forwards to one dict of the current session."""
+
+    def __init__(self, attr: str) -> None:
+        self._attr = attr
+
+    def _target(self) -> dict[str, Any]:
+        target: dict[str, Any] = getattr(current_session(), self._attr)
+        return target
+
+    def __getitem__(self, key: str) -> Any:
+        return self._target()[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self._target()[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        del self._target()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._target())
+
+    def __len__(self) -> int:
+        return len(self._target())
+
+    def __repr__(self) -> str:
+        return f"<{self._attr} of session {current_session().key!r}: {self._target()!r}>"
+
+
+_state: MutableMapping[str, Any] = _SessionMapping("data")
+
+RESPONSE_FORMATS = ("compact", "full")
+
+
+def active_response_format() -> str:
+    """Session override (``open_sphere(response_format=)``) > ``HYPERTOPOS_MCP_FORMAT`` > compact.
+
+    ``compact`` drops subtrees an agent rarely needs (positional delta vectors when a
+    labelled form is present, numeric properties columns) and says so in ``omitted``;
+    ``full`` returns everything.
+    """
+    session = _state.get("response_format")
+    if session in RESPONSE_FORMATS:
+        return str(session)
+    env = os.environ.get("HYPERTOPOS_MCP_FORMAT", "compact").strip().lower()
+    return env if env in RESPONSE_FORMATS else "compact"
+
+
+def resolve_verbose(verbose: bool | None) -> bool:
+    """Explicit per-call value wins; ``None`` follows the session format (full → True)."""
+    return verbose if verbose is not None else active_response_format() == "full"
+
 
 # ---------------------------------------------------------------------------
-# Call stats — aggregate MCP tool call counting (separate from _state so
+# Call stats — per-session MCP tool call counting (separate from _state so
 # close_sphere can read stats after clearing _state)
 # ---------------------------------------------------------------------------
-_call_stats: dict[str, Any] = {
-    "call_count": 0,
-    "total_elapsed_ms": 0.0,
-    "per_tool": {},
-    "session_start": None,
-}
+_call_stats: MutableMapping[str, Any] = _SessionMapping("stats")
 
 
 def _reset_call_stats() -> None:
@@ -147,9 +514,9 @@ def _reload_hypertopos_modules() -> None:
     server.py is intentionally excluded — it holds global _state and _state references
     imported by tool modules would break if server.py were reloaded.
 
-    Note: after reload, tool module re-import re-registers tools via @mcp.tool().
-    Dynamic stash may hold pre-reload Tool objects. This is acceptable for dev use
-    (force_reload=True) — open_sphere calls _register_phase2_tools which refreshes.
+    Note: after reload, tool module re-import re-registers tools via @mcp.tool(),
+    which replaces the registered Tool objects (see ``_tool``); tool visibility is
+    per-session state.
     """
     global HyperSphere
 
@@ -160,14 +527,16 @@ def _reload_hypertopos_modules() -> None:
             or (n.startswith("hypertopos_mcp.") and n != "hypertopos_mcp.server")
         )
 
-    # hypertopos.* first (library), then hypertopos_mcp.* (MCP layer); shallowest first
-    # so dependencies are reloaded before consumers that import from them
+    # hypertopos.* first (library), then hypertopos_mcp.* (MCP layer). Package
+    # roots go last within their layer: a root re-imports names from its
+    # submodules, so those must already be reloaded.
     to_reload = sorted(
         [n for n in sys.modules if _is_reloadable(n)],
         key=lambda n: (
             0 if (n == "hypertopos" or n.startswith("hypertopos.")) else 1,
+            n in ("hypertopos", "hypertopos_mcp"),
             n.count("."),
-        ),  # noqa: E501
+        ),
     )
     for mod_name in to_reload:
         importlib.reload(sys.modules[mod_name])
@@ -176,11 +545,10 @@ def _reload_hypertopos_modules() -> None:
 
 def _require_sphere() -> None:
     if _state["sphere"] is None:
-        default = os.environ.get("HYPERTOPOS_SPHERE_PATH")
-        if default:
-            _do_open_sphere(default)
-        else:
-            raise RuntimeError("No sphere open. Call open_sphere(path) first.")
+        raise RuntimeError(
+            "No sphere open. Call open_sphere(path) first "
+            "(open_sphere() without a path opens HYPERTOPOS_SPHERE_PATH when it is set)."
+        )
 
 
 def _require_navigator() -> None:
@@ -189,26 +557,47 @@ def _require_navigator() -> None:
         raise RuntimeError("Navigator not available.")
 
 
-def _do_open_sphere(path: str) -> None:
-    """Load a GDS sphere into global state (no return value)."""
+def _do_open_sphere(path: str, branch: str | None = None) -> None:
+    """Load a GDS sphere (main, or ``branch``) into global state.
+
+    The previous session stays open and in place if loading the new one fails.
+    """
+    hs = HyperSphere.open(path, branch=branch)
+    key = current_session().key
+    if key == _LOCAL_KEY:
+        # Other server processes (and HTTP sessions) may share the sphere; clear only ours.
+        agent_id = f"mcp-{os.getpid()}"
+    else:
+        # Other client sessions may be open on the same sphere; clear only ours.
+        agent_id = "mcp-" + "".join(c if c.isalnum() or c in "-_" else "_" for c in key)
+    hs._writer.purge_agent_temporal(agent_id)
+    session = hs.session(agent_id)
+    # Tools that read the open-time sphere see the session's snapshot.
+    hs._sphere = session.sphere()
+    navigator = session.navigator()
+
     if _state["session"] is not None:
         with contextlib.suppress(Exception):
             _state["session"].close()
-
-    hs = HyperSphere.open(path)
-    hs._writer.purge_all_agents()
-    session = hs.session("mcp-agent")
-    navigator = session.navigator()
-
     _state["sphere"] = hs
     _state["session"] = session
     _state["navigator"] = navigator
     _state["engine"] = session._engine
     _state["manifest"] = session._manifest
     _state["path"] = path
+    _state["branch"] = branch
     _state.pop("explored_steps", None)
+    _state.pop("investigation_hints", None)
     _state["manual_mode"] = False
     _reset_call_stats()
+
+
+def _refresh_state() -> None:
+    """Point the open-time sphere at the session's current snapshot.
+
+    Call after any tool that writes sphere state through the session.
+    """
+    _state["sphere"]._sphere = _state["session"].sphere()
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +619,8 @@ _TOOL_TIERS: dict[str, str] = {
     "search_entities": "base",
     "search_entities_fts": "base",
     "recalibrate": "base",
+    "manage_branch": "base",
+    "compare_branches": "base",
     "goto": "base",
     "get_position": "base",
     "walk_line": "base",
@@ -241,7 +632,6 @@ _TOOL_TIERS: dict[str, str] = {
     "audit_pattern_dims": "base",
     "audit_label_alignment": "base",
     "attract_boundary": "base",
-    "find_neighborhood": "base",
     "get_polygon": "base",
     "get_event_polygons": "base",
     "compare_entities": "base",
@@ -297,7 +687,6 @@ _TOOL_TIERS: dict[str, str] = {
     # These require a navigator but NOT sphere_overview — they appear immediately
     # after open_sphere so agents can traverse edges without manual mode unlock.
     "find_geometric_path": "edge",
-    "discover_chains": "edge",
     "edge_stats": "edge",
     "entity_flow": "edge",
     "contagion_score": "edge",
@@ -338,9 +727,32 @@ _TOOL_TIERS: dict[str, str] = {
     "classify_trajectory": "trajectory_index",
 }
 
-_tool_stash: dict[str, object] = {}
 
-_sphere_capabilities: dict[str, bool] | None = None
+def sphere_capabilities() -> dict[str, bool] | None:
+    """Capabilities of the current session's open sphere (None before open_sphere)."""
+    caps: dict[str, bool] | None = _state.get("capabilities")
+    return caps
+
+
+def visible_tools() -> set[str]:
+    """Tools the current session sees: its phase and its sphere's capabilities.
+
+    Phase 1 (no sphere): ``always``. Phase 2 (after open_sphere): plus
+    ``gateway`` and ``edge``. Phase 3 (after sphere_overview): every tier the
+    sphere can serve. Tools without a tier are always visible.
+    """
+    phase = _state.get("phase") or 1
+    caps = sphere_capabilities()
+    visible = set()
+    for tool in mcp._tool_manager.list_tools():
+        tier = _TOOL_TIERS.get(tool.name, "always")
+        if (
+            tier == "always"
+            or (phase >= 2 and tier in ("gateway", "edge"))
+            or (phase >= 3 and _tier_available(tier, caps))
+        ):
+            visible.add(tool.name)
+    return visible
 
 
 def _detect_capabilities() -> dict[str, bool]:
@@ -351,7 +763,7 @@ def _detect_capabilities() -> dict[str, bool]:
     patterns = sphere.patterns
     sphere_path = pathlib.Path(_state["path"])
     has_temporal = any(
-        (sphere_path / "temporal" / pid).exists()
+        (sphere_path / "temporal" / pid / "data.lance").exists()
         for pid, p in patterns.items()
         if p.pattern_type == "anchor"
     )
@@ -368,10 +780,7 @@ def _detect_capabilities() -> dict[str, bool]:
                 if el and el not in seen_lines:
                     seen_lines.add(el)
                     pm = nav._discover_pattern_map(el)
-                    n_cross = sum(
-                        1 for kind in pm.values()
-                        if kind in _CROSS_PATTERN_TYPES
-                    )
+                    n_cross = sum(1 for kind in pm.values() if kind in _CROSS_PATTERN_TYPES)
                     if n_cross >= 2:
                         multi_pattern = True
                         break
@@ -403,88 +812,63 @@ def _tier_available(tier: str, caps: dict[str, bool] | None) -> bool:
     return True
 
 
-def _stash_tool(name: str) -> None:
-    """Remove a tool from FastMCP and stash its Tool object for later re-add.
-
-    Uses internal _tool_manager._tools — pinned to FastMCP/mcp SDK behavior.
-    """
-    tool_obj = mcp._tool_manager._tools.get(name)
-    if tool_obj is None:
-        return
-    _tool_stash[name] = tool_obj
-    mcp.remove_tool(name)
-
-
-def _restore_tool(name: str) -> None:
-    """Re-add a previously stashed tool to FastMCP.
-
-    Restores the exact Tool object (not re-wrapped) to preserve original
-    registration state. Uses internal _tool_manager._tools dict.
-    """
-    tool_obj = _tool_stash.pop(name, None)
-    if tool_obj is None:
-        return
-    mcp._tool_manager._tools[name] = tool_obj
-
-
-def _notify_tools_changed() -> None:
+def _notify_tools_changed(ctx: Context | None = None) -> None:
     """Send notifications/tools/list_changed to the connected client.
 
-    At startup (no active session) this is a silent no-op.
-    During open_sphere/close_sphere the request context is available
-    so the notification reaches the client.
+    ``ctx`` is the request context of the tool that changed the tool list;
+    without one (startup, direct calls) this is a no-op. Synchronous tools
+    run in a worker thread, so the notification is sent through the event
+    loop from there.
     """
-    try:
-        session = mcp._mcp_server.request_context.session
-        asyncio.get_event_loop().create_task(session.send_tool_list_changed())
-    except (LookupError, RuntimeError, AttributeError):
-        pass  # no active request context (startup) — skip
+    if ctx is None:
+        return
+    # Handshake-era clients get notifications/tools/list_changed on the
+    # session; 2026-era clients only through subscriptions/listen.
+    for send in (ctx.session.send_tool_list_changed, ctx.notify_tools_changed):
+        try:
+            anyio.from_thread.run(send)
+        except RuntimeError:
+            # Already on the event loop (an async tool): schedule it.
+            with contextlib.suppress(RuntimeError):
+                asyncio.get_running_loop().create_task(send())
 
 
-def _unregister_phase2_tools() -> None:
-    """Remove all non-always tools. Called at startup and after close_sphere."""
-    global _sphere_capabilities
-    _sphere_capabilities = None
-    for name, tier in _TOOL_TIERS.items():
-        if tier != "always":
-            _stash_tool(name)
-    _notify_tools_changed()
+def _unregister_phase2_tools(ctx: Context | None = None) -> None:
+    """Back to Phase 1 for this session. Called at startup and after close_sphere."""
+    _state["phase"] = 1
+    _state["capabilities"] = None
+    _notify_tools_changed(ctx)
 
 
-def _register_phase2_tools() -> None:
-    """Re-add gateway + edge tools. Called after open_sphere (Phase 2).
+def _register_phase2_tools(ctx: Context | None = None) -> None:
+    """Phase 2 for this session: gateway + edge tools. Called after open_sphere.
 
     Exposes detect_pattern + sphere_overview + edge table tools — agent can
     traverse edges immediately without manual mode unlock.
     Full manual toolset is unlocked by _register_manual_tools() after sphere_overview.
     """
-    global _sphere_capabilities
-    _sphere_capabilities = _detect_capabilities()
+    _state["capabilities"] = _detect_capabilities()
     _state["manual_mode"] = False
-    for name, tier in _TOOL_TIERS.items():
-        if tier in ("gateway", "edge"):
-            _restore_tool(name)
-    _notify_tools_changed()
+    _state["phase"] = 2
+    _notify_tools_changed(ctx)
 
 
-def _register_manual_tools() -> None:
-    """Unlock full manual toolset. Called after sphere_overview (Phase 3).
+def _register_manual_tools(ctx: Context | None = None) -> None:
+    """Phase 3 for this session: every capability-matched tool. Called after sphere_overview.
 
-    Restores all capability-matched tools (base, temporal, multi_pattern,
-    trajectory_index). No-op if already in manual mode.
+    No-op if already in manual mode.
     """
     if _state.get("manual_mode"):
         return
     _state["manual_mode"] = True
-    for name, tier in _TOOL_TIERS.items():
-        if tier not in ("always", "gateway") and _tier_available(tier, _sphere_capabilities):
-            _restore_tool(name)
-    _notify_tools_changed()
+    _state["phase"] = 3
+    _notify_tools_changed(ctx)
 
 
 # ---------------------------------------------------------------------------
 # MCP Resources — cacheable sphere metadata
 # ---------------------------------------------------------------------------
+
 
 @mcp.resource(
     "sphere://info",
@@ -532,9 +916,10 @@ def sphere_info_resource() -> str:
 )
 def sphere_capabilities_resource() -> str:
     """Return detected capabilities as JSON. Called on-demand by the MCP client."""
-    if _sphere_capabilities is None:
+    caps = sphere_capabilities()
+    if caps is None:
         return _json.dumps({"error": "No sphere open or capabilities not detected yet."})
-    return _json.dumps(_sphere_capabilities, indent=2)
+    return _json.dumps(caps, indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -589,6 +974,7 @@ def compare(key_a: str, key_b: str, pattern_id: str) -> str:
 # MCP Sampling helpers
 # ---------------------------------------------------------------------------
 
+
 async def _sample_llm(
     ctx: object,
     prompt: str,
@@ -609,24 +995,22 @@ async def _sample_llm(
     # Primary path: MCP sampling via client
     try:
         if isinstance(ctx, Context):
-            caps = (
-                ctx.session.client_params.capabilities
-                if hasattr(ctx, "session")
-                else None
-            )
+            caps = ctx.session.client_capabilities
             if caps is not None and getattr(caps, "sampling", None) is not None:
                 result = await ctx.session.create_message(
-                    messages=[SamplingMessage(
-                        role="user",
-                        content=TextContent(type="text", text=prompt),
-                    )],
+                    messages=[
+                        SamplingMessage(
+                            role="user",
+                            content=TextContent(type="text", text=prompt),
+                        )
+                    ],
                     max_tokens=max_tokens,
                     system_prompt=system_prompt,
                     temperature=temperature,
                     include_context="thisServer",
                 )
                 if hasattr(result.content, "text"):
-                    return result.content.text
+                    return cast(str, result.content.text)
                 return str(result.content)
     except Exception:
         pass
@@ -642,7 +1026,7 @@ async def _sample_llm(
                 messages=[{"role": "user", "content": prompt}],
                 temperature=temperature,
             )
-            return response.content[0].text
+            return cast(str, response.content[0].text)
         except Exception:
             return None
     return None

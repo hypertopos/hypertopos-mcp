@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import Any
 
 
-def _serialize_point(pt: Any) -> dict:
+def _serialize_point(pt: Any) -> dict[str, Any]:
     from datetime import date, datetime
 
     def _safe(v: Any) -> Any:
@@ -24,7 +24,7 @@ def _serialize_point(pt: Any) -> dict:
     }
 
 
-def _serialize_edge(e: Any) -> dict:
+def _serialize_edge(e: Any) -> dict[str, Any]:
     return {
         "line_id": e.line_id,
         "point_key": e.point_key,
@@ -34,7 +34,7 @@ def _serialize_edge(e: Any) -> dict:
     }
 
 
-def _serialize_polygon(poly: Any) -> dict:
+def _serialize_polygon(poly: Any) -> dict[str, Any]:
     alive = poly.alive_edges()
     result = {
         "type": "Polygon",
@@ -48,10 +48,16 @@ def _serialize_polygon(poly: Any) -> dict:
             else {}
         ),
         "is_anomaly": bool(poly.is_anomaly),
-        **({"bregman_divergence": round(float(poly.bregman_divergence), 4)}
-           if getattr(poly, "bregman_divergence", None) is not None else {}),
-        **({"anomaly_confidence": round(float(poly.anomaly_confidence), 4)}
-           if getattr(poly, "anomaly_confidence", None) not in (None, 0.0) else {}),
+        **(
+            {"bregman_divergence": round(float(poly.bregman_divergence), 4)}
+            if getattr(poly, "bregman_divergence", None) is not None
+            else {}
+        ),
+        **(
+            {"anomaly_confidence": round(float(poly.anomaly_confidence), 4)}
+            if getattr(poly, "anomaly_confidence", None) not in (None, 0.0)
+            else {}
+        ),
         "total_edges": len(poly.edges),
         "alive_edges": len(alive),
         "edges": [_serialize_edge(e) for e in alive],
@@ -59,15 +65,13 @@ def _serialize_polygon(poly: Any) -> dict:
     # FDR q-value (set by navigator when fdr_alpha is used)
     q_value = getattr(poly, "q_value", None)
     if q_value is not None:
-        result["q_value"] = round(float(q_value), 6)
+        result["q_value"] = float(q_value)
     # Per-dim FDR (set by navigator when fdr_axis in {"per_dim", "both"})
     min_q_per_dim = getattr(poly, "min_q_per_dim", None)
     if min_q_per_dim is not None:
-        result["min_q_per_dim"] = round(float(min_q_per_dim), 6)
+        result["min_q_per_dim"] = float(min_q_per_dim)
         result["dominant_q_dim_idx"] = int(poly.dominant_q_dim_idx)
-        result["q_values_per_dim"] = [
-            round(float(q), 6) for q in poly.q_values_per_dim
-        ]
+        result["q_values_per_dim"] = [float(q) for q in poly.q_values_per_dim]
     # Representativeness count (set by navigator when select="diverse")
     representativeness = getattr(poly, "representativeness", None)
     if representativeness is not None:
@@ -75,10 +79,10 @@ def _serialize_polygon(poly: Any) -> dict:
     # Multi-resolution FDR cell fields (set by navigator when cell_axis is active)
     cell_q_spatial = getattr(poly, "cell_q_spatial", None)
     if cell_q_spatial is not None:
-        result["cell_q_spatial"] = round(float(cell_q_spatial), 6)
+        result["cell_q_spatial"] = float(cell_q_spatial)
     cell_q_temporal = getattr(poly, "cell_q_temporal", None)
     if cell_q_temporal is not None:
-        result["cell_q_temporal"] = round(float(cell_q_temporal), 6)
+        result["cell_q_temporal"] = float(cell_q_temporal)
     cell_path = getattr(poly, "cell_path", None)
     if cell_path is not None:
         result["cell_path"] = [list(pair) for pair in cell_path]
@@ -92,27 +96,29 @@ def _serialize_polygon(poly: Any) -> dict:
     signed_confidence_score = getattr(poly, "signed_confidence_score", None)
     if signed_confidence_score is not None:
         import math as _math
+
         result["signed_confidence_score"] = (
-            None if not _math.isfinite(float(signed_confidence_score))
+            None
+            if not _math.isfinite(float(signed_confidence_score))
             else round(float(signed_confidence_score), 6)
         )
         lda_alignment = getattr(poly, "lda_alignment", None)
         if lda_alignment is not None:
             result["lda_alignment"] = (
-                None if not _math.isfinite(float(lda_alignment))
-                else round(float(lda_alignment), 6)
+                None if not _math.isfinite(float(lda_alignment)) else round(float(lda_alignment), 6)
             )
         reliability_penalty = getattr(poly, "reliability_penalty", None)
         if reliability_penalty is not None:
             result["reliability_penalty"] = (
-                None if not _math.isfinite(float(reliability_penalty))
+                None
+                if not _math.isfinite(float(reliability_penalty))
                 else round(float(reliability_penalty), 6)
             )
     return result
 
 
-def _serialize_slice(sl: Any, pattern: Any | None = None) -> dict:
-    result: dict = {
+def _serialize_slice(sl: Any, pattern: Any | None = None) -> dict[str, Any]:
+    result: dict[str, Any] = {
         "slice_index": sl.slice_index,
         "timestamp": sl.timestamp.isoformat(),
         "deformation_type": sl.deformation_type,
@@ -128,14 +134,14 @@ def _serialize_slice(sl: Any, pattern: Any | None = None) -> dict:
     frozen = getattr(sl, "delta_norm_frozen_pop", None)
     if frozen is not None:
         import math as _math
+
         result["delta_norm_frozen_pop"] = (
-            None if not _math.isfinite(float(frozen))
-            else round(float(frozen), 4)
+            None if not _math.isfinite(float(frozen)) else round(float(frozen), 4)
         )
     return result
 
 
-def _serialize_solid(solid: Any, pattern: Any | None = None) -> dict:
+def _serialize_solid(solid: Any, pattern: Any | None = None) -> dict[str, Any]:
     return {
         "type": "Solid",
         "primary_key": solid.primary_key,
@@ -146,7 +152,7 @@ def _serialize_solid(solid: Any, pattern: Any | None = None) -> dict:
     }
 
 
-def _serialize_position(pos: Any) -> dict:
+def _serialize_position(pos: Any) -> dict[str, Any]:
     if pos is None:
         return {"type": "None", "message": "Navigator has no position. Use goto() first."}
     from hypertopos.model.objects import Point, Polygon, Solid

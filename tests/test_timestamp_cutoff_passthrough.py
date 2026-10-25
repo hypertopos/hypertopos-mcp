@@ -74,8 +74,10 @@ def fake_navigator(monkeypatch):
         "outgoing": [],
         "incoming": [],
         "summary": {
-            "total_outgoing": 0, "total_incoming": 0,
-            "anomalous_outgoing": 0, "anomalous_incoming": 0,
+            "total_outgoing": 0,
+            "total_incoming": 0,
+            "anomalous_outgoing": 0,
+            "anomalous_incoming": 0,
         },
     }
     monkeypatch.setitem(_state, "navigator", nav)
@@ -92,50 +94,74 @@ class TestTimestampCutoffPassthrough:
     def test_contagion_score_threads_cutoff(self, fake_navigator):
         contagion_score("X", "p", timestamp_cutoff=CUTOFF)
         fake_navigator.contagion_score.assert_called_once_with(
-            "X", "p", timestamp_cutoff=CUTOFF,
+            "X",
+            "p",
+            timestamp_cutoff=CUTOFF,
         )
 
     def test_contagion_score_default_none(self, fake_navigator):
         contagion_score("X", "p")
         fake_navigator.contagion_score.assert_called_once_with(
-            "X", "p", timestamp_cutoff=None,
+            "X",
+            "p",
+            timestamp_cutoff=None,
         )
 
     def test_contagion_score_batch_threads_cutoff(self, fake_navigator):
         contagion_score_batch(["X", "Y"], "p", timestamp_cutoff=CUTOFF)
         fake_navigator.contagion_score_batch.assert_called_once_with(
-            ["X", "Y"], "p", max_keys=200, timestamp_cutoff=CUTOFF,
+            ["X", "Y"],
+            "p",
+            max_keys=200,
+            timestamp_cutoff=CUTOFF,
         )
 
     def test_entity_flow_threads_cutoff(self, fake_navigator):
         entity_flow("X", "p", timestamp_cutoff=CUTOFF)
         fake_navigator.entity_flow.assert_called_once_with(
-            "X", "p", top_n=20, timestamp_cutoff=CUTOFF,
+            "X",
+            "p",
+            top_n=20,
+            timestamp_cutoff=CUTOFF,
         )
 
     def test_degree_velocity_threads_cutoff(self, fake_navigator):
         degree_velocity("X", "p", timestamp_cutoff=CUTOFF)
         fake_navigator.degree_velocity.assert_called_once_with(
-            "X", "p", n_buckets=4, timestamp_cutoff=CUTOFF,
+            "X",
+            "p",
+            n_buckets=4,
+            timestamp_cutoff=CUTOFF,
         )
 
     def test_propagate_influence_threads_cutoff(self, fake_navigator):
         propagate_influence(["X"], "p", timestamp_cutoff=CUTOFF)
         fake_navigator.propagate_influence.assert_called_once_with(
-            ["X"], "p",
-            max_depth=3, decay=0.7, min_threshold=0.001,
+            ["X"],
+            "p",
+            max_depth=3,
+            decay=0.7,
+            min_threshold=0.001,
             timestamp_cutoff=CUTOFF,
         )
 
     def test_find_counterparties_threads_cutoff(self, fake_navigator):
         find_counterparties(
-            "X", "lines", "from", "to",
+            "X",
+            "lines",
+            "from",
+            "to",
             pattern_id="p",
             timestamp_cutoff=CUTOFF,
         )
         fake_navigator.find_counterparties.assert_called_once_with(
-            "X", "lines", "from", "to",
-            pattern_id="p", top_n=20, use_edge_table=True,
+            "X",
+            "lines",
+            "from",
+            "to",
+            pattern_id="p",
+            top_n=20,
+            use_edge_table=True,
             timestamp_cutoff=CUTOFF,
         )
 

@@ -5,13 +5,15 @@ floats to JSON null — strict MCP parsers reject the Infinity / NaN literals
 json.dumps emits. get_polygon already sanitizes the same enriched entity
 properties; the position tools (goto / get_position / walk_line /
 jump_polygon / emerge) must match."""
+
 from __future__ import annotations
 
 import json
 from unittest.mock import MagicMock
 
-import hypertopos_mcp.tools.navigation as navmod
 import pytest
+
+import hypertopos_mcp.tools.navigation as navmod
 from hypertopos_mcp.server import _state
 
 

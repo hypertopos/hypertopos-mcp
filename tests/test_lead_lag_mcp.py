@@ -7,6 +7,7 @@ format 2.4) — regression guard for missing local imports per
 feedback_mcp_serializer_imports_local.md and strict-JSON sanitisation per
 feedback_mcp_strict_json_sanitize.md.
 """
+
 from __future__ import annotations
 
 import json
@@ -51,6 +52,7 @@ class TestFindLeadLagMcp:
         assert len(report["volatility_series_b"]) == N - 1
         # correlation_by_lag length = 2 * max_lag + 1
         assert len(report["correlation_by_lag"]) == 2 * report["max_lag"] + 1
+
         # No NaN / inf in any nested value (verifies sanitiser path)
         def _check_finite_or_none(obj):
             if isinstance(obj, dict):
@@ -61,7 +63,8 @@ class TestFindLeadLagMcp:
                     _check_finite_or_none(v)
             elif isinstance(obj, float):
                 # JSON load can't return inf / NaN — those raise on parse
-                assert obj == obj   # NaN check (always True for finite)
+                assert obj == obj  # NaN check (always True for finite)
+
         _check_finite_or_none(report)
 
     def test_verbose_includes_full_matrix(self, open_berka_sphere):
@@ -79,8 +82,15 @@ class TestFindLeadLagMcp:
         assert len(report["per_dim_pairs"]) == report["n_dim_pairs"]
         # Each entry has every DimPairLeadLag field
         for p in report["per_dim_pairs"][:3]:
-            for k in ("dim_index_a", "dim_index_b", "lag", "correlation",
-                      "p_value", "q_value", "is_significant"):
+            for k in (
+                "dim_index_a",
+                "dim_index_b",
+                "lag",
+                "correlation",
+                "p_value",
+                "q_value",
+                "is_significant",
+            ):
                 assert k in p
 
     def test_storey_method_runs(self, open_berka_sphere):
@@ -98,10 +108,11 @@ class TestFindLeadLagMcp:
     def test_validation_event_pattern_raises(self, open_berka_sphere):
         """tx_pattern is event-type — raises ValueError, not silent return."""
         import pytest
+
         from hypertopos_mcp.tools.analysis import find_lead_lag
 
         # Berka has no event temporal — try an obviously wrong pattern combo
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             find_lead_lag(
                 pattern_a="account_behavior_pattern",
                 pattern_b="account_behavior_pattern",  # same pattern

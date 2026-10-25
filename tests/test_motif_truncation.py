@@ -8,13 +8,16 @@ instead of returned inline. The helper caps edges/breakdown at the top 50
 contributors by edge_potential DESC while still surfacing population
 statistics over the full edge set via ``breakdown_summary``.
 """
+
 from __future__ import annotations
 
 import json
 import math
 
 import pytest
-from hypertopos_mcp.tools.analysis import _sanitize_for_json, _truncate_motif_instance
+
+from hypertopos_mcp._format import sanitize_for_json as _sanitize_for_json
+from hypertopos_mcp.tools.analysis import _truncate_motif_instance
 
 
 def _make_breakdown(n: int, ep_base: float = 1.0) -> list[dict]:
@@ -49,7 +52,6 @@ def _make_inst(k: int) -> dict:
 
 
 class TestTruncateMotifInstance:
-
     def test_small_motif_passthrough_untruncated(self):
         """k <= threshold → no truncation, flags False, no summary."""
         inst = _make_inst(3)
@@ -99,8 +101,7 @@ class TestTruncateMotifInstance:
         out = _truncate_motif_instance(inst, threshold=50)
         payload = json.dumps(out, default=str)
         assert len(payload) < 10_000, (
-            f"Expected truncated payload < 10kB, got {len(payload)}B "
-            f"on k=500 motif"
+            f"Expected truncated payload < 10kB, got {len(payload)}B on k=500 motif"
         )
 
     def test_exact_threshold_is_not_truncated(self):
@@ -176,6 +177,7 @@ class TestSanitizeForJson:
     def test_numpy_float32_nan_and_inf_sanitized(self):
         """Defensive: np.float32 is NOT a python-float subclass, easy leak."""
         import numpy as np
+
         assert _sanitize_for_json(np.float32("nan")) is None
         assert _sanitize_for_json(np.float32("inf")) is None
         assert _sanitize_for_json(np.float32("-inf")) is None

@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hypertopos-mcp"
-version = "0.8.1"
+version = "0.9.0"
 description = "MCP tools for exploring geometric data spaces with AI agents"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 dependencies = [
     "hypertopos",
-    "mcp[cli]>=1.20",
+    "mcp[cli]>=2.3,<3",
     "tzdata>=2024.1",
 ]
 
@@ -19,3 +19,24 @@ hypertopos-mcp = "hypertopos_mcp.main:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hypertopos_mcp"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+
+# Third-party libraries that ship without type stubs or a py.typed marker,
+# plus the optional anthropic SDK (sampling fallback; not a declared dependency).
+[[tool.mypy.overrides]]
+module = [
+    "anthropic.*",
+    "pyarrow.*",
+    "scipy.*",
+]
+ignore_missing_imports = true

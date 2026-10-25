@@ -4,16 +4,69 @@ Full tool parameter reference: [tools.md](tools.md)
 
 ## Overview
 
-**Transport:** stdio (FastMCP)
-**Config:** `.mcp.json` (project-scoped)
-**Start:** `python -m hypertopos_mcp.main`
-**Dependencies:** `hypertopos` + `mcp[cli]>=1.20`
-**Optional:** `anthropic>=0.40` (sampling fallback via Anthropic API)
+The server is a thin layer over the hypertopos Python library: each client session holds one open `HyperSession` and its navigator, and every tool translates a call into library calls and the result into compact JSON. It runs over stdio for one local agent or over streamable HTTP with an independent session per connected agent.
+
+**Start:** `hypertopos-mcp` or `python -m hypertopos_mcp.main`
+**Config:** the MCP client's server entry (e.g. a project-scoped `.mcp.json`); `HYPERTOPOS_SPHERE_PATH` sets the sphere `open_sphere()` opens without a path; `HYPERTOPOS_MCP_FORMAT` sets the default response format
+**Dependencies:** `hypertopos` + `mcp[cli]>=2.3,<3` (MCP Python SDK, `MCPServer`)
+**Optional:** the `anthropic` SDK, not a declared dependency — enables the sampling fallback of `detect_pattern` when installed
+
+## Transports and Client Sessions
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--transport {stdio,http}` | `stdio` | `http` serves the MCP streamable-HTTP transport on `127.0.0.1` |
+| `--port` | `8080` | TCP port for HTTP; ignored for stdio |
+| `--session-idle-timeout` | `1800` | Seconds an HTTP client session may stay idle before the server ends it and closes its sphere; ignored for stdio |
+| `--max-sessions` | `10000` | Most concurrent HTTP client sessions; ignored for stdio |
+
+All server state lives in a client session: the open sphere and its `HyperSession`, the tool phase, the response format, and the call statistics. A request is mapped to its session as follows:
+
+| Request | Session key |
+|---------|-------------|
+| stdio (or an in-memory client) | `local` — the process's single session |
+| HTTP (`--transport http`) with `Mcp-Session-Id` | `http:<id>` — a request without a session id is rejected |
+| Stateless embedding (`mcp.streamable_http_app(stateless_http=True)`) with an `X-Hypertopos-Session` header | `header:<value>` |
+| Stateless embedding without that header | `anonymous` — one session shared by every such request |
+
+The two stateless rows apply only to a host that mounts the app itself in stateless mode; `--transport http` always runs stateful. Header-keyed and anonymous sessions are not evicted by `--session-idle-timeout` or counted by `--max-sessions`.
+
+`get_session_stats` reports the caller's `session_key` and `sessions_live` (sessions with a sphere open). Tool calls, resource reads and prompt requests of one session run one at a time; those of different sessions run concurrently. When an HTTP session ends — the client disconnects or the idle timeout passes — the server closes its sphere and forgets it; `close_sphere` also forgets the calling session. `open_sphere(force_reload=True)` reloads modules every session shares, so it is refused while another session has a sphere open.
+
+Per-session state is the whole contract: the HTTP transport adds no authentication or access control of its own, and sessions of the same process share the host's filesystem access.
+
+## Snapshots and Branches
+
+`open_sphere` opens a session pinned to the sphere state current at that moment. Builds, ingests and recalibrations by other processes do not change what its tools return. `get_session_stats` carries a `snapshot` block (`pinned_at`, `stale`, `metadata_changed`, `pinned_versions`, `latest_versions`, `hint`); when `stale` is true, `open_sphere(path)` reopens on the latest state. There is no automatic refresh. A session's own `recalibrate` is visible to it immediately — it records a new calibration epoch, as a rebuild does, so `compare_calibrations` and the drift tools compare before and after it — and promoting a branch from a session open on main moves that session to the promoted state.
+
+A sphere branch is a copy-free what-if workspace. `open_sphere(path, branch=...)` opens a branch (the result's `ref` names it; main otherwise), and every tool then reads the branch. `manage_branch(action=...)` lists, creates, deletes or promotes branches; `recalibrate(pattern_id, branch=..., exclude_keys=[...])` fits on a branch — creating it when absent — without touching main, leaving the excluded entities out of the fit while still scoring them; `compare_branches(pattern_id, branch)` diffs one pattern between the branch and main (or another branch via `other`). Delete and promote are refused for the branch the calling session is open on. Full parameter and return details: [tools.md](tools.md#manage_branch).
+
+## Response Format
+
+Responses are read by an agent, so every repeated byte costs tokens on every call:
+
+- **Compact by default.** `open_sphere(response_format="compact" | "full")` sets the session's format; without it, `HYPERTOPOS_MCP_FORMAT` (read per call), else `compact`. An explicit per-call `summary=` / `verbose=` wins over both.
+- **`omitted`.** A compact response that leaves something out — positional `delta` vectors when a labelled form is present, numeric property columns, long recipe lists — carries one `omitted` map naming each dropped part and how to get it (`full_response`).
+- **`failed_parts`.** An optional part that could not be loaded is listed as `{part, error}` instead of silently missing.
+- **One table per entity list.** Entity properties come in one top-level `properties` table (`{columns, rows}`); properties of edge endpoints in `related_properties`, one table per line.
+- **Labelled over positional.** Dimension values are `{dim: value}` maps; shared prose is sent once (`advice_by_warning_type`, `interpretations`) and referenced.
+- **Encoding.** Compact JSON with `elapsed_ms` added to every response; floats keep `max(7, integer_digits + 2)` significant digits; non-ASCII text is sent as-is. Every response is strict JSON — non-finite numbers are `null`, numpy scalars are plain JSON numbers and booleans.
+- **Schemas and arguments.** Tool input schemas carry no generated `title` keywords. A call with a parameter the tool does not declare fails with the closest valid name ("did you mean 'top_n'?") and the list of valid parameters; tool errors keep their type and message.
 
 ## Dynamic Tool Loading
 
-The MCP server uses context-aware tool registration to minimize token consumption.
+![MCP tool phases](images/mcp-lifecycle.svg)
+
+The MCP server uses context-aware tool visibility to minimize token consumption.
 Tools are exposed in three phases based on sphere state and capabilities.
+
+Every tool (111 in all) is registered once at startup and assigned a tier in
+`_TOOL_TIERS` (`server.py`): `always` (3), `gateway` (2), `edge` (17), `base` (72),
+`temporal` (6), `multi_pattern` (8), `trajectory_index` (3). The phase is state of
+the client session (stdio has one, HTTP has one per client). The server middleware
+filters `tools/list` to the session's visible tools and refuses a `tools/call` of a
+tool the session's phase has not unlocked. Each phase change sends
+`notifications/tools/list_changed` to the client that caused it.
 
 ### Phase 1 — Before `open_sphere`
 
@@ -30,8 +83,8 @@ Gateway tools (tier: `gateway`):
 - `detect_pattern` — smart meta-tool: LLM plans + executes detection server-side
 - `sphere_overview` — population overview, anomaly rates, health checks
 
-Edge table tools (tier: `edge`, 18 tools):
-- `find_geometric_path`, `discover_chains`, `edge_stats`, `entity_flow`, `contagion_score`, `contagion_score_batch`, `degree_velocity`, `investigation_coverage`, `propagate_influence`, `cluster_bridges`, `anomalous_edges`, `find_witness_cohort`, `find_novel_entities`, `find_graph_geometry_tension`, `simulate_edge_removal`, `simulate_dimension_change`, `simulate_counterparty_removal`, `select_minimal_joint_edge_removal`
+Edge table tools (tier: `edge`, 17 tools):
+- `find_geometric_path`, `edge_stats`, `entity_flow`, `contagion_score`, `contagion_score_batch`, `degree_velocity`, `investigation_coverage`, `propagate_influence`, `cluster_bridges`, `anomalous_edges`, `find_witness_cohort`, `find_novel_entities`, `find_graph_geometry_tension`, `simulate_edge_removal`, `simulate_dimension_change`, `simulate_counterparty_removal`, `select_minimal_joint_edge_removal`
 
 The agent faces a simple binary choice: use `detect_pattern` for automatic detection,
 or call `sphere_overview` to enter manual exploration mode.
@@ -43,40 +96,51 @@ unlocking the full manual toolset based on the sphere's capabilities:
 
 | Capability | Condition | Tools added |
 |------------|-----------|-------------|
-| **base** | Always after sphere_overview | 71 tools: navigation, geometry, basic analysis |
+| **base** | Always after sphere_overview | 72 tools: navigation, geometry, analysis, chains and motifs, calibration, branches |
 | **temporal** | `temporal/` directory exists for any anchor pattern | dive_solid, get_solid, hub_history, find_drifting_entities, compare_time_windows, find_regime_changes |
 | **multi_pattern** | 2+ patterns cover same entity (any key type: direct, sibling, event_edge, composite, chain) | cross_pattern_profile, passive_scan, composite_risk, composite_risk_batch, detect_cross_pattern_discrepancy, combine_anomaly_pvalues, classify_detector_consensus, consensus_classification |
-| **trajectory_index** | Trajectory ANN index exists in `_gds_meta/trajectory/` | find_drifting_similar, detect_trajectory_anomaly |
+| **trajectory_index** | Trajectory ANN index exists in `_gds_meta/trajectory/` | find_drifting_similar, detect_trajectory_anomaly, classify_trajectory |
 
 ### Lifecycle
 
 ```
-Server start → Phase 1 (3 tools: always)
+Session start → Phase 1 (3 tools: always)
     ↓
-open_sphere(path) → Phase 2 (23 tools: always + gateway + edge)
+open_sphere(path) → Phase 2 (22 tools: always + gateway + edge)
     ↓
   ├─ detect_pattern(query) → smart mode (no extra tools)
   └─ sphere_overview()     → Phase 3 (94-111 tools: full manual mode)
     ↓
 close_sphere() → Phase 1 (3 tools)
     ↓
-open_sphere(other_path) → Phase 2 (23 tools, different sphere)
+open_sphere(other_path) → Phase 2 (22 tools, different sphere)
 ```
+
+Phase 3 lists 94 tools on a sphere with only the base capabilities and 111 when it has
+temporal data, several patterns per entity line and a trajectory index. Each session
+moves through the phases on its own; opening a sphere (or a branch) again starts that
+session back at Phase 2.
 
 ### open_sphere response
 
-After opening a sphere, `open_sphere` returns `available_tools` (gateway only) and `capabilities`:
+`open_sphere` returns the active ref and response format, a short sphere summary, the
+detected capabilities and the tools the session can call at that point (all Phase 2 tools).
+Abbreviated:
 
 ```json
 {
   "status": "open",
-  "hint": "Two paths: (1) detect_pattern(query) — describe what to find, server handles everything. (2) sphere_overview() — read the sphere first, then full manual toolset unlocks.",
-  "capabilities": {
-    "has_temporal": true,
-    "multi_pattern": true,
-    "has_trajectory_index": false
-  },
-  "available_tools": ["detect_pattern", "sphere_overview"]
+  "path": "spheres/my_sphere",
+  "ref": "main",
+  "response_format": "compact",
+  "sphere_id": "my_sphere",
+  "name": "My sphere",
+  "summary": {"lines": 6, "patterns": 3, "aliases": 0},
+  "hint": "Use detect_pattern(query) to find anomalies — describe what to look for. Call sphere_overview() ONLY when you need manual tools for drill-down.",
+  "capabilities": {"has_temporal": true, "multi_pattern": true, "has_trajectory_index": false},
+  "available_tools": ["close_sphere", "contagion_score", "detect_pattern", "...", "sphere_overview"],
+  "patterns": {"account_pattern": {"type": "anchor", "entities": "12,400", "dimensions": ["counterparty", "bank"]}},
+  "suggested_queries": ["find accounts with anomalous counterparty in account_pattern"]
 }
 ```
 
@@ -87,7 +151,7 @@ After `open_sphere`, two operation modes are available via the gateway (Phase 2)
 | Mode | Entry point | Tools visible | Tokens/turn | When to use |
 |------|-------------|--------------|-------------|-------------|
 | **Smart** | `detect_pattern` | 1 meta-tool (no Phase 3 unlock) | ~400 tk | Agent describes intent in natural language; server plans steps via MCP sampling, executes internally, filters + interprets results |
-| **Manual** | `sphere_overview` | 66-88 (unlocked in Phase 3) | ~6-8k tk | Debugging, exploration, custom investigation sequences, follow-up on smart mode findings |
+| **Manual** | `sphere_overview` | 94-111 (unlocked in Phase 3) | ~6-8k tk | Debugging, exploration, custom investigation sequences, follow-up on smart mode findings |
 
 Modes are **not exclusive** — an agent can use `detect_pattern` for overview, then call
 `sphere_overview` to unlock granular tools for drill-down.
@@ -104,7 +168,7 @@ Single meta-tool that automatically plans and executes detection workflows.
 4. **Filtering:** LLM filters false positives from candidates, assigns confidence scores (via sampling, 500 tokens, temp 0.0).
 5. **Interpretation:** LLM provides 3-5 sentence summary of findings (via sampling, 400 tokens, temp 0.0).
 
-### Step handlers (39)
+### Step handlers (45)
 
 | Category | Steps | Capability |
 |----------|-------|-----------|
@@ -115,6 +179,8 @@ Single meta-tool that automatically plans and executes detection workflows.
 | **Observability** (5) | sphere_overview, check_alerts, detect_data_quality, anomaly_summary, aggregate_anomalies | base |
 | **Temporal** (3) | compare_time_windows, find_drifting_similar, hub_history | temporal / trajectory_index |
 | **Network/Fraud** (4) | find_counterparties, extract_chains, find_chains_for_entity, find_common_relations | base |
+| **Chains** (5) | find_chains_with_coherent_anomaly, classify_chain_typology, extend_chain, anomaly_propagation_in_chain, trace_root_cause | base |
+| **Edges & motifs** (2) | find_high_potential_edges, find_high_potential_motifs | base |
 | **Population** (2) | get_centroid_map, attract_boundary | base |
 | **Smart-mode exclusive** (6) | assess_false_positive, detect_event_rate_anomaly, detect_hub_anomaly_concentration, detect_composite_subgroup_inflation, detect_collective_drift, detect_temporal_burst | base / multi_pattern / temporal |
 
@@ -181,6 +247,8 @@ Cacheable sphere metadata — zero token cost on repeated reads.
 | `sphere://info` | Sphere schema: lines, patterns, aliases | After `open_sphere` |
 | `sphere://capabilities` | Detected capabilities dict | After `open_sphere` |
 
+Both resources describe the sphere the calling client session has open.
+
 ## MCP Prompts
 
 User-triggered investigation workflows (slash commands):
@@ -207,15 +275,15 @@ doesn't support elicitation (`hasattr(ctx, "elicit")` + `try/except`).
 | **Elicitation** | Threshold refinement on large result sets | Proceed with all results |
 | **Progress** | `ctx.report_progress(i, total)` during step execution | Silently skip |
 | **Logging** | `ctx.info(step_name)` for structured diagnostics | No-op |
-| **Instructions** | `FastMCP(instructions=...)` — mentions `detect_pattern` as entry point | N/A |
-| **Tool Annotations** | `readOnlyHint=True` on 71 read-only tools | Host assumes worst case |
+| **Instructions** | `MCPServer(instructions=...)` — mentions `detect_pattern` as entry point | N/A |
+| **Tool Annotations** | `read_only_hint=True` on 106 read-only tools; `destructive_hint=True` on `recalibrate` and `manage_branch` | Host assumes worst case |
 
 ## Token Cost per Phase
 
 | Phase | Tools visible | Estimated token cost |
 |-------|:------------:|---------------------|
 | Phase 1 — before open_sphere | 3 | ~200 tk |
-| Phase 2 — after open_sphere | 23 | ~850 tk |
+| Phase 2 — after open_sphere | 22 | ~850 tk |
 | Phase 3 — full sphere (all capabilities) | ~111 | ~7k tk (filtered + trimmed docstrings) |
 | Phase 3 — simple sphere (base only) | ~94 | ~5k tk |
 
@@ -224,8 +292,8 @@ Without 3-phase loading, all 111 tool schemas would be in context from the start
 ## Adding New Tools
 
 When adding a new MCP tool:
-1. Register with `@mcp.tool(annotations={"readOnlyHint": True})` (or without for mutation tools)
-2. Add entry to `_TOOL_TIERS` in `server.py` (`always` / `gateway` / `base` / `temporal` / `multi_pattern` / `trajectory_index`)
+1. Register with `@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))` (`destructive_hint=True` for tools that write sphere state) and `@timed`, returning a JSON string shaped by the [response format](#response-format) rules
+2. Add entry to `_TOOL_TIERS` in `server.py` (`always` / `gateway` / `edge` / `base` / `temporal` / `multi_pattern` / `trajectory_index`)
 3. Add step handler in `smart.py` (`_step_<name>`) + entry in `_STEP_HANDLERS` + `_STEP_CAPABILITIES`
 4. Add keyword tuple in `_kw` dict (or add to `CHAINING_ONLY` if step is only for multi-step chains)
 5. If new capability needed, add detection logic to `_detect_capabilities()`

@@ -5,6 +5,7 @@ unavailable, the keyword fallback recognises chain-coherent investigation
 language and routes to the right primitive with chain anchor pattern
 + entity anchor pattern auto-detected from sphere.
 """
+
 from __future__ import annotations
 
 from hypertopos_mcp.tools.smart import (
@@ -66,16 +67,22 @@ def test_detect_chain_pair_basic():
 def test_detect_chain_pair_prefers_account_anchor():
     info = {
         "tx_chains_pattern": {
-            "type": "anchor", "entity_line": "tx_chains",
-            "dimensions": [], "dimension_ids": [],
+            "type": "anchor",
+            "entity_line": "tx_chains",
+            "dimensions": [],
+            "dimension_ids": [],
         },
         "account_pattern": {
-            "type": "anchor", "entity_line": "accounts",
-            "dimensions": [], "dimension_ids": [],
+            "type": "anchor",
+            "entity_line": "accounts",
+            "dimensions": [],
+            "dimension_ids": [],
         },
         "currency_pattern": {
-            "type": "anchor", "entity_line": "currencies",
-            "dimensions": [], "dimension_ids": [],
+            "type": "anchor",
+            "entity_line": "currencies",
+            "dimensions": [],
+            "dimension_ids": [],
         },
     }
     pair = _detect_chain_pattern_pair(info)
@@ -90,8 +97,10 @@ def test_detect_chain_pair_returns_none_when_no_chain():
 def test_detect_chain_pair_returns_none_when_only_chain_no_anchor():
     info = {
         "tx_chains_pattern": {
-            "type": "anchor", "entity_line": "tx_chains",
-            "dimensions": [], "dimension_ids": [],
+            "type": "anchor",
+            "entity_line": "tx_chains",
+            "dimensions": [],
+            "dimension_ids": [],
         },
     }
     pair = _detect_chain_pattern_pair(info)

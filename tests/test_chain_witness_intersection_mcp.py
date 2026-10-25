@@ -6,14 +6,16 @@ Validates: passthrough wiring to navigator, strict-JSON sanitisation
 (NaN/inf → null in serialised body), tier registration (must appear in
 _TOOL_TIERS as "base" so it surfaces only after sphere_overview).
 """
+
 from __future__ import annotations
 
 import json
 import math
 from unittest.mock import MagicMock
 
-import hypertopos_mcp.tools.analysis  # noqa: F401 — register tools
 import pytest
+
+import hypertopos_mcp.tools.analysis  # noqa: F401 — register tools
 from hypertopos_mcp.server import _TOOL_TIERS, _state
 from hypertopos_mcp.tools.analysis import chain_witness_intersection
 

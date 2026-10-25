@@ -7,6 +7,7 @@ but returned an {error:...} JSON body for a missing from_col/to_col — two fail
 surfaces for the same bad-argument class in one tool. Both now return error-JSON
 so an agent has a single failure shape to handle.
 """
+
 from __future__ import annotations
 
 import json
@@ -29,8 +30,8 @@ def test_bad_pattern_returns_error_json_not_raise(open_berka_sphere):
 def test_bad_column_returns_error_json(open_berka_sphere):
     """The sibling branch (bad column) already returned error-JSON — pin it so
     both bad-argument branches stay on the same contract."""
-    from hypertopos_mcp.tools.analysis import extract_chains
     from hypertopos_mcp.server import _state
+    from hypertopos_mcp.tools.analysis import extract_chains
 
     # Pick a real event line/pattern, then pass a column that does not exist.
     sphere = _state["sphere"]._sphere

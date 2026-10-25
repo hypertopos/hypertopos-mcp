@@ -6,42 +6,40 @@ from __future__ import annotations
 
 import contextlib
 import json
-import math
+import os
 import time
+from typing import TYPE_CHECKING, Any, Literal
 
+from mcp.server.mcpserver import Context
+from mcp.types import ToolAnnotations
+
+from hypertopos_mcp._format import json_default, sanitize_for_json, tabulate_properties
 from hypertopos_mcp.server import (
+    RESPONSE_FORMATS,
     _call_stats,
     _do_open_sphere,
+    _refresh_state,
     _register_phase2_tools,
     _reload_hypertopos_modules,
     _require_sphere,
     _state,
     _unregister_phase2_tools,
+    active_response_format,
+    current_session,
+    forget_session,
+    live_session_keys,
     mcp,
+    sphere_capabilities,
     timed,
+    visible_tools,
 )
 
-
-def _sanitize_for_json(obj):
-    """Recursively replace non-finite floats (±inf / NaN) with None so strict
-    JSON parsers accept the output. line_profile distribution stats and
-    recalibrate fit outputs (mean / std / percentiles / theta) can be ±inf /
-    NaN on degenerate columns. Module-local copy matching the convention in
-    analysis.py / observability.py / detection.py. Navigator outputs are plain
-    Python floats, so a ``float`` check suffices.
-    """
-    if isinstance(obj, float) and not math.isfinite(obj):
-        return None
-    if isinstance(obj, dict):
-        return {k: _sanitize_for_json(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_sanitize_for_json(v) for v in obj]
-    if isinstance(obj, tuple):
-        return tuple(_sanitize_for_json(v) for v in obj)
-    return obj
+if TYPE_CHECKING:
+    from hypertopos.model.sphere import Sphere
+    from hypertopos.storage.reader import GDSReader
 
 
-def _suggest_queries(sphere) -> list[str]:
+def _suggest_queries(sphere: Sphere) -> list[str]:
     """Generate suggested first queries from sphere structure.
 
     When the sphere has a chain anchor pattern (built from `chain_lines:`),
@@ -58,9 +56,7 @@ def _suggest_queries(sphere) -> list[str]:
         el = sphere.entity_line(pid)
         if p.pattern_type == "anchor" and p.relations:
             dim = p.relations[0].line_id.replace("_d_", "").replace("_", " ")
-            queries.append(
-                f"find {el} with anomalous {dim} in {pid}"
-            )
+            queries.append(f"find {el} with anomalous {dim} in {pid}")
         if p.pattern_type == "anchor":
             entity_line = el or ""
             if "chain" in entity_line.lower() or "chain" in pid.lower():
@@ -88,25 +84,76 @@ def _suggest_queries(sphere) -> list[str]:
     return queries[:6]
 
 
+def _pattern_summary(sphere: Any) -> dict[str, dict[str, Any]]:
+    """Per-pattern type, entity count and relation dimension labels."""
+    from hypertopos.model.sphere import relation_dim_labels
+
+    return {
+        pid: {
+            "type": p.pattern_type,
+            "entities": f"{p.population_size:,}",
+            "dimensions": [
+                label.replace("_d_", "").replace("_", " ")
+                for label in relation_dim_labels(p.relations)
+            ],
+        }
+        for pid, p in sphere.patterns.items()
+    }
+
+
 @mcp.tool()
 @timed
-def open_sphere(path: str, force_reload: bool = False) -> str:
+def open_sphere(
+    path: str | None = None,
+    force_reload: bool = False,
+    branch: str | None = None,
+    response_format: Literal["compact", "full"] | None = None,
+    ctx: Context | None = None,
+) -> str:
     """Open a GDS sphere and create a navigator session. Use a RELATIVE path.
 
+    path: the sphere directory; omitted, the server's HYPERTOPOS_SPHERE_PATH.
+
+    branch: open a sphere branch instead of main (see manage_branch); every
+      tool then reads the branch.
+    response_format: "compact" (default) omits positional delta vectors and numeric
+      properties columns and lists what it left out in `omitted`; "full" returns
+      everything. Per-call summary=/verbose= still win.
     force_reload: reload all Python modules before opening (dev only, not thread-safe).
-    Returns: status, sphere summary, capabilities, available tools.
+    Returns: status, ref (main or the branch), response_format, sphere summary,
+    capabilities, available tools.
     """
+    if path is None:
+        path = os.environ.get("HYPERTOPOS_SPHERE_PATH")
+        if not path:
+            raise ValueError(
+                "open_sphere needs a path: pass path=, or start the server with "
+                "HYPERTOPOS_SPHERE_PATH set to the sphere directory."
+            )
+    if response_format is not None and response_format not in RESPONSE_FORMATS:
+        raise ValueError(
+            f"response_format must be one of {list(RESPONSE_FORMATS)}, got {response_format!r}"
+        )
     if force_reload:
+        others = [k for k in live_session_keys() if k != current_session().key]
+        if others:
+            raise RuntimeError(
+                "force_reload reloads the modules every session shares; refused while "
+                f"other client sessions have a sphere open: {sorted(others)}"
+            )
         _reload_hypertopos_modules()
-    _unregister_phase2_tools()  # stash all → Phase 1
-    _do_open_sphere(path)
-    _register_phase2_tools()    # restore gateway only → Phase 2
+    _do_open_sphere(path, branch=branch)  # on failure the previous session stays as it was
+    _unregister_phase2_tools(ctx)  # stash all → Phase 1
+    _state["response_format"] = response_format
+    _register_phase2_tools(ctx)  # restore gateway only → Phase 2
     s = _state["sphere"]._sphere
-    from hypertopos_mcp.server import _sphere_capabilities as _caps
+    _caps = sphere_capabilities()
 
     result = {
         "status": "open",
         "path": path,
+        "ref": branch or "main",
+        "response_format": active_response_format(),
         "sphere_id": s.sphere_id,
         "name": s.name,
         "summary": {
@@ -120,22 +167,8 @@ def open_sphere(path: str, force_reload: bool = False) -> str:
             " tools for drill-down."
         ),
         "capabilities": _caps,
-        "available_tools": [
-            t.name for t in mcp._tool_manager.list_tools()
-        ],
-        "patterns": {
-            pid: {
-                "type": p.pattern_type,
-                "entities": f"{s.line_row_count(s.entity_line(pid)):,}"
-                if hasattr(s, "line_row_count")
-                else "?",
-                "dimensions": [
-                    r.line_id.replace("_d_", "").replace("_", " ")
-                    for r in p.relations
-                ],
-            }
-            for pid, p in s.patterns.items()
-        },
+        "available_tools": sorted(visible_tools()),
+        "patterns": _pattern_summary(s),
         "suggested_queries": _suggest_queries(s),
     }
     return json.dumps(result, indent=2)
@@ -143,7 +176,7 @@ def open_sphere(path: str, force_reload: bool = False) -> str:
 
 @mcp.tool()
 @timed
-def close_sphere() -> str:
+def close_sphere(ctx: Context | None = None) -> str:
     """Close the current session and release resources. Returns session_stats."""
     if _state["session"] is None:
         return json.dumps({"status": "no_session"})
@@ -154,11 +187,12 @@ def close_sphere() -> str:
         _state["session"].close(purge_temporal=True)
     for key in list(_state.keys()):
         _state[key] = None
-    _unregister_phase2_tools()
+    forget_session(current_session().key)
+    _unregister_phase2_tools(ctx)
     return json.dumps({"status": "closed", "session_stats": stats})
 
 
-def _build_session_stats() -> dict:
+def _build_session_stats() -> dict[str, Any]:
     """Build session stats dict from _call_stats.
 
     When a session is open, also surfaces the reader's points-handle cache
@@ -184,37 +218,66 @@ def _build_session_stats() -> dict:
     return stats
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def get_session_stats() -> str:
     """Return current session tool call statistics without closing the session.
 
-    Returns: total_tool_calls, total_elapsed_ms, wall_clock_ms, and a per_tool
-    breakdown of call counts and elapsed time.
+    Returns: total_tool_calls, total_elapsed_ms, wall_clock_ms, a per_tool
+    breakdown of call counts and elapsed time, and (with an open sphere) a
+    snapshot block: stale is true when the sphere changed after the session
+    opened (another process ingested or recalibrated); open_sphere(path) reads it.
     """
     stats = _build_session_stats()
+    stats["response_format"] = active_response_format()
+    stats["session_key"] = current_session().key
+    stats["sessions_live"] = len(live_session_keys())
+    if _state["session"] is not None:
+        status = _state["session"].is_stale()
+        stats["snapshot"] = {
+            "pinned_at": status.pinned_at.isoformat(),
+            "stale": status.stale,
+            "metadata_changed": status.metadata_changed,
+            "pinned_versions": status.pinned_versions,
+            "latest_versions": status.latest_versions,
+            "hint": (
+                "A newer sphere state exists; call open_sphere(path) to read it."
+                if status.stale
+                else None
+            ),
+        }
     return json.dumps(stats, indent=2)
 
 
-def _get_line_row_count(reader: object, line_id: str, version: int) -> int | None:
+def _get_line_row_count(reader: GDSReader, line_id: str, version: int) -> int | None:
     """Return row count for a line's points table, or None on failure."""
     try:
-        return reader.read_points(line_id, version, columns=["primary_key"]).num_rows  # type: ignore[union-attr]
+        reader.read_points_schema(line_id, version)  # raises when the line has no points
+        return reader.count_points_rows(line_id, version)
     except Exception:
         return None
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def get_sphere_info() -> str:
     """Return sphere schema: lines, patterns, aliases, active manifest.
 
     Returns: per-line columns/has_fts_index, per-pattern relations,
     per-alias has_cutting_plane, plus top-level ``label_aware_available``
-    (True when the sphere carries a ``label_audit`` block).
+    (True when the sphere carries a ``label_audit`` block). Builder-derived
+    dimension lines (``_d_*``, key column only) are listed by name in
+    ``derived_dimension_lines`` instead of one entry each.
     """
     _require_sphere()
     s = _state["sphere"]._sphere
+    derived = [
+        lid
+        for lid, line in s.lines.items()
+        if lid.startswith("_d_")
+        and not line.pattern_id
+        and {c.name for c in line.columns or []} <= {"primary_key"}
+    ]
     session = _state.get("session")
     nav = _state.get("navigator")
     reader = session._reader if session is not None else None
@@ -230,7 +293,7 @@ def get_sphere_info() -> str:
                 "pattern_id": line.pattern_id,
                 **({} if line.description is None else {"description": line.description}),
                 **(
-                    {"columns": [{"name": c.name, "type": c.type} for c in line.columns]}
+                    {"columns": {c.name: c.type for c in line.columns}}
                     if line.columns is not None
                     else {}
                 ),
@@ -244,7 +307,9 @@ def get_sphere_info() -> str:
                 ),
             }
             for lid, line in s.lines.items()
+            if lid not in derived
         },
+        **({"derived_dimension_lines": derived} if derived else {}),
         "patterns": {
             pid: {
                 "type": pat.pattern_type,
@@ -307,7 +372,7 @@ def get_sphere_info() -> str:
     return json.dumps(result, indent=2)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def get_line_schema(line_id: str) -> str:
     """Return column names and types for a line's points table.
@@ -326,11 +391,11 @@ def get_line_schema(line_id: str) -> str:
     if line.columns is not None:
         columns = [{"name": c.name, "type": c.type} for c in line.columns]
     else:
-        table = reader.read_points(line_id, version)
-        columns = [{"name": field.name, "type": str(field.type)} for field in table.schema]
+        schema = reader.read_points_schema(line_id, version)
+        columns = [{"name": field.name, "type": str(field.type)} for field in schema]
     total_rows = None
     with contextlib.suppress(Exception):
-        total_rows = reader.read_points(line_id, version, columns=["primary_key"]).num_rows
+        total_rows = reader.count_points_rows(line_id, version)
     result = {
         "line_id": line_id,
         "version": version,
@@ -340,27 +405,33 @@ def get_line_schema(line_id: str) -> str:
     return json.dumps(result, indent=2)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
-def search_entities(line_id: str, property_name: str, value: str, limit: int = 20) -> str:
+def search_entities(line_id: str, property_name: str, value: str, top_n: int = 20) -> str:
     """Search for entities in a line by exact property value match (case-sensitive).
 
     property_name: column to filter on (use get_line_schema to discover columns).
     value: exact match value. Bool columns accept "true"/"false".
-    Returns: total matches, returned count, and entity list with properties.
+    Returns: total matches, returned count, entities (primary_key, status) and their
+    properties in one table properties = {columns: [primary_key, ...], rows}.
     """
     _require_sphere()
     from hypertopos_mcp.server import _require_navigator
 
     _require_navigator()
     nav = _state["navigator"]
-    core_result = nav.search_entities(line_id, property_name, value, limit)
+    core_result = nav.search_entities(line_id, property_name, value, top_n)
     result = {
         "line_id": line_id,
         "property_name": property_name,
         "value": value,
         **core_result,
     }
+    entities = [dict(e) for e in core_result.get("entities") or []]
+    result["entities"] = entities
+    table = tabulate_properties(entities, "primary_key")
+    if table:
+        result["properties"] = table
     if core_result.get("total", 0) == 0:
         result["hint"] = (
             f"No exact match for {property_name}={value!r} (this match is "
@@ -368,17 +439,24 @@ def search_entities(line_id: str, property_name: str, value: str, limit: int = 2
             "token/substring match, or get_line_schema(line_id) to confirm the "
             "column name and inspect sample values."
         )
-    return json.dumps(result, indent=2, default=str)
+    return json.dumps(result, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+# Key / status go on the entity itself; version and change timestamps are storage
+# bookkeeping that search_entities does not return either.
+_FTS_SKIP_COLUMNS = frozenset({"primary_key", "status", "version", "created_at", "changed_at"})
+
+
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
-def search_entities_fts(line_id: str, query: str, limit: int = 20) -> str:
+def search_entities_fts(line_id: str, query: str, top_n: int = 20) -> str:
     """Full-text search across all string properties of a line (BM25 ranked).
 
     Requires INVERTED index (check has_fts_index in get_sphere_info).
     query: case-insensitive token match across all string columns.
-    Returns: ranked entity list. For exact-value match use search_entities instead.
+    Returns: ranked entities (primary_key, status) and their properties in one table
+    properties = {columns: [primary_key, ...], rows}. For exact-value match use
+    search_entities instead.
     """
     _require_sphere()
     s = _state["sphere"]._sphere
@@ -396,7 +474,7 @@ def search_entities_fts(line_id: str, query: str, limit: int = 20) -> str:
     storage = _state["session"]._reader
 
     try:
-        table = storage.search_points_fts(line_id, version, query, limit=limit)
+        table = storage.search_points_fts(line_id, version, query, limit=top_n)
     except ValueError as exc:
         raise RuntimeError(str(exc)) from exc
 
@@ -412,17 +490,20 @@ def search_entities_fts(line_id: str, query: str, limit: int = 20) -> str:
                 "properties": {
                     k: v if isinstance(v, (bool, int, float, str)) else str(v)
                     for k, v in row.items()
-                    if k != "primary_key" and k != "status" and v is not None
+                    if k not in _FTS_SKIP_COLUMNS and v is not None
                 },
             }
         )
 
-    result = {
+    result: dict[str, Any] = {
         "line_id": line_id,
         "query": query,
         "returned": len(entities),
         "entities": entities,
     }
+    table = tabulate_properties(entities, "primary_key")
+    if table:
+        result["properties"] = table
     if len(entities) == 0:
         result["hint"] = (
             "No FTS matches. For short codes or IDs (e.g. PM-001, DT-002), "
@@ -432,13 +513,13 @@ def search_entities_fts(line_id: str, query: str, limit: int = 20) -> str:
     return json.dumps(result, indent=2)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def get_line_profile(
     line_id: str,
     property_name: str,
     group_by: str | None = None,
-    limit: int = 50,
+    top_n: int = 50,
 ) -> str:
     """Profile a property column: value distribution, stats, or range.
 
@@ -450,31 +531,41 @@ def get_line_profile(
 
     _require_navigator()
     nav = _state["navigator"]
-    core_result = nav.line_profile(line_id, property_name, group_by=group_by, limit=limit)
+    core_result = nav.line_profile(line_id, property_name, group_by=group_by, limit=top_n)
     result = {
         "line_id": line_id,
         "property": property_name,
         **core_result,
     }
-    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+    return json.dumps(sanitize_for_json(result), indent=2, default=json_default)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(destructive_hint=True))
 @timed
 def recalibrate(
     pattern_id: str,
     soft_threshold: float | None = None,
     hard_threshold: float | None = None,
+    branch: str | None = None,
+    exclude_keys: list[str] | None = None,
 ) -> str:
     """Recalibrate mu/sigma/theta for a pattern — full recompute of population statistics.
 
     soft_threshold/hard_threshold: optionally update drift thresholds (0.0-1.0).
-    Returns: recalibration result with updated statistics.
+    exclude_keys: fit without these entities (every entity is still scored),
+      e.g. the hidden influencers from find_calibration_influencers.
+    branch: run on that branch (created when absent) and leave main untouched —
+      the safe what-if; inspect with compare_branches. On a session opened on a
+      branch, writes go to that branch.
+    Returns: recalibration result with updated statistics, n_excluded, branch.
     """
     _require_sphere()
     result = _state["session"].recalibrate(
         pattern_id,
         soft_threshold=soft_threshold,
         hard_threshold=hard_threshold,
+        branch=branch,
+        exclude_keys=exclude_keys,
     )
-    return json.dumps(_sanitize_for_json(result), indent=2)
+    _refresh_state()
+    return json.dumps(sanitize_for_json(result), indent=2)

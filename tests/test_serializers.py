@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 
 import numpy as np
 from hypertopos.model.objects import Edge, Point, Polygon, Solid, SolidSlice
+
 from hypertopos_mcp.serializers import (
     _serialize_edge,
     _serialize_point,
@@ -259,6 +260,8 @@ class _MockPattern:
         self.sigma_diag = (
             sigma_diag if sigma_diag is not None else np.ones(n_total, dtype=np.float32)
         )
+        self.dimension_weights = None
+        self.cholesky_inv = None
 
 
 class TestSerializeSolid:
@@ -411,6 +414,7 @@ class TestSerializePolygonAnomalyConfidence:
     def test_includes_anomaly_confidence_when_positive(self) -> None:
         """anomaly_confidence > 0 is a real calibrated value; must appear in output."""
         import pytest
+
         poly = _make_polygon()
         poly.anomaly_confidence = 0.85
         result = _serialize_polygon(poly)

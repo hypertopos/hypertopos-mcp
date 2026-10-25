@@ -5,6 +5,7 @@ pattern, _suggest_queries surfaces the chain-coherent investigative loop
 entry point so agents discover it via open_sphere's response without
 having to read sphere_overview's chain-anchor section.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -88,7 +89,8 @@ def test_chain_plus_entity_anchor_surfaces_query():
     )
     queries = _suggest_queries(sphere)
     chain_q = next(
-        (q for q in queries if "individually anomalous" in q), None,
+        (q for q in queries if "individually anomalous" in q),
+        None,
     )
     assert chain_q is not None
     assert "tx_chains_pattern" in chain_q
@@ -121,7 +123,8 @@ def test_chain_query_uses_first_non_chain_entity_anchor():
     )
     queries = _suggest_queries(sphere)
     chain_q = next(
-        (q for q in queries if "individually anomalous" in q), None,
+        (q for q in queries if "individually anomalous" in q),
+        None,
     )
     assert chain_q is not None
     # First non-chain anchor in iteration order is account_pattern → accounts
@@ -143,9 +146,7 @@ def test_query_cap_increased_to_six():
         pattern_type="anchor",
         relations=[_FakeRelation("_d_hop_count")],
     )
-    entity_lines = {
-        f"pattern_{i}": f"line_{i}" for i in range(5)
-    }
+    entity_lines = {f"pattern_{i}": f"line_{i}" for i in range(5)}
     entity_lines["tx_chains_pattern"] = "tx_chains"
     sphere = _FakeSphere(patterns=patterns, entity_lines=entity_lines)
     queries = _suggest_queries(sphere)

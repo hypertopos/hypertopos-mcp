@@ -1,0 +1,95 @@
+{
+  "conformal_p": 0.008264,
+  "delta_norm": 34.3107,
+  "pattern_id": "account_behavior_pattern",
+  "primary_key": "85",
+  "ratio": 1.58,
+  "reliability_flags": {
+    "confidence": null,
+    "dominant_dim": "_d_burst_daily",
+    "dominant_dim_share": 0.5233,
+    "flags": [],
+    "low_confidence_bucket": false,
+    "single_dim_driven": false
+  },
+  "repair": {
+    "repair_dims": [
+      {
+        "delta_value": 24.8196,
+        "dim": 5,
+        "label": "_d_burst_daily"
+      },
+      {
+        "delta_value": -16.278,
+        "dim": 1,
+        "label": "_d_n_distinct_banks"
+      }
+    ],
+    "repair_size": 2,
+    "residual_norm": 17.2115
+  },
+  "severity": "high",
+  "temporal_slices": 25,
+  "theta_norm": 21.6675,
+  "top_dimensions": [
+    {
+      "delta": 24.8196,
+      "dim": "_d_burst_daily",
+      "kind": "poisson",
+      "pct_of_total": 0.5233
+    },
+    {
+      "delta": -16.278,
+      "dim": "_d_n_distinct_banks",
+      "kind": "poisson",
+      "pct_of_total": 0.2251
+    },
+    {
+      "delta": 16.1628,
+      "dim": "_d_burst_weekly",
+      "kind": "poisson",
+      "pct_of_total": 0.2219
+    },
+    {
+      "delta": 5.6344,
+      "dim": "_d_burst_monthly",
+      "kind": "poisson",
+      "pct_of_total": 0.027
+    },
+    {
+      "delta": -1.1636,
+      "dim": "_d_tx_count",
+      "kind": "poisson",
+      "pct_of_total": 0.0012
+    },
+    {
+      "delta": -1.125,
+      "dim": "_d_n_standing_orders_derived",
+      "kind": "poisson",
+      "pct_of_total": 0.0011
+    },
+    {
+      "delta": -0.6722,
+      "dim": "_d_n_categories",
+      "kind": "poisson",
+      "pct_of_total": 0.0004
+    },
+    {
+      "delta": -0.4286,
+      "dim": "_d_n_operations",
+      "kind": "poisson",
+      "pct_of_total": 0.0002
+    }
+  ],
+  "witness": {
+    "delta_norm": 34.3107,
+    "witness_dims": [
+      {
+        "delta_value": 24.8196,
+        "dim": 5,
+        "label": "_d_burst_daily"
+      }
+    ],
+    "witness_size": 1
+  }
+}

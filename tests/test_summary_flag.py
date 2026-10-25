@@ -27,7 +27,7 @@ def _ensure_berka_navigator(open_berka_sphere):
     from hypertopos_mcp.tools.session import open_sphere
 
     if _state.get("navigator") is None:
-        open_sphere("benchmark/berka/sphere/gds_berka_banking")
+        open_sphere(open_berka_sphere)
     yield
 
 
@@ -52,29 +52,57 @@ def test_find_anomalies_filters_empty_point_key_edges_even_when_summary_false(
             )
 
 
-def test_find_anomalies_summary_false_default_returns_full_payload(open_berka_sphere):
-    """Default (summary=False): full polygon payload retained — delta + edges + properties."""
+def test_find_anomalies_summary_false_returns_full_payload(open_berka_sphere):
+    """summary=False: full polygon payload retained — delta + edges + properties."""
     from hypertopos_mcp.tools.navigation import find_anomalies
 
-    result = json.loads(find_anomalies(pattern_id="account_stress_pattern", top_n=3))
+    result = json.loads(find_anomalies(pattern_id="account_stress_pattern", top_n=3, summary=False))
     assert result["polygons"], "expected at least one polygon for assertion"
     poly = result["polygons"][0]
     # Heavy fields present
     assert "delta" in poly
     assert isinstance(poly["delta"], list)
     assert len(poly["delta"]) > 0
-    # edges may be empty after F2a trim, but key must exist
-    assert "edges" in poly
+    # edge counts stay; the edges list is left out when no jumpable edge remains
+    assert "total_edges" in poly and "alive_edges" in poly
+    assert poly.get("edges", [None]) != []
+
+
+def test_find_anomalies_polygons_drop_repeated_fields_and_table_properties(open_berka_sphere):
+    """Per-polygon type/pattern_id/properties move out; properties become one key-first table."""
+    from hypertopos_mcp.tools.navigation import find_anomalies
+
+    result = json.loads(find_anomalies(pattern_id="account_stress_pattern", top_n=3))
+    assert result["polygons"]
+    for poly in result["polygons"]:
+        assert not {"type", "pattern_id", "properties"} & poly.keys()
+    table = result["properties"]
+    assert table["columns"][0] == "primary_key"
+    assert [row[0] for row in table["rows"]] == [p["primary_key"] for p in result["polygons"]]
+
+    summary = json.loads(find_anomalies(pattern_id="account_stress_pattern", top_n=3, summary=True))
+    assert "properties" not in summary
+
+
+def test_find_anomalies_event_pattern_sends_endpoint_properties_once(open_berka_sphere):
+    from hypertopos_mcp.tools.navigation import find_anomalies
+
+    result = json.loads(find_anomalies(pattern_id="tx_pattern", top_n=5))
+    assert result["polygons"]
+    structural = {"line_id", "point_key", "status", "direction", "is_jumpable"}
+    assert all(set(e) <= structural for p in result["polygons"] for e in p.get("edges", []))
+    related = result["related_properties"]
+    for table in related.values():
+        keys = [row[0] for row in table["rows"]]
+        assert table["columns"][0] == "point_key" and len(keys) == len(set(keys))
 
 
 def test_find_anomalies_summary_true_trims_payload(open_berka_sphere):
     """summary=True drops delta, edges, properties; response < 50% of full payload."""
     from hypertopos_mcp.tools.navigation import find_anomalies
 
-    full_raw = find_anomalies(pattern_id="account_stress_pattern", top_n=10)
-    summary_raw = find_anomalies(
-        pattern_id="account_stress_pattern", top_n=10, summary=True
-    )
+    full_raw = find_anomalies(pattern_id="account_stress_pattern", top_n=10, summary=False)
+    summary_raw = find_anomalies(pattern_id="account_stress_pattern", top_n=10, summary=True)
     full = json.loads(full_raw)
     summary = json.loads(summary_raw)
 
@@ -113,9 +141,7 @@ def test_find_clusters_summary_true_trims_payload(open_berka_sphere):
     """summary=True drops centroid_delta, dim_profile, member-properties."""
     from hypertopos_mcp.tools.analysis import find_clusters
 
-    full = json.loads(
-        find_clusters(pattern_id="account_stress_pattern", n_clusters=3, top_n=5)
-    )
+    full = json.loads(find_clusters(pattern_id="account_stress_pattern", n_clusters=3, top_n=5))
     summary = json.loads(
         find_clusters(
             pattern_id="account_stress_pattern",
@@ -130,20 +156,20 @@ def test_find_clusters_summary_true_trims_payload(open_berka_sphere):
         assert "centroid_delta" not in c
         assert "dim_profile" not in c
         assert "representative_properties" not in c
-        # Members trimmed to bare keys
-        for m in c.get("members", []):
-            assert set(m.keys()) == {"key"}, (
-                f"member should retain only 'key' under summary=True, got {set(m.keys())}"
-            )
+        # Members are bare keys
+        assert all(isinstance(m, str) for m in c.get("members", []))
         # Retained scalar fields
         assert "cluster_id" in c
         assert "size" in c
         assert "anomaly_rate" in c
         assert "representative_key" in c
 
-    # Default mode (sanity): centroid_delta still present
+    assert "properties" not in summary
+
+    # Default mode (sanity): labelled centroid_delta and member properties table present
     assert full["clusters"]
-    assert "centroid_delta" in full["clusters"][0]
+    assert isinstance(full["clusters"][0]["centroid_delta"], dict)
+    assert full["properties"]["columns"][0] == "key"
 
 
 # ---------------------------------------------------------------------------
@@ -192,3 +218,35 @@ def test_get_centroid_map_rejects_both_missing(open_berka_sphere):
     assert "group_by_line" in result["error"]
     assert "group_by_property" in result["error"]
     assert result["pattern_id"] == "tx_pattern"
+
+
+def test_find_anomalies_summary_true_drops_cluster_delta(open_berka_sphere):
+    """summary=True: no positional delta anywhere, clusters included."""
+    from hypertopos_mcp.tools.navigation import find_anomalies
+
+    result = json.loads(find_anomalies(pattern_id="account_stress_pattern", top_n=5, summary=True))
+    assert result["clusters"], "expected clusters for assertion"
+    assert all("delta" not in c for c in result["clusters"])
+    assert all("label" in c for c in result["clusters"])
+
+
+def test_get_polygon_compact_lists_dim_line_edges_by_name(open_berka_sphere):
+    """Compact get_polygon: degenerate dim-line edges become one dim_edges list; full keeps them."""
+    from hypertopos_mcp.server import _state
+    from hypertopos_mcp.tools.geometry import get_polygon
+    from hypertopos_mcp.tools.navigation import goto
+
+    goto("1", "accounts")
+    compact = json.loads(get_polygon("account_stress_pattern"))
+    previous = _state.get("response_format")
+    _state["response_format"] = "full"
+    try:
+        full = json.loads(get_polygon("account_stress_pattern"))
+    finally:
+        _state["response_format"] = previous
+
+    dim_full = [e["line_id"] for e in full["edges"] if not e["point_key"]]
+    assert dim_full, "fixture pattern must have dim-line edges"
+    assert compact["dim_edges"] == dim_full
+    assert all(e["point_key"] for e in compact.get("edges", []))
+    assert "dim_edges" not in full

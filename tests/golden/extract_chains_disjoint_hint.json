@@ -1,0 +1,8 @@
+{
+  "chains": [],
+  "event_pattern_id": "tx_pattern",
+  "hint": "No chains possible: from_col and to_col value sets are completely disjoint (no overlap). Chains require a to_key in one event to appear as a from_key in another event. Check that from_col and to_col are correct \u2014 they should represent the same entity namespace (e.g. both are account IDs).",
+  "returned": 0,
+  "sort_by": "hop_count",
+  "total_chains": 0
+}

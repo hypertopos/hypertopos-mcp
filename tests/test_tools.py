@@ -494,6 +494,8 @@ class TestGetSphereInfo:
         result = json.loads(get_sphere_info())
         assert "accounts" in result["lines"]
         assert "account_behavior_pattern" in result["patterns"]
+        columns = result["lines"]["accounts"]["columns"]
+        assert isinstance(columns, dict) and all(isinstance(t, str) for t in columns.values())
 
     def test_includes_aliases_section(self) -> None:
         from hypertopos_mcp.server import _state
@@ -704,7 +706,7 @@ def _make_centroid_state():
 
     sphere_meta = MagicMock()
     sphere_meta.lines = {"company_codes": mock_cc_line}
-    sphere_meta.patterns = {}
+    sphere_meta.patterns = {"customer_pattern": MagicMock(dim_labels=["dim_a", "dim_b"])}
     sphere_meta.aliases = {}
 
     sphere = MagicMock()
@@ -855,14 +857,14 @@ class TestAggregateGroupByProperty:
         from hypertopos_mcp.tools.aggregation import aggregate
         from hypertopos_mcp.tools.session import open_sphere
 
-        open_sphere("benchmark/berka/sphere/gds_berka_banking")
+        open_sphere(open_berka_sphere)
         result = json.loads(
             aggregate(
                 "tx_pattern",
                 "accounts",
                 "count",
                 group_by_property="accounts:region",
-                limit=3,
+                top_n=3,
             )
         )
         assert len(result["results"]) > 0
@@ -887,6 +889,7 @@ class TestAggregateGroupByProperty:
     def test_cross_tab_skips_polygon_with_no_prop_edge(self) -> None:
         """Polygon missing company_codes edge should be silently skipped."""
         import pyarrow as _pa
+
         from hypertopos_mcp.server import _state
         from hypertopos_mcp.tools.aggregation import aggregate
 
@@ -942,12 +945,17 @@ class TestAggregateGroupByProperty:
         from hypertopos_mcp.tools.aggregation import aggregate
         from hypertopos_mcp.tools.session import open_sphere
 
-        open_sphere("benchmark/berka/sphere/gds_berka_banking")
+        open_sphere(open_berka_sphere)
         result = json.loads(
-            aggregate(event_pattern_id="tx_pattern", group_by_line="accounts", metric="count", limit=3)
+            aggregate(
+                event_pattern_id="tx_pattern", group_by_line="accounts", metric="count", top_n=3
+            )
         )
-        assert result["group_by_property"] is None
         assert "region" not in result["results"][0]
+        # Unset parameters are not echoed back.
+        for unset in ("group_by_property", "distinct", "collapse_by_property", "filters"):
+            assert unset not in result
+        assert result["metric"] == "count"
 
 
 def _make_duplicate_entity_geo():
@@ -1290,7 +1298,7 @@ class TestAggregateCollapseByProperty:
         from hypertopos_mcp.tools.aggregation import aggregate
         from hypertopos_mcp.tools.session import open_sphere
 
-        open_sphere("benchmark/berka/sphere/gds_berka_banking")
+        open_sphere(open_berka_sphere)
         result = json.loads(
             aggregate(
                 event_pattern_id="tx_pattern",
@@ -1607,14 +1615,46 @@ class TestAggregatePercentileMetrics:
 def test_get_event_polygons_raises_when_filters_is_dict(open_berka_sphere) -> None:
     """Passing a plain dict as filters must raise RuntimeError, not silently ignore."""
     import pytest
+
     from hypertopos_mcp.tools.geometry import get_event_polygons
 
     with pytest.raises(RuntimeError, match="filters must be a list"):
         get_event_polygons(
-            entity_key="1",
+            primary_key="1",
             pattern_id="tx_pattern",
             filters={"line": "accounts", "key": "741"},
         )
+
+
+def test_get_event_polygons_rejects_is_anomaly_in_partition_filters(monkeypatch) -> None:
+    """A partition filter dict carrying 'is_anomaly' must be rejected with a
+    pointer to geometry_filters, not silently passed through."""
+    import pytest
+
+    from hypertopos_mcp.server import _state
+    from hypertopos_mcp.tools import geometry
+
+    monkeypatch.setattr(geometry, "adaptive_polygon_cap", lambda *_a, **_kw: 100)
+    for key in ("navigator", "sphere", "session"):
+        monkeypatch.setitem(_state, key, MagicMock())
+
+    with pytest.raises(RuntimeError, match="geometry_filters"):
+        geometry.get_event_polygons(
+            primary_key="1",
+            pattern_id="tx_pattern",
+            filters=[{"line": "accounts", "key": "741", "is_anomaly": True}],
+        )
+
+
+def test_passive_scan_rejects_unknown_scoring_mode() -> None:
+    """An unsupported scoring mode returns an error listing the allowed
+    values instead of silently ignoring the threshold."""
+    from hypertopos_mcp.tools.analysis import passive_scan
+
+    result = json.loads(passive_scan(home_line_id="account", scoring="max"))
+    assert "error" in result
+    assert "'count'" in result["error"] and "'weighted'" in result["error"]
+    assert "'max'" in result["error"]
 
 
 def test_get_event_polygons_accepts_pattern_id_not_event_pattern_id() -> None:
@@ -1674,16 +1714,18 @@ class TestAggregateOffset:
         from hypertopos_mcp.tools.aggregation import aggregate
         from hypertopos_mcp.tools.session import open_sphere
 
-        open_sphere("benchmark/berka/sphere/gds_berka_banking")
-        r1 = json.loads(aggregate(event_pattern_id="tx_pattern", group_by_line="accounts", limit=3))
-        r2 = json.loads(aggregate(event_pattern_id="tx_pattern", group_by_line="accounts", limit=3, offset=0))
+        open_sphere(open_berka_sphere)
+        r1 = json.loads(aggregate(event_pattern_id="tx_pattern", group_by_line="accounts", top_n=3))
+        r2 = json.loads(
+            aggregate(event_pattern_id="tx_pattern", group_by_line="accounts", top_n=3, offset=0)
+        )
         assert r1["results"] == r2["results"]
 
     def test_offset_skips_first_n_results(self) -> None:
         """offset=1 skips the top result and returns the second."""
         from hypertopos_mcp.tools.aggregation import aggregate
 
-        result = json.loads(aggregate("sale_pattern", "items", "count", limit=1, offset=1))
+        result = json.loads(aggregate("sale_pattern", "items", "count", top_n=1, offset=1))
         assert len(result["results"]) == 1
         assert result["results"][0]["key"] == "ITEM-002"
 
@@ -1691,7 +1733,7 @@ class TestAggregateOffset:
         """offset beyond total_groups returns empty results but correct total_groups."""
         from hypertopos_mcp.tools.aggregation import aggregate
 
-        result = json.loads(aggregate("sale_pattern", "items", "count", limit=10, offset=99))
+        result = json.loads(aggregate("sale_pattern", "items", "count", top_n=10, offset=99))
         assert result["results"] == []
         assert result["total_groups"] == 2
 
@@ -1700,8 +1742,10 @@ class TestAggregateOffset:
         from hypertopos_mcp.tools.aggregation import aggregate
         from hypertopos_mcp.tools.session import open_sphere
 
-        open_sphere("benchmark/berka/sphere/gds_berka_banking")
-        result = json.loads(aggregate(event_pattern_id="tx_pattern", group_by_line="accounts", offset=1, limit=3))
+        open_sphere(open_berka_sphere)
+        result = json.loads(
+            aggregate(event_pattern_id="tx_pattern", group_by_line="accounts", offset=1, top_n=3)
+        )
         assert result["offset"] == 1
 
     def test_offset_default_not_in_result_when_zero(self, open_berka_sphere) -> None:
@@ -1709,8 +1753,10 @@ class TestAggregateOffset:
         from hypertopos_mcp.tools.aggregation import aggregate
         from hypertopos_mcp.tools.session import open_sphere
 
-        open_sphere("benchmark/berka/sphere/gds_berka_banking")
-        result = json.loads(aggregate(event_pattern_id="tx_pattern", group_by_line="accounts", limit=3))
+        open_sphere(open_berka_sphere)
+        result = json.loads(
+            aggregate(event_pattern_id="tx_pattern", group_by_line="accounts", top_n=3)
+        )
         assert result["offset"] == 0
 
 
@@ -1773,8 +1819,12 @@ class TestAggregateIdea004Sampling:
         from hypertopos_mcp.tools.aggregation import aggregate
         from hypertopos_mcp.tools.session import open_sphere
 
-        open_sphere("benchmark/berka/sphere/gds_berka_banking")
-        result = json.loads(aggregate(event_pattern_id="tx_pattern", group_by_line="accounts", sample_size=10, seed=42))
+        open_sphere(open_berka_sphere)
+        result = json.loads(
+            aggregate(
+                event_pattern_id="tx_pattern", group_by_line="accounts", sample_size=10, seed=42
+            )
+        )
         assert result.get("sampled") is True
         assert result["sample_size"] == 10
 
@@ -1783,8 +1833,10 @@ class TestAggregateIdea004Sampling:
         from hypertopos_mcp.tools.aggregation import aggregate
         from hypertopos_mcp.tools.session import open_sphere
 
-        open_sphere("benchmark/berka/sphere/gds_berka_banking")
-        result = json.loads(aggregate(event_pattern_id="tx_pattern", group_by_line="accounts", sample_size=9999999))
+        open_sphere(open_berka_sphere)
+        result = json.loads(
+            aggregate(event_pattern_id="tx_pattern", group_by_line="accounts", sample_size=9999999)
+        )
         assert result.get("sampled") is False
 
     def test_sample_pct_reduces_result(self) -> None:
@@ -1800,8 +1852,10 @@ class TestAggregateIdea004Sampling:
         from hypertopos_mcp.tools.aggregation import aggregate
         from hypertopos_mcp.tools.session import open_sphere
 
-        open_sphere("benchmark/berka/sphere/gds_berka_banking")
-        result = json.loads(aggregate(event_pattern_id="tx_pattern", group_by_line="accounts", sample_pct=1.0))
+        open_sphere(open_berka_sphere)
+        result = json.loads(
+            aggregate(event_pattern_id="tx_pattern", group_by_line="accounts", sample_pct=1.0)
+        )
         assert result.get("sampled") is False
 
     def test_sample_and_sample_pct_raises(self) -> None:
@@ -1853,8 +1907,10 @@ class TestAggregateIdea004Sampling:
         from hypertopos_mcp.tools.aggregation import aggregate
         from hypertopos_mcp.tools.session import open_sphere
 
-        open_sphere("benchmark/berka/sphere/gds_berka_banking")
-        result = json.loads(aggregate(event_pattern_id="tx_pattern", group_by_line="accounts", limit=3))
+        open_sphere(open_berka_sphere)
+        result = json.loads(
+            aggregate(event_pattern_id="tx_pattern", group_by_line="accounts", top_n=3)
+        )
         assert result.get("sampled") is False
 
     def test_seed_deterministic(self, open_berka_sphere) -> None:
@@ -1862,9 +1918,17 @@ class TestAggregateIdea004Sampling:
         from hypertopos_mcp.tools.aggregation import aggregate
         from hypertopos_mcp.tools.session import open_sphere
 
-        open_sphere("benchmark/berka/sphere/gds_berka_banking")
-        r1 = json.loads(aggregate(event_pattern_id="tx_pattern", group_by_line="accounts", sample_size=100, seed=42))
-        r2 = json.loads(aggregate(event_pattern_id="tx_pattern", group_by_line="accounts", sample_size=100, seed=42))
+        open_sphere(open_berka_sphere)
+        r1 = json.loads(
+            aggregate(
+                event_pattern_id="tx_pattern", group_by_line="accounts", sample_size=100, seed=42
+            )
+        )
+        r2 = json.loads(
+            aggregate(
+                event_pattern_id="tx_pattern", group_by_line="accounts", sample_size=100, seed=42
+            )
+        )
         assert r1["results"] == r2["results"]
 
     def test_no_seed_nondeterministic(self) -> None:
@@ -1999,13 +2063,17 @@ class TestFindSimilarEntities:
 
     def test_population_diversity_note_when_majority_zero_distance(self):
         """3 results all at distance=0.0 → population_diversity_note present."""
+        from hypertopos.navigation.navigator import SimilarityResult
+
         from hypertopos_mcp.server import _state
         from hypertopos_mcp.tools.analysis import find_similar_entities
-        from hypertopos.navigation.navigator import SimilarityResult
 
         nav_mock = MagicMock()
         sr = SimilarityResult([("CUST-002", 0.0), ("CUST-003", 0.0), ("CUST-004", 0.0)])
-        sr.degenerate_warning = "Degenerate: 3/3 neighbors at distance=0 (inactive entities). Results may be misleading."
+        sr.degenerate_warning = (
+            "Degenerate: 3/3 neighbors at distance=0 (inactive entities). "
+            "Results may be misleading."
+        )
         self._make_similar_state(nav_mock, sr)
 
         try:
@@ -2053,8 +2121,7 @@ class TestFindSimilarEntities:
                 f"Expected filter_note in result, got keys: {list(result.keys())}"
             )
             assert (
-                "filter" in result["filter_note"].lower()
-                or "no" in result["filter_note"].lower()
+                "filter" in result["filter_note"].lower() or "no" in result["filter_note"].lower()
             )
         finally:
             for k in list(_state.keys()):
@@ -2088,18 +2155,30 @@ class TestFindSimilarEntities:
                 _state[k] = None
 
     def test_neighbor_anomaly_rate_present(self):
-        """find_similar_entities surfaces neighbor_anomaly_rate + count when neighbours are mixed."""
+        """find_similar_entities surfaces neighbor_anomaly_rate + count.
+
+        Covers the case where neighbours are mixed.
+        """
+        from hypertopos.navigation.navigator import SimilarityResult
+
         from hypertopos_mcp.server import _state
         from hypertopos_mcp.tools.analysis import find_similar_entities
-        from hypertopos.navigation.navigator import SimilarityResult
 
         nav_mock = MagicMock()
         sr = SimilarityResult(
-            [("CUST-002", 0.10), ("CUST-003", 0.20), ("CUST-004", 0.30),
-             ("CUST-005", 0.40), ("CUST-006", 0.50)],
+            [
+                ("CUST-002", 0.10),
+                ("CUST-003", 0.20),
+                ("CUST-004", 0.30),
+                ("CUST-005", 0.40),
+                ("CUST-006", 0.50),
+            ],
             is_anomaly_map={
-                "CUST-002": True, "CUST-003": False, "CUST-004": True,
-                "CUST-005": True, "CUST-006": True,
+                "CUST-002": True,
+                "CUST-003": False,
+                "CUST-004": True,
+                "CUST-005": True,
+                "CUST-006": True,
             },
         )
         self._make_similar_state(nav_mock, sr)
@@ -2114,9 +2193,10 @@ class TestFindSimilarEntities:
 
     def test_neighbor_anomaly_rate_zero_when_all_normal(self):
         """All-normal neighbours → rate=0.0, count=0."""
+        from hypertopos.navigation.navigator import SimilarityResult
+
         from hypertopos_mcp.server import _state
         from hypertopos_mcp.tools.analysis import find_similar_entities
-        from hypertopos.navigation.navigator import SimilarityResult
 
         nav_mock = MagicMock()
         sr = SimilarityResult(
@@ -2135,15 +2215,18 @@ class TestFindSimilarEntities:
 
     def test_neighbor_anomaly_rate_one_when_all_anomalous(self):
         """All-anomalous neighbours → rate=1.0."""
+        from hypertopos.navigation.navigator import SimilarityResult
+
         from hypertopos_mcp.server import _state
         from hypertopos_mcp.tools.analysis import find_similar_entities
-        from hypertopos.navigation.navigator import SimilarityResult
 
         nav_mock = MagicMock()
         sr = SimilarityResult(
             [("CUST-002", 0.10), ("CUST-003", 0.20), ("CUST-004", 0.30)],
             is_anomaly_map={
-                "CUST-002": True, "CUST-003": True, "CUST-004": True,
+                "CUST-002": True,
+                "CUST-003": True,
+                "CUST-004": True,
             },
         )
         self._make_similar_state(nav_mock, sr)
@@ -2188,6 +2271,7 @@ class TestPassiveScanInterpretation:
             PassiveScanner,
             ScanResult,
         )
+
         from hypertopos_mcp.server import _state
 
         result = ScanResult(
@@ -2339,9 +2423,7 @@ class TestPassiveScanInterpretation:
         )
         self._setup_scanner(monkeypatch, [hit], {"src_a": 5, "src_b": 0, "src_c": 0})
 
-        count_resp = json.loads(
-            passive_scan(home_line_id="account", scoring="count", threshold=1)
-        )
+        count_resp = json.loads(passive_scan(home_line_id="account", scoring="count", threshold=1))
         weighted_resp = json.loads(
             passive_scan(home_line_id="account", scoring="weighted", threshold=1)
         )
@@ -2470,7 +2552,7 @@ class TestContrastPopulations:
             )
             assert result["pattern_id"] == "customer_pattern"
             assert result["group_a_spec"] == {"anomaly": True}
-            assert result["group_b_spec"] is None
+            assert "group_b_spec" not in result  # unset parameters are not echoed
             assert len(result["dimensions"]) == 2
             assert result["dimensions"][0]["effect_size"] == 8.0
         finally:
@@ -2509,6 +2591,7 @@ class TestContrastPopulations:
     def test_edge_continuous_mode_graceful_error(self):
         """GDSNavigationError from continuous-mode edge spec is returned as structured JSON."""
         from hypertopos.navigation.navigator import GDSNavigationError
+
         from hypertopos_mcp.server import _state
         from hypertopos_mcp.tools.analysis import contrast_populations
 
@@ -2889,9 +2972,7 @@ class TestDiveSolidTrajectoryShape:
     def _setup_with_norms(self, delta_norms: list[float]):
         from hypertopos_mcp.server import _state
 
-        slices = [
-            self._make_engineered_slice(i, n) for i, n in enumerate(delta_norms)
-        ]
+        slices = [self._make_engineered_slice(i, n) for i, n in enumerate(delta_norms)]
         base = _make_polygon("CUST-0001")
         solid = Solid(
             primary_key="CUST-0001",
@@ -3105,12 +3186,25 @@ class TestDiveSolidBasePolygonNote:
         from hypertopos_mcp.tools.navigation import dive_solid, goto
         from hypertopos_mcp.tools.session import open_sphere
 
-        open_sphere("benchmark/berka/sphere/gds_berka_banking")
+        open_sphere(open_berka_sphere)
         goto("2", "accounts")
         result = json.loads(dive_solid("2", "account_behavior_pattern"))
         assert result["num_slices"] > 0
         assert "base_polygon_note" in result
         assert "get_polygon" in result["base_polygon_note"]
+
+    def test_base_polygon_note_names_the_current_state(self, open_berka_sphere):
+        """base_polygon carries the current polygon, so the note must not call it initial."""
+        from hypertopos_mcp.tools.geometry import get_polygon
+        from hypertopos_mcp.tools.navigation import dive_solid, goto
+
+        goto("2", "accounts")
+        current = json.loads(get_polygon("account_behavior_pattern"))
+        result = json.loads(dive_solid("2", "account_behavior_pattern"))
+        assert result["base_polygon"]["delta_norm"] == current["delta_norm"]
+        note = result["base_polygon_note"]
+        assert "current state" in note
+        assert "Initial" not in note and "first observation" not in note
 
     def test_base_polygon_note_absent_when_no_slices(self):
         """base_polygon_note must NOT appear when the solid has no slices."""
@@ -3139,7 +3233,7 @@ def test_aggregate_group_by_property_total_entities(open_berka_sphere):
 
     result = json.loads(
         aggregate(
-            "tx_pattern", "accounts", group_by_property="accounts:region", metric="count", limit=5
+            "tx_pattern", "accounts", group_by_property="accounts:region", metric="count", top_n=5
         )
     )
     assert "total_entities" in result
@@ -3159,7 +3253,7 @@ def test_aggregate_include_properties_populated_in_results(open_berka_sphere):
             "accounts",
             include_properties=["region"],
             metric="count",
-            limit=5,
+            top_n=5,
         )
     )
     assert result["results"], "expected non-empty results"
@@ -3180,7 +3274,7 @@ def test_aggregate_gbp_with_filters_returns_valid_structure(open_berka_sphere):
             group_by_property="accounts:region",
             filters=[{"line": "accounts", "key": "741"}],
             metric="count",
-            limit=10,
+            top_n=10,
         )
     )
     assert "results" in result
@@ -3202,12 +3296,63 @@ def test_get_event_polygons_total_unfiltered_when_geometry_filters_used(open_ber
     from hypertopos_mcp.tools.geometry import get_event_polygons
 
     result = json.loads(
-        get_event_polygons("741", "tx_pattern", geometry_filters={"is_anomaly": True}, limit=5)
+        get_event_polygons("741", "tx_pattern", geometry_filters={"is_anomaly": True}, top_n=5)
     )
     assert "total_unfiltered" in result, (
         "total_unfiltered must be present when geometry_filters used"
     )
     assert result["total_unfiltered"] >= result["total"], "unfiltered >= filtered"
+
+
+def test_get_event_polygons_omit_constant_type_and_pattern_id(open_berka_sphere):
+    from hypertopos_mcp.tools.geometry import get_event_polygons
+
+    result = json.loads(get_event_polygons("741", "tx_pattern", top_n=3))
+    assert result["polygons"]
+    assert all(not {"type", "pattern_id"} & p.keys() for p in result["polygons"])
+
+
+def test_get_event_polygons_tables_event_and_endpoint_properties(open_berka_sphere):
+    from hypertopos_mcp.tools.geometry import get_event_polygons
+
+    result = json.loads(get_event_polygons("741", "tx_pattern", top_n=5))
+    polys = result["polygons"]
+    assert polys
+    # the event's own columns (amount, date, ...) are returned, keyed by primary_key
+    events = result["properties"]
+    assert events["columns"][0] == "primary_key"
+    assert {"amount", "date"} <= set(events["columns"])
+    assert [row[0] for row in events["rows"]] == [p["primary_key"] for p in polys]
+    # endpoint properties are sent once per entity, not on every edge
+    structural = {"line_id", "point_key", "status", "direction", "is_jumpable"}
+    assert all(set(e) <= structural for p in polys for e in p["edges"])
+    accounts = result["related_properties"]["accounts"]
+    assert accounts["columns"][0] == "point_key"
+    assert [row[0] for row in accounts["rows"]] == ["741"]
+
+
+def test_property_filters_in_operator_matches_equality(open_berka_sphere):
+    from hypertopos_mcp.tools.navigation import aggregate_anomalies, find_anomalies
+
+    def keys(filters):
+        out = json.loads(
+            find_anomalies("account_stress_pattern", property_filters=filters, top_n=10)
+        )
+        return [p["primary_key"] for p in out["polygons"]]
+
+    assert keys({"has_loan": {"in": ["yes"]}}) == keys({"has_loan": "yes"})
+
+    # has_loan is "yes" or null in the fixture; "no" matches nothing
+    filtered = json.loads(
+        aggregate_anomalies(
+            "account_stress_pattern",
+            group_by="has_loan",
+            property_filters={"has_loan": {"in": ["yes", "no"]}},
+        )
+    )
+    unfiltered = json.loads(aggregate_anomalies("account_stress_pattern", group_by="has_loan"))
+    yes = next(g["anomaly_count"] for g in unfiltered["groups"] if g["group_key"] == "yes")
+    assert filtered["total_anomalies"] == yes
 
 
 def test_search_entities_bool_column(open_berka_sphere):
@@ -3219,7 +3364,10 @@ def test_search_entities_bool_column(open_berka_sphere):
     result = json.loads(search_entities("accounts", "has_loan", "yes"))
     assert result["total"] > 0, "expected accounts with loans"
     assert result["returned"] == len(result["entities"])
-    assert all(e["properties"].get("has_loan") == "yes" for e in result["entities"])
+    table = result["properties"]
+    col = table["columns"].index("has_loan")
+    assert [r[0] for r in table["rows"]] == [e["primary_key"] for e in result["entities"]]
+    assert all(r[col] == "yes" for r in table["rows"])
 
 
 def test_search_entities_total_independent_of_limit(open_berka_sphere):
@@ -3228,8 +3376,8 @@ def test_search_entities_total_independent_of_limit(open_berka_sphere):
 
     from hypertopos_mcp.tools.session import search_entities
 
-    full = json.loads(search_entities("accounts", "region", "Prague", limit=9999))
-    limited = json.loads(search_entities("accounts", "region", "Prague", limit=1))
+    full = json.loads(search_entities("accounts", "region", "Prague", top_n=9999))
+    limited = json.loads(search_entities("accounts", "region", "Prague", top_n=1))
     assert full["total"] == limited["total"], "total must be the same regardless of limit"
     assert limited["returned"] == 1
     assert full["returned"] == full["total"]
@@ -3280,23 +3428,23 @@ class TestGetSolidForecast:
 
     def test_get_solid_includes_forecast_when_slices_gte_3(self, open_berka_sphere):
         """get_solid returns forecast block when solid has >= 3 slices."""
-        from hypertopos_mcp.tools.navigation import goto
-        from hypertopos_mcp.tools.geometry import get_solid
         import json
+
+        from hypertopos_mcp.tools.geometry import get_solid
+        from hypertopos_mcp.tools.navigation import goto
 
         goto("2", "accounts")
         raw = get_solid("account_behavior_pattern")
         result = json.loads(raw)
         assert result["num_slices"] >= 3, "precondition: entity 2 must have >= 3 slices"
-        assert "forecast" in result, (
-            "get_solid should include forecast when num_slices >= 3"
-        )
+        assert "forecast" in result, "get_solid should include forecast when num_slices >= 3"
 
     def test_get_solid_stale_forecast_warning(self, open_berka_sphere):
         """get_solid propagates stale_forecast_warning for old data."""
-        from hypertopos_mcp.tools.navigation import goto
-        from hypertopos_mcp.tools.geometry import get_solid
         import json
+
+        from hypertopos_mcp.tools.geometry import get_solid
+        from hypertopos_mcp.tools.navigation import goto
 
         goto("2", "accounts")
         raw = get_solid("account_behavior_pattern")
@@ -3308,9 +3456,10 @@ class TestGetSolidForecast:
 
     def test_get_solid_no_forecast_when_few_slices(self, open_berka_sphere):
         """get_solid omits forecast for event pattern (0 slices)."""
-        from hypertopos_mcp.tools.navigation import goto, walk_line
-        from hypertopos_mcp.tools.geometry import get_solid
         import json
+
+        from hypertopos_mcp.tools.geometry import get_solid
+        from hypertopos_mcp.tools.navigation import goto
 
         # Navigate to tx_pattern entity line (transactions) — events have 0 slices
         goto("TX-0000000", "transactions")
@@ -3339,7 +3488,7 @@ def test_get_event_polygons_sample_pct(open_berka_sphere):
 
     from hypertopos_mcp.tools.geometry import get_event_polygons
 
-    result = json.loads(get_event_polygons("741", "tx_pattern", sample_pct=0.01, limit=50))
+    result = json.loads(get_event_polygons("741", "tx_pattern", sample_pct=0.01, top_n=50))
     assert result["sampled"] is True
     assert result["sample_size"] >= 1
 
@@ -3358,6 +3507,7 @@ def test_get_event_polygons_sample_no_sampling_when_large(open_berka_sphere):
 def test_get_event_polygons_sample_and_pct_raises(open_berka_sphere):
     """Passing both sample and sample_pct raises RuntimeError."""
     import pytest
+
     from hypertopos_mcp.tools.geometry import get_event_polygons
 
     with pytest.raises(RuntimeError, match="mutually exclusive"):
@@ -3562,37 +3712,23 @@ class TestFindClusters:
         assert "sample_size" in result
         assert len(result["clusters"]) == 2
 
-    def test_cluster_uses_properties_key_not_props(self):
+    def test_cluster_shape_is_labelled_and_deduplicated(self):
         from hypertopos_mcp.tools.analysis import find_clusters
 
         self._make_state(with_entity_line=False)
         result = json.loads(find_clusters("entity_pattern", n_clusters=2))
         c = result["clusters"][0]
-        assert "representative_properties" in c
-        assert "props" not in c
-        assert "representative_props" not in c
-        assert all("properties" in m for m in c["members"])
-        assert all("props" not in m for m in c["members"])
-
-    def test_none_values_filtered_from_properties(self):
-        from hypertopos_mcp.tools.analysis import find_clusters
-
-        # E-002 has name=None in the mock table — should be stripped
-        self._make_state(with_entity_line=True)
-        result = json.loads(find_clusters("entity_pattern", n_clusters=2))
-        for c in result["clusters"]:
-            assert None not in c["representative_properties"].values()
-            for m in c["members"]:
-                assert None not in m["properties"].values()
+        assert c["centroid_delta"] == {"line_0": 0.1, "line_1": 0.2}
+        assert "dim_profile" not in c
+        assert "representative_properties" not in c
+        assert c["members"] == ["E-001", "E-002"]
 
     def test_fallback_path_no_entity_line(self):
         from hypertopos_mcp.tools.analysis import find_clusters
 
         self._make_state(with_entity_line=False)
         result = json.loads(find_clusters("entity_pattern", n_clusters=2))
-        for c in result["clusters"]:
-            assert c["representative_properties"] == {}
-            assert all(m["properties"] == {} for m in c["members"])
+        assert "properties" not in result
 
     def test_find_clusters_event_pattern_members_have_properties(self):
         """GL entry cluster members must include event properties when event line exists."""
@@ -3646,18 +3782,17 @@ class TestFindClusters:
         _state["session"] = session_mock
 
         try:
-            result = json.loads(find_clusters("gl_entry_pattern", n_clusters=3, top_n=2))
+            result = json.loads(
+                find_clusters("gl_entry_pattern", n_clusters=3, top_n=2, summary=False)
+            )
             clusters = result["clusters"]
             assert len(clusters) == 1
-            # Representative should have properties
-            assert clusters[0]["representative_properties"] == {
-                "document_type": "standard",
-                "amount": 100.0,
-            }  # noqa: E501
-            # Members should have properties
-            member_map = {m["key"]: m["properties"] for m in clusters[0]["members"]}
-            assert member_map["GL-001"] == {"document_type": "standard", "amount": 100.0}
-            assert member_map["GL-002"] == {"document_type": "reversal", "amount": -50.0}
+            assert clusters[0]["members"] == ["GL-001", "GL-002"]
+            # Member (and representative) properties live in one key-first table
+            assert result["properties"] == {
+                "columns": ["key", "document_type", "amount"],
+                "rows": [["GL-001", "standard", 100.0], ["GL-002", "reversal", -50.0]],
+            }
         finally:
             analysis_mod.build_batch_lookups = original_build
             for k in list(_state.keys()):
@@ -3694,13 +3829,16 @@ class TestFindClusters:
         assert "capped_warning" not in result
 
 
-def test_dive_solid_base_polygon_edges_have_properties(open_berka_sphere):
+def test_dive_solid_base_polygon_edges_have_properties(open_berka_sphere, monkeypatch):
     """dive_solid base_polygon edges must include entity properties.
 
     Verifies parity with get_solid which enriches edges via enrich_polygon().
+    Full format: compact folds dim-line edges into ``dim_edges``.
     """
+    from hypertopos_mcp.server import _state
     from hypertopos_mcp.tools.navigation import dive_solid, goto
 
+    monkeypatch.setitem(_state, "response_format", "full")
     goto("2", "accounts")
     result = json.loads(dive_solid("2", "account_behavior_pattern"))
     base = result.get("base_polygon", {})
@@ -3882,7 +4020,9 @@ class TestSphereOverviewProfilingAlerts:
         for k in list(_state.keys()):
             _state[k] = None
 
-    def _setup_state(self, dim_percentiles, event_dimensions=None, prop_columns=None, relations=None):
+    def _setup_state(
+        self, dim_percentiles, event_dimensions=None, prop_columns=None, relations=None
+    ):
         from hypertopos_mcp.server import _state
 
         overview_entry = {
@@ -3924,7 +4064,14 @@ class TestSphereOverviewProfilingAlerts:
         rel.line_id = "_d_avg_late_days"
         self._setup_state(
             {
-                "avg_late_days": {"min": 0.0, "p25": 20.0, "p50": 26.0, "p75": 32.0, "p99": 50.0, "max": 322.0},
+                "avg_late_days": {
+                    "min": 0.0,
+                    "p25": 20.0,
+                    "p50": 26.0,
+                    "p75": 32.0,
+                    "p99": 50.0,
+                    "max": 322.0,
+                },
             },
             relations=[rel],
         )
@@ -3947,7 +4094,14 @@ class TestSphereOverviewProfilingAlerts:
         ed.column = "score"
         self._setup_state(
             {
-                "score": {"min": 0.0, "p25": 5.0, "p50": 10.0, "p75": 15.0, "p99": 18.0, "max": 29.0},
+                "score": {
+                    "min": 0.0,
+                    "p25": 5.0,
+                    "p50": 10.0,
+                    "p75": 15.0,
+                    "p99": 18.0,
+                    "max": 29.0,
+                },
             },
             event_dimensions=[ed],
         )
@@ -3966,7 +4120,14 @@ class TestSphereOverviewProfilingAlerts:
         ed.column = "score"
         self._setup_state(
             {
-                "score": {"min": 0.0, "p25": 5.0, "p50": 10.0, "p75": 15.0, "p99": 18.0, "max": 20.0},
+                "score": {
+                    "min": 0.0,
+                    "p25": 5.0,
+                    "p50": 10.0,
+                    "p75": 15.0,
+                    "p99": 18.0,
+                    "max": 20.0,
+                },
             },
             event_dimensions=[ed],
         )
@@ -3992,9 +4153,23 @@ class TestSphereOverviewProfilingAlerts:
         self._setup_state(
             {
                 # Pattern dimension — should alert (ratio 6.4)
-                "avg_late_days": {"min": 0.0, "p25": 20.0, "p50": 26.0, "p75": 32.0, "p99": 50.0, "max": 322.0},
+                "avg_late_days": {
+                    "min": 0.0,
+                    "p25": 20.0,
+                    "p50": 26.0,
+                    "p75": 32.0,
+                    "p99": 50.0,
+                    "max": 322.0,
+                },
                 # Orphan column — NOT a dimension, should be filtered (ratio 5.1)
-                "balance_to_loan": {"min": 0.0, "p25": 0.2, "p50": 0.4, "p75": 0.7, "p99": 1.5, "max": 7.8},
+                "balance_to_loan": {
+                    "min": 0.0,
+                    "p25": 0.2,
+                    "p50": 0.4,
+                    "p75": 0.7,
+                    "p99": 1.5,
+                    "max": 7.8,
+                },
             },
             relations=[rel],
         )
@@ -4012,10 +4187,12 @@ class TestAggregateAnomalies:
     def test_basic_grouping(self, open_berka_sphere):
         from hypertopos_mcp.tools.navigation import aggregate_anomalies
 
-        result = json.loads(aggregate_anomalies(
-            pattern_id="account_stress_pattern",
-            group_by="frequency",
-        ))
+        result = json.loads(
+            aggregate_anomalies(
+                pattern_id="account_stress_pattern",
+                group_by="frequency",
+            )
+        )
         assert result["pattern_id"] == "account_stress_pattern"
         assert result["total_anomalies"] > 0
         assert len(result["groups"]) > 0
@@ -4027,12 +4204,14 @@ class TestAggregateAnomalies:
     def test_include_keys(self, open_berka_sphere):
         from hypertopos_mcp.tools.navigation import aggregate_anomalies
 
-        result = json.loads(aggregate_anomalies(
-            pattern_id="account_stress_pattern",
-            group_by="frequency",
-            include_keys=True,
-            keys_per_group=3,
-        ))
+        result = json.loads(
+            aggregate_anomalies(
+                pattern_id="account_stress_pattern",
+                group_by="frequency",
+                include_keys=True,
+                keys_per_group=3,
+            )
+        )
         for g in result["groups"]:
             assert "entity_keys" in g
             assert len(g["entity_keys"]) <= 3
@@ -4050,16 +4229,20 @@ class TestAggregateAnomalies:
         from hypertopos_mcp.tools.navigation import aggregate_anomalies
 
         # Without filter
-        result_all = json.loads(aggregate_anomalies(
-            pattern_id="account_stress_pattern",
-            group_by="frequency",
-        ))
+        result_all = json.loads(
+            aggregate_anomalies(
+                pattern_id="account_stress_pattern",
+                group_by="frequency",
+            )
+        )
         # With filter — only "monthly" frequency
-        result_filtered = json.loads(aggregate_anomalies(
-            pattern_id="account_stress_pattern",
-            group_by="frequency",
-            property_filters={"frequency": "POPLATEK MESICNE"},
-        ))
+        result_filtered = json.loads(
+            aggregate_anomalies(
+                pattern_id="account_stress_pattern",
+                group_by="frequency",
+                property_filters={"frequency": "POPLATEK MESICNE"},
+            )
+        )
         assert result_filtered["total_anomalies"] <= result_all["total_anomalies"]
 
     def test_ungrouped_anomalies_field_present(self, open_berka_sphere):
@@ -4082,11 +4265,13 @@ class TestFindAnomaliesPropertyFilters:
     def test_basic_filter(self, open_berka_sphere):
         from hypertopos_mcp.tools.navigation import find_anomalies
 
-        result = json.loads(find_anomalies(
-            pattern_id="account_stress_pattern",
-            top_n=5,
-            property_filters={"frequency": "POPLATEK MESICNE"},
-        ))
+        result = json.loads(
+            find_anomalies(
+                pattern_id="account_stress_pattern",
+                top_n=5,
+                property_filters={"frequency": "POPLATEK MESICNE"},
+            )
+        )
         assert result["total_found"] > 0
         assert len(result["polygons"]) <= 5
 
@@ -4344,7 +4529,7 @@ class TestOpenSphereForceReload:
         monkeypatch.setattr(
             session_mod, "_reload_hypertopos_modules", lambda: reload_called.append(1)
         )  # noqa: E501
-        monkeypatch.setattr(session_mod, "_do_open_sphere", lambda p: None)
+        monkeypatch.setattr(session_mod, "_do_open_sphere", lambda p, branch=None: None)
         monkeypatch.setitem(server_mod._state, "sphere", self._make_sphere_state())
         monkeypatch.setitem(server_mod._state, "manifest", None)
         monkeypatch.setitem(server_mod._state, "path", "examples/test")
@@ -4364,7 +4549,7 @@ class TestOpenSphereForceReload:
         monkeypatch.setattr(
             session_mod, "_reload_hypertopos_modules", lambda: reload_called.append(1)
         )  # noqa: E501
-        monkeypatch.setattr(session_mod, "_do_open_sphere", lambda p: None)
+        monkeypatch.setattr(session_mod, "_do_open_sphere", lambda p, branch=None: None)
         monkeypatch.setitem(server_mod._state, "sphere", self._make_sphere_state())
         monkeypatch.setitem(server_mod._state, "manifest", None)
         monkeypatch.setitem(server_mod._state, "path", "examples/test")
@@ -4506,7 +4691,7 @@ def test_get_event_polygons_limit_capped(open_berka_sphere):
 
     pattern = _state["sphere"]._sphere.patterns["tx_pattern"]
     cap = adaptive_polygon_cap(pattern)
-    result = json.loads(get_event_polygons("741", "tx_pattern", limit=200))
+    result = json.loads(get_event_polygons("741", "tx_pattern", top_n=200))
     assert result["returned"] <= cap
     assert "capped_warning" in result
     assert "adaptive hard cap" in result["capped_warning"]
@@ -4518,7 +4703,7 @@ def test_get_event_polygons_limit_within_cap_no_warning(open_berka_sphere):
 
     from hypertopos_mcp.tools.geometry import get_event_polygons
 
-    result = json.loads(get_event_polygons("741", "tx_pattern", limit=10))
+    result = json.loads(get_event_polygons("741", "tx_pattern", top_n=10))
     assert "capped_warning" not in result
 
 
@@ -4527,6 +4712,7 @@ def test_adaptive_polygon_cap_event_pattern():
     from unittest.mock import MagicMock
 
     import numpy as np
+
     from hypertopos_mcp.tools._guards import adaptive_polygon_cap
 
     event_pattern = MagicMock()
@@ -4601,6 +4787,43 @@ def test_get_centroid_map_pair_truncation_warning(open_berka_sphere):
     assert len(result["inter_centroid_distances"]) == 15  # 6 * 5 / 2
 
 
+def test_get_centroid_map_caps_groups_without_reading_whole_lines(open_berka_sphere, monkeypatch):
+    """Property grouping above max_groups: capped in the core, one-column property read."""
+    import json
+
+    from hypertopos.storage.reader import GDSReader
+
+    from hypertopos_mcp.tools.analysis import get_centroid_map
+
+    real_read_points = GDSReader.read_points
+
+    def guarded_read_points(self, line_id, version, *args, **kwargs):
+        if line_id == "transactions" and kwargs.get("columns") is None:
+            raise AssertionError("whole transactions points table read")
+        return real_read_points(self, line_id, version, *args, **kwargs)
+
+    monkeypatch.setattr(GDSReader, "read_points", guarded_read_points)
+    result = json.loads(
+        get_centroid_map(
+            "tx_pattern",
+            "transactions",
+            group_by_property="transactions:operation",
+            top_n_distances=None,
+            max_groups=2,
+        )
+    )
+
+    assert "error" not in result, result
+    assert result["n_groups_total"] == 6
+    assert result["n_groups_returned"] == 2
+    assert "groups_truncated_warning" in result
+    assert len(result["group_centroids"]) == 2
+    assert len(result["inter_centroid_distances"]) == 1
+    outlier = result["structural_outlier"]["key"]
+    assert outlier in {g["key"] for g in result["group_centroids"]}
+    assert all("properties" not in g for g in result["group_centroids"])
+
+
 class TestFindHubsCappedWarning:
     def test_find_hubs_top_n_capped(self, open_berka_sphere):
         import json
@@ -4639,20 +4862,23 @@ class TestFindDriftingCappedWarning:
 
     def test_find_drifting_similar_top_n_capped(self, open_berka_sphere):
         import pytest
+
         from hypertopos_mcp.tools.analysis import _MAX_DRIFT_SIMILAR_TOP_N, find_drifting_similar
 
-        # find_drifting_similar returns a list — silent cap, no warning
+        # silent cap, no warning
         try:
             result = json.loads(find_drifting_similar("1", "account_behavior_pattern", top_n=100))
         except ValueError as exc:
             if "Trajectory index not found" in str(exc):
                 pytest.skip("No trajectory index for account_behavior_pattern")
             raise
-        assert isinstance(result, list)
-        assert len(result) <= _MAX_DRIFT_SIMILAR_TOP_N
+        assert isinstance(result["results"], list)
+        assert "elapsed_ms" in result
+        assert len(result["results"]) <= _MAX_DRIFT_SIMILAR_TOP_N
 
     def test_find_drifting_similar_within_limit_no_warning(self, open_berka_sphere):
         import pytest
+
         from hypertopos_mcp.tools.analysis import find_drifting_similar
 
         try:
@@ -4661,7 +4887,8 @@ class TestFindDriftingCappedWarning:
             if "Trajectory index not found" in str(exc):
                 pytest.skip("No trajectory index for account_behavior_pattern")
             raise
-        assert isinstance(result, list)
+        assert isinstance(result["results"], list)
+        assert "warning" not in result
 
 
 class TestFindDriftingSimilarInsufficientHistory:
@@ -4673,7 +4900,7 @@ class TestFindDriftingSimilarInsufficientHistory:
 
         with patch.object(
             _state["navigator"],
-            "find_drifting_similar",
+            "π10_attract_trajectory",
             side_effect=ValueError(
                 "insufficient_temporal_history: entity 'X' has 1 temporal slice"
                 " — minimum 2 required for meaningful trajectory similarity."
@@ -4694,7 +4921,7 @@ class TestFindDriftingSimilarInsufficientHistory:
 
         with patch.object(
             _state["navigator"],
-            "find_drifting_similar",
+            "π10_attract_trajectory",
             side_effect=ValueError(
                 "insufficient_temporal_history: entity 'X' has 1 temporal slice"
                 " — minimum 2 required (need a start and end point to define"
@@ -4717,7 +4944,7 @@ class TestFindDriftingSimilarInsufficientHistory:
         with (
             patch.object(
                 _state["navigator"],
-                "find_drifting_similar",
+                "π10_attract_trajectory",
                 side_effect=ValueError("some other error"),
             ),
             pytest.raises(ValueError, match="some other error"),
@@ -4764,7 +4991,8 @@ class TestFindSimilarEntitiesCap:
 
 
 class TestAggregateIncludePropertiesWarning:
-    def test_aggregate_include_properties_large_warns(self, open_berka_sphere):
+    @pytest.mark.berka_full
+    def test_aggregate_include_properties_large_warns(self, open_berka_full_sphere):
         from hypertopos_mcp.tools.aggregation import aggregate
 
         # accounts is a high-cardinality line (4500 entities)
@@ -4877,7 +5105,7 @@ class TestAggregateCountDistinct:
                 "tx_pattern",
                 "accounts",
                 metric="count_distinct:cpty_banks",
-                limit=5,
+                top_n=5,
             )
         )
         filtered = json.loads(
@@ -4886,7 +5114,7 @@ class TestAggregateCountDistinct:
                 "accounts",
                 metric="count_distinct:cpty_banks",
                 filters=[{"line": "tx_types", "key": "PRIJEM"}],
-                limit=5,
+                top_n=5,
             )
         )
         if all_result["results"] and filtered["results"]:
@@ -4902,7 +5130,7 @@ class TestAggregateCountDistinct:
                 "accounts",
                 metric="count_distinct:cpty_banks",
                 sort="asc",
-                limit=5,
+                top_n=5,
             )
         )
         values = [r["value"] for r in result["results"]]
@@ -4918,7 +5146,7 @@ class TestAggregateCountDistinct:
                 "accounts",
                 metric="count_distinct:cpty_banks",
                 geometry_filters={"is_anomaly": True},
-                limit=5,
+                top_n=5,
             )
         )
         assert "total_groups" in result
@@ -4937,7 +5165,7 @@ class TestAggregateCountDistinct:
                 "accounts",
                 metric="count_distinct:cpty_banks",
                 filter_by_keys=keys,
-                limit=5,
+                top_n=5,
             )
         )
         assert result["total_groups"] >= 0
@@ -5042,7 +5270,7 @@ def test_find_regime_changes_insufficient_data_warning(open_berka_sphere):
 
     from hypertopos_mcp.tools.observability import find_regime_changes
 
-    result = json.loads(find_regime_changes("account_behavior_pattern"))
+    result = json.loads(find_regime_changes("account_behavior_pattern"))["results"]
     assert len(result) >= 1
     if isinstance(result[0], dict) and "warning" in result[0]:
         assert "insufficient" in result[0]["warning"] or "temporal" in result[0]["warning"]
@@ -5061,7 +5289,7 @@ def test_find_regime_changes_empty_result_has_warning(open_berka_sphere):
             timestamp_from="1995-07-01",
             timestamp_to="1995-07-03",
         )
-    )
+    )["results"]
     assert isinstance(result, list)
     # Result is either regime changes, a warning, or empty (when no temporal
     # buckets fall within the narrow window).  Verify structure when non-empty.
@@ -5108,6 +5336,7 @@ def test_search_entities_hybrid_text_score_nonzero(open_berka_sphere):
     import json
 
     import pytest
+
     from hypertopos_mcp.tools.analysis import search_entities_hybrid
     from hypertopos_mcp.tools.navigation import goto
 
@@ -5157,8 +5386,12 @@ class TestAggregateGroupByLineValidation:
         from hypertopos_mcp.tools.aggregation import aggregate
         from hypertopos_mcp.tools.session import open_sphere
 
-        open_sphere("benchmark/berka/sphere/gds_berka_banking")
-        result = json.loads(aggregate(event_pattern_id="tx_pattern", group_by_line="accounts", metric="count", limit=3))
+        open_sphere(open_berka_sphere)
+        result = json.loads(
+            aggregate(
+                event_pattern_id="tx_pattern", group_by_line="accounts", metric="count", top_n=3
+            )
+        )
         assert result["total_groups"] > 0
 
 
@@ -5381,8 +5614,9 @@ class TestFindSimilarEntitiesMissingEdgeTo:
 
     def test_missing_edge_to_includes_clarification_note(self, open_berka_sphere):
         """Response includes missing_edge_to_note explaining edge vs property distinction."""
-        from hypertopos_mcp.tools.analysis import find_similar_entities
         import json
+
+        from hypertopos_mcp.tools.analysis import find_similar_entities
 
         raw = find_similar_entities(
             primary_key="1",
@@ -5543,7 +5777,7 @@ class TestAggregateHaving:
         from hypertopos_mcp.tools.aggregation import aggregate
 
         result = json.loads(
-            aggregate("tx_pattern", "accounts", metric="sum:amount", having={"gt": 0}, limit=5)
+            aggregate("tx_pattern", "accounts", metric="sum:amount", having={"gt": 0}, top_n=5)
         )
         for r in result["results"]:
             assert r["value"] > 0
@@ -5608,6 +5842,7 @@ class TestSphereOverviewEventRateDivergence:
 
     def teardown_method(self):
         from hypertopos_mcp.server import _state
+
         for k in list(_state.keys()):
             _state[k] = None
 
@@ -5658,7 +5893,9 @@ class TestSphereOverviewEventRateDivergence:
             "event_anomaly_rate": 0.30,
             "delta_norm": 1.5,
             "theta_norm": 3.77,
-            "alert": "high event anomaly rate (30%) but normal static geometry — investigate temporal",
+            "alert": (
+                "high event anomaly rate (30%) but normal static geometry — investigate temporal"
+            ),
         }
         self._setup_state([alert])
 
@@ -5681,7 +5918,9 @@ class TestSphereOverviewEventRateDivergence:
             "event_anomaly_rate": 0.30,
             "delta_norm": 1.5,
             "theta_norm": 3.77,
-            "alert": "high event anomaly rate (30%) but normal static geometry — investigate temporal",
+            "alert": (
+                "high event anomaly rate (30%) but normal static geometry — investigate temporal"
+            ),
         }
         self._setup_state([alert])
 
@@ -5698,4 +5937,3 @@ class TestSphereOverviewEventRateDivergence:
         result = json.loads(sphere_overview(detail="full"))
         entry = result["patterns"][0]
         assert "event_rate_divergence_alerts" not in entry
-

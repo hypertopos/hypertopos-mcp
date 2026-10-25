@@ -63,9 +63,13 @@ class TestFallbackPlan:
         `elif step_name == "attract_boundary"` branch in `_fallback_plan`.
         """
         entity_tools = {
-            "find_counterparties", "extract_chains", "find_common_relations",
-            "get_centroid_map", "assess_false_positive",
-            "trace_root_cause", "detect_composite_subgroup_inflation",
+            "find_counterparties",
+            "extract_chains",
+            "find_common_relations",
+            "get_centroid_map",
+            "assess_false_positive",
+            "trace_root_cause",
+            "detect_composite_subgroup_inflation",
             "hub_history",
         }
         # query triggers every keyword bucket; all entity tools marked available
@@ -86,20 +90,26 @@ class TestFallbackPlan:
 
 class TestAvailableSteps:
     def test_all_available_with_full_caps(self):
-        with patch("hypertopos_mcp.server._sphere_capabilities", {
-            "has_temporal": True,
-            "multi_pattern": True,
-            "has_trajectory_index": True,
-        }):
+        with patch(
+            "hypertopos_mcp.server.sphere_capabilities",
+            return_value={
+                "has_temporal": True,
+                "multi_pattern": True,
+                "has_trajectory_index": True,
+            },
+        ):
             steps = _available_steps()
             assert "detect_trajectory_anomaly" in steps
             assert "detect_cross_pattern_discrepancy" in steps
 
     def test_temporal_hidden_without_capability(self):
-        with patch("hypertopos_mcp.server._sphere_capabilities", {
-            "has_temporal": False,
-            "multi_pattern": False,
-        }):
+        with patch(
+            "hypertopos_mcp.server.sphere_capabilities",
+            return_value={
+                "has_temporal": False,
+                "multi_pattern": False,
+            },
+        ):
             steps = _available_steps()
             assert "detect_trajectory_anomaly" not in steps
             assert "find_regime_changes" not in steps
@@ -110,6 +120,7 @@ class TestDetectPatternFallback:
     """Test detect_pattern without sampling (ctx=None)."""
 
     def setup_method(self):
+        self._saved = {k: _state.get(k) for k in ("navigator", "sphere")}
         self.nav = MagicMock()
         _state["navigator"] = self.nav
         _state["sphere"] = MagicMock()
@@ -123,12 +134,13 @@ class TestDetectPatternFallback:
         _state["sphere"]._sphere = fake_sphere
 
     def teardown_method(self):
-        _state["navigator"] = None
-        _state["sphere"] = None
+        _state.update(self._saved)
 
     @pytest.mark.asyncio
     async def test_fallback_plan_used_when_no_ctx(self):
-        with patch("hypertopos_mcp.server._sphere_capabilities", {"has_trajectory_index": True}):
+        with patch(
+            "hypertopos_mcp.server.sphere_capabilities", return_value={"has_trajectory_index": True}
+        ):
             self.nav.detect_trajectory_anomaly.return_value = [
                 {"entity_key": "S001", "trajectory_shape": "arch"}
             ]
@@ -138,7 +150,7 @@ class TestDetectPatternFallback:
 
     @pytest.mark.asyncio
     async def test_step_error_captured(self):
-        with patch("hypertopos_mcp.server._sphere_capabilities", {}):
+        with patch("hypertopos_mcp.server.sphere_capabilities", return_value={}):
             self.nav.π5_attract_anomaly.side_effect = RuntimeError("boom")
             result = json.loads(await detect_pattern("show anomalies", ctx=None))
             assert "error" in result["results"].get("find_anomalies", {})
@@ -148,22 +160,25 @@ class TestStepFindCounterparties:
     """Test _step_find_counterparties param aliasing."""
 
     def setup_method(self):
+        self._saved_nav = _state.get("navigator")
         self.nav = MagicMock()
         self.nav.find_counterparties.return_value = {"outgoing": [], "incoming": []}
         _state["navigator"] = self.nav
 
     def teardown_method(self):
-        _state["navigator"] = None
+        _state["navigator"] = self._saved_nav
 
     def test_step_find_counterparties_resolves_event_pattern_id_alias(self):
         """_step_find_counterparties must resolve pattern_id from event_pattern_id alias."""
-        _step_find_counterparties({
-            "primary_key": "ACC-001",
-            "line_id": "transactions",
-            "from_col": "from_account",
-            "to_col": "to_account",
-            "event_pattern_id": "tx_pattern",  # alias key — no pattern_id present
-        })
+        _step_find_counterparties(
+            {
+                "primary_key": "ACC-001",
+                "line_id": "transactions",
+                "from_col": "from_account",
+                "to_col": "to_account",
+                "event_pattern_id": "tx_pattern",  # alias key — no pattern_id present
+            }
+        )
         call_kwargs = self.nav.find_counterparties.call_args
         assert call_kwargs is not None, "find_counterparties was not called"
         passed_pattern_id = call_kwargs.kwargs.get("pattern_id")
@@ -173,14 +188,16 @@ class TestStepFindCounterparties:
 
     def test_step_find_counterparties_pattern_id_takes_precedence(self):
         """When both pattern_id and event_pattern_id are present, pattern_id wins."""
-        _step_find_counterparties({
-            "primary_key": "ACC-001",
-            "line_id": "transactions",
-            "from_col": "from_account",
-            "to_col": "to_account",
-            "pattern_id": "explicit_pattern",
-            "event_pattern_id": "should_be_ignored",
-        })
+        _step_find_counterparties(
+            {
+                "primary_key": "ACC-001",
+                "line_id": "transactions",
+                "from_col": "from_account",
+                "to_col": "to_account",
+                "pattern_id": "explicit_pattern",
+                "event_pattern_id": "should_be_ignored",
+            }
+        )
         call_kwargs = self.nav.find_counterparties.call_args
         assert call_kwargs is not None
         passed_pattern_id = call_kwargs.kwargs.get("pattern_id")

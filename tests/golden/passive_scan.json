@@ -1,0 +1,143 @@
+{
+  "hits": [
+    {
+      "primary_key": "112",
+      "score": 1,
+      "sources": {
+        "account_stress_pattern": {
+          "anomalous_count": 1,
+          "anomaly_intensity": 4.9312,
+          "max_delta_norm": 101.8591,
+          "related_count": 1
+        }
+      },
+      "weighted_score": 4.9312
+    },
+    {
+      "primary_key": "15",
+      "score": 1,
+      "sources": {
+        "account_stress_pattern": {
+          "anomalous_count": 1,
+          "anomaly_intensity": 2.2739,
+          "max_delta_norm": 46.9703,
+          "related_count": 1
+        }
+      },
+      "weighted_score": 2.2739
+    },
+    {
+      "primary_key": "4",
+      "score": 1,
+      "sources": {
+        "account_stress_pattern": {
+          "anomalous_count": 1,
+          "anomaly_intensity": 1.9107,
+          "max_delta_norm": 39.4679,
+          "related_count": 1
+        }
+      },
+      "weighted_score": 1.9107
+    },
+    {
+      "primary_key": "97",
+      "score": 1,
+      "sources": {
+        "account_stress_pattern": {
+          "anomalous_count": 1,
+          "anomaly_intensity": 1.8777,
+          "max_delta_norm": 38.7857,
+          "related_count": 1
+        }
+      },
+      "weighted_score": 1.8777
+    },
+    {
+      "primary_key": "32",
+      "score": 1,
+      "sources": {
+        "account_stress_pattern": {
+          "anomalous_count": 1,
+          "anomaly_intensity": 1.7847,
+          "max_delta_norm": 36.8657,
+          "related_count": 1
+        }
+      },
+      "weighted_score": 1.7847
+    },
+    {
+      "primary_key": "7",
+      "score": 1,
+      "sources": {
+        "account_stress_pattern": {
+          "anomalous_count": 1,
+          "anomaly_intensity": 1.758,
+          "max_delta_norm": 36.3126,
+          "related_count": 1
+        }
+      },
+      "weighted_score": 1.758
+    },
+    {
+      "primary_key": "27",
+      "score": 1,
+      "sources": {
+        "account_stress_pattern": {
+          "anomalous_count": 1,
+          "anomaly_intensity": 1.5863,
+          "max_delta_norm": 32.7657,
+          "related_count": 1
+        }
+      },
+      "weighted_score": 1.5863
+    },
+    {
+      "primary_key": "85",
+      "score": 1,
+      "sources": {
+        "account_behavior_pattern": {
+          "anomalous_count": 1,
+          "anomaly_intensity": 1.5835,
+          "max_delta_norm": 34.3107,
+          "related_count": 1
+        }
+      },
+      "weighted_score": 1.5835
+    },
+    {
+      "primary_key": "93",
+      "score": 1,
+      "sources": {
+        "account_behavior_pattern": {
+          "anomalous_count": 1,
+          "anomaly_intensity": 1.5831,
+          "max_delta_norm": 34.3011,
+          "related_count": 1
+        }
+      },
+      "weighted_score": 1.5831
+    },
+    {
+      "primary_key": "72",
+      "score": 1,
+      "sources": {
+        "account_behavior_pattern": {
+          "anomalous_count": 1,
+          "anomaly_intensity": 1.5399,
+          "max_delta_norm": 33.3662,
+          "related_count": 1
+        }
+      },
+      "weighted_score": 1.5399
+    }
+  ],
+  "home_line_id": "accounts",
+  "scoring": "count",
+  "sources_summary": {
+    "account_behavior_pattern": 7,
+    "account_stress_pattern": 14
+  },
+  "threshold": 1,
+  "total_entities": 121,
+  "total_flagged": 21
+}

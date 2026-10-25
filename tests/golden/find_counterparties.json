@@ -1,0 +1,30 @@
+{
+  "incoming": [],
+  "line_id": "transactions",
+  "outgoing": [
+    {
+      "key": "",
+      "tx_count": 114
+    },
+    {
+      "key": "BK03",
+      "tx_count": 2
+    },
+    {
+      "key": "BK01",
+      "tx_count": 1
+    },
+    {
+      "key": "BK05",
+      "tx_count": 1
+    }
+  ],
+  "primary_key": "85",
+  "summary": {
+    "anomalous_incoming": 0,
+    "anomalous_outgoing": 0,
+    "self_transfers": 0,
+    "total_incoming": 0,
+    "total_outgoing": 4
+  }
+}

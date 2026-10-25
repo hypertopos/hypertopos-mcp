@@ -4,8 +4,6 @@
 
 import json
 
-import pytest
-
 
 class TestInactiveRatio:
     """Task 1: sphere_overview should include inactive_ratio for anchor patterns."""
@@ -70,24 +68,33 @@ class TestBinaryGeometryNote:
 class TestSignalStabilityNote:
     """Task 3: find_anomalies should warn when temporal signal is volatile."""
 
-    def test_volatile_pattern_has_stability_note(self, open_berka_sphere):
+    @staticmethod
+    def _find_anomalies_with_tq(monkeypatch, tq):
         from hypertopos_mcp.server import _state
         from hypertopos_mcp.tools.navigation import find_anomalies
 
-        nav = _state["navigator"]
-        tq = nav.temporal_quality_summary("account_behavior_pattern")
-        if tq is None or tq.get("signal_quality") == "persistent":
-            pytest.skip("account_behavior_pattern is not volatile on this sphere")
-        result = json.loads(find_anomalies(pattern_id="account_behavior_pattern", top_n=3))
-        assert "signal_stability_note" in result
-        assert (
-            "volatile" in result["signal_stability_note"].lower()
-            or "transition" in result["signal_stability_note"].lower()
+        monkeypatch.setattr(_state["navigator"], "temporal_quality_summary", lambda _pid: tq)
+        return json.loads(find_anomalies(pattern_id="account_behavior_pattern", top_n=3))
+
+    def test_volatile_pattern_has_stability_note(self, open_berka_sphere, monkeypatch):
+        tq = {"signal_quality": "volatile", "transition_rate": 0.8, "n_anomaly_transitions": 10}
+        result = self._find_anomalies_with_tq(monkeypatch, tq)
+        assert result["signal_stability_note"].startswith(
+            "Temporal signal is 'volatile' — 80% of anomalous entities change status"
         )
+
+    def test_no_transitions_has_no_stability_note(self, open_berka_sphere, monkeypatch):
+        """Without any anomaly transitions there is no evidence of volatility."""
+        tq = {
+            "signal_quality": "insufficient_data",
+            "transition_rate": 0.0,
+            "n_anomaly_transitions": 0,
+        }
+        result = self._find_anomalies_with_tq(monkeypatch, tq)
+        assert "signal_stability_note" not in result
 
     def test_event_pattern_has_no_stability_note(self, open_berka_sphere):
         from hypertopos_mcp.tools.navigation import find_anomalies
 
         result = json.loads(find_anomalies(pattern_id="tx_pattern", top_n=3))
         assert "signal_stability_note" not in result
-

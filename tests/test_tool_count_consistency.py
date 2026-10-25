@@ -27,7 +27,7 @@ import collections
 import re
 from pathlib import Path
 
-# Import tool modules to register them with the FastMCP instance, mirroring main.py.
+# Import tool modules to register them with the MCPServer instance, mirroring main.py.
 import hypertopos_mcp.tools.aggregation  # noqa: F401
 import hypertopos_mcp.tools.analysis  # noqa: F401
 import hypertopos_mcp.tools.detection  # noqa: F401
@@ -55,7 +55,13 @@ def _runtime_counts() -> dict[str, int]:
     phase2_total = always + gateway + edge
     phase3_min = phase2_total + base  # no optional capabilities
     phase3_max = sum(c.values())  # all capabilities present
+    read_only = sum(
+        1
+        for t in mcp._tool_manager.list_tools()
+        if t.annotations is not None and t.annotations.read_only_hint
+    )
     return {
+        "read_only": read_only,
         "always": always,
         "gateway": gateway,
         "edge": edge,
@@ -74,54 +80,41 @@ _EXPECTATIONS: list[tuple[str, str, object]] = [
     # docs/mcp-spec.md — phase intros
     ("docs/mcp-spec.md", r"Only (\d+) tools are visible", "always"),
     ("docs/mcp-spec.md", r"tier: `edge`, (\d+) tools", "edge"),
-    ("docs/mcp-spec.md",
-     r"\| \*\*base\*\* \| Always after sphere_overview \| (\d+) tools",
-     "base"),
+    ("docs/mcp-spec.md", r"\| \*\*base\*\* \| Always after sphere_overview \| (\d+) tools", "base"),
     # docs/mcp-spec.md — lifecycle ASCII diagram
-    ("docs/mcp-spec.md", r"Server start → Phase 1 \((\d+) tools", "always"),
-    ("docs/mcp-spec.md",
-     r"open_sphere\(path\) → Phase 2 \((\d+) tools",
-     "phase2_total"),
-    ("docs/mcp-spec.md",
-     r"sphere_overview\(\)\s+→ Phase 3 \((\d+)-(\d+) tools",
-     ("phase3_min", "phase3_max")),
-    ("docs/mcp-spec.md",
-     r"close_sphere\(\) → Phase 1 \((\d+) tools",
-     "always"),
-    ("docs/mcp-spec.md",
-     r"open_sphere\(other_path\) → Phase 2 \((\d+) tools",
-     "phase2_total"),
+    ("docs/mcp-spec.md", r"Session start → Phase 1 \((\d+) tools", "always"),
+    ("docs/mcp-spec.md", r"open_sphere\(path\) → Phase 2 \((\d+) tools", "phase2_total"),
+    (
+        "docs/mcp-spec.md",
+        r"sphere_overview\(\)\s+→ Phase 3 \((\d+)-(\d+) tools",
+        ("phase3_min", "phase3_max"),
+    ),
+    ("docs/mcp-spec.md", r"close_sphere\(\) → Phase 1 \((\d+) tools", "always"),
+    ("docs/mcp-spec.md", r"open_sphere\(other_path\) → Phase 2 \((\d+) tools", "phase2_total"),
     # docs/mcp-spec.md — Token Cost per Phase table
     ("docs/mcp-spec.md", r"Phase 1 — before open_sphere \| (\d+) ", "always"),
-    ("docs/mcp-spec.md",
-     r"Phase 2 — after open_sphere \| (\d+) ",
-     "phase2_total"),
-    ("docs/mcp-spec.md",
-     r"Phase 3 — full sphere \(all capabilities\) \| ~(\d+) ",
-     "phase3_max"),
-    ("docs/mcp-spec.md",
-     r"Phase 3 — simple sphere \(base only\) \| ~(\d+) ",
-     "phase3_min"),
-    ("docs/mcp-spec.md",
-     r"all (\d+) tool schemas would be in context",
-     "phase3_max"),
-    # docs/mcp-spec.md — readOnlyHint annotation count is the base-tier count
-    ("docs/mcp-spec.md",
-     r"`readOnlyHint=True` on (\d+) read-only tools",
-     "base"),
+    ("docs/mcp-spec.md", r"Phase 2 — after open_sphere \| (\d+) ", "phase2_total"),
+    ("docs/mcp-spec.md", r"Phase 3 — full sphere \(all capabilities\) \| ~(\d+) ", "phase3_max"),
+    ("docs/mcp-spec.md", r"Phase 3 — simple sphere \(base only\) \| ~(\d+) ", "phase3_min"),
+    ("docs/mcp-spec.md", r"all (\d+) tool schemas would be in context", "phase3_max"),
+    # docs/mcp-spec.md — readOnlyHint annotation count, read from the registered tools
+    ("docs/mcp-spec.md", r"`read_only_hint=True` on (\d+) read-only tools", "read_only"),
     # docs/images/mcp-lifecycle.svg — phase boxes
-    ("docs/images/mcp-lifecycle.svg",
-     r'<text [^>]*>(\d+) tools</text>\s*<text [^>]*>open_sphere</text>',
-     "always"),
-    ("docs/images/mcp-lifecycle.svg",
-     r'<text [^>]*>(\d+) tools</text>\s*<text [^>]*>detect_pattern \(smart mode\)',
-     "phase2_total"),
-    ("docs/images/mcp-lifecycle.svg",
-     r'<text [^>]*>(\d+)[–-](\d+) tools</text>\s*<text [^>]*>navigation',
-     ("phase3_min", "phase3_max")),
-    ("docs/images/mcp-lifecycle.svg",
-     r'<text [^>]*>(\d+) tools · agent-driven exploration</text>',
-     "phase3_max"),
+    (
+        "docs/images/mcp-lifecycle.svg",
+        r"<text [^>]*>(\d+) tools</text>\s*<text [^>]*>open_sphere</text>",
+        "always",
+    ),
+    (
+        "docs/images/mcp-lifecycle.svg",
+        r"<text [^>]*>(\d+) tools</text>\s*<text [^>]*>detect_pattern · sphere_overview",
+        "phase2_total",
+    ),
+    (
+        "docs/images/mcp-lifecycle.svg",
+        r"<text [^>]*>(\d+)[–-](\d+) tools</text>",
+        ("phase3_min", "phase3_max"),
+    ),
 ]
 
 
@@ -135,29 +128,16 @@ def _read(rel: str) -> str:
 
 
 def test_runtime_registry_matches_tier_map() -> None:
-    """`_TOOL_TIERS` must enumerate every registered tool."""
-    # Restore everything so all tools live in _tool_manager._tools, then revert
-    # to Phase 1 to keep the state consistent with what other tests expect.
-    from hypertopos_mcp.server import (
-        _restore_tool,
-        _tool_stash,
-        _unregister_phase2_tools,
+    """`_TOOL_TIERS` must enumerate every registered tool (the registry is fixed;
+    phases only change per-session visibility)."""
+    registered = {t.name for t in mcp._tool_manager.list_tools()}
+    tiered = set(_TOOL_TIERS.keys())
+    assert registered == tiered, (
+        f"Runtime tool registry != _TOOL_TIERS: "
+        f"only_in_runtime={registered - tiered}, "
+        f"only_in_tiers={tiered - registered}"
     )
-
-    for name in list(_tool_stash.keys()):
-        _restore_tool(name)
-
-    try:
-        registered = {t.name for t in mcp._tool_manager.list_tools()}
-        tiered = set(_TOOL_TIERS.keys())
-        assert registered == tiered, (
-            f"Runtime tool registry != _TOOL_TIERS: "
-            f"only_in_runtime={registered - tiered}, "
-            f"only_in_tiers={tiered - registered}"
-        )
-        assert len(_TOOL_TIERS) == len(mcp._tool_manager._tools)
-    finally:
-        _unregister_phase2_tools()
+    assert len(_TOOL_TIERS) == len(mcp._tool_manager._tools)
 
 
 def test_documented_counts_match_runtime() -> None:
@@ -170,8 +150,7 @@ def test_documented_counts_match_runtime() -> None:
         match = re.search(pattern, text)
         if match is None:
             failures.append(
-                f"{rel}: pattern not found, lock obsolete or content removed — "
-                f"pattern={pattern!r}"
+                f"{rel}: pattern not found, lock obsolete or content removed — pattern={pattern!r}"
             )
             continue
         if isinstance(expected, tuple):
@@ -195,9 +174,29 @@ def test_documented_counts_match_runtime() -> None:
 
     assert not failures, (
         "Documented tool counts drifted from runtime "
-        f"(_TOOL_TIERS = {sum(_tier_counts().values())} total):\n  - "
-        + "\n  - ".join(failures)
+        f"(_TOOL_TIERS = {sum(_tier_counts().values())} total):\n  - " + "\n  - ".join(failures)
     )
+
+
+def test_total_tool_counts_in_library_and_skill_docs_match_runtime() -> None:
+    """A whole-surface count ("N tools", N >= 50) in the library docs or skills is the total.
+
+    Released CHANGELOG sections and benchmark reports are historical records and
+    are not checked.
+    """
+    total = _runtime_counts()["total"]
+    packages = _PKG_ROOT.parent
+    pattern = re.compile(r"(?<!\d)(\d{2,3})\s+(?:MCP\s+)?tools\b")
+    stale: list[str] = []
+    for root in ("hypertopos-py", "hypertopos-skills"):
+        for path in sorted((packages / root).rglob("*.md")):
+            if path.name == "CHANGELOG.md" or "benchmark" in path.parts:
+                continue
+            for no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                for m in pattern.finditer(line):
+                    if int(m.group(1)) >= 50 and int(m.group(1)) != total:
+                        stale.append(f"{path.relative_to(packages)}:{no}: {m.group(0)!r}")
+    assert not stale, f"total tool count is {total}:\n  - " + "\n  - ".join(stale)
 
 
 def test_no_unlocked_tool_counts_in_user_facing_files() -> None:
@@ -222,7 +221,7 @@ def test_no_unlocked_tool_counts_in_user_facing_files() -> None:
             # preceded by whitespace and followed by punctuation or end of line.
             # Loose narrative ("a 4-6 tool workflow") gets a pass.
             start = max(0, m.start() - 20)
-            context = text[start:m.end() + 20]
+            context = text[start : m.end() + 20]
             if "workflow" in context.lower() or "-" in m.group(0):
                 continue
             line_no = text.count("\n", 0, m.start()) + 1

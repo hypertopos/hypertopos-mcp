@@ -9,8 +9,12 @@ import math
 from typing import Any
 
 import numpy as np
+from hypertopos.navigation.navigator import label_aware_unavailable_reason
+from mcp.server.mcpserver import Context
+from mcp.types import ToolAnnotations
 from scipy.special import ndtr
 
+from hypertopos_mcp._format import hoist_repeated_text, json_default, sanitize_for_json
 from hypertopos_mcp.server import (
     _register_manual_tools,
     _require_navigator,
@@ -20,27 +24,13 @@ from hypertopos_mcp.server import (
 )
 
 
-def _sanitize_for_json(obj: Any) -> Any:
-    """Replace non-finite floats (``±inf`` / ``NaN``) with ``None`` recursively.
-
-    Mirrors the helper in ``tools.analysis`` — kept local here to avoid a
-    cross-tool import. ``json.dumps`` emits ``Infinity`` / ``NaN`` literals
-    for non-finite floats which strict parsers reject.
-    """
-    if isinstance(obj, (float, np.floating)) and not math.isfinite(float(obj)):
-        return None
-    if isinstance(obj, dict):
-        return {k: _sanitize_for_json(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_sanitize_for_json(v) for v in obj]
-    if isinstance(obj, tuple):
-        return tuple(_sanitize_for_json(v) for v in obj)
-    return obj
-
-
 @mcp.tool()
 @timed
-def sphere_overview(pattern_id: str | None = None, detail: str = "summary") -> str:
+def sphere_overview(
+    pattern_id: str | None = None,
+    detail: str = "summary",
+    ctx: Context | None = None,
+) -> str:
     """Population-level health summary of one or all patterns in the sphere.
 
     detail: "summary" (instant O(1)) or "full" (+ temporal_quality, forecast, calibration).
@@ -73,8 +63,7 @@ def sphere_overview(pattern_id: str | None = None, detail: str = "summary") -> s
             dim_columns = (
                 {ed.column for ed in pattern.event_dimensions}
                 | set(pattern.prop_columns)
-                | {r.line_id[3:] for r in pattern.relations
-                   if r.line_id.startswith("_d_")}
+                | {r.line_id[3:] for r in pattern.relations if r.line_id.startswith("_d_")}
             )
             alerts = []
             for dim, stats in pattern.dim_percentiles.items():
@@ -84,25 +73,28 @@ def sphere_overview(pattern_id: str | None = None, detail: str = "summary") -> s
                     ratio = stats["max"] / stats["p99"]
                     if ratio > 1.5:
                         severity = "extreme" if ratio > 3.0 else "moderate"
-                        alerts.append({
-                            "pattern_id": pid,
-                            "entity_line": pattern.entity_line_id,
-                            "dimension": dim,
-                            "p25": stats["p25"],
-                            "p50": stats["p50"],
-                            "p75": stats["p75"],
-                            "p99": stats["p99"],
-                            "max": stats["max"],
-                            "ratio": round(ratio, 1),
-                            "alert": (
-                                f"{severity} cluster — use "
-                                f"find_anomalies(pattern_id='{pid}', "
-                                f"rank_by_property='{dim}') to surface"
-                            ),
-                        })
+                        alerts.append(
+                            {
+                                "entity_line": pattern.entity_line_id,
+                                "dimension": dim,
+                                "p25": stats["p25"],
+                                "p50": stats["p50"],
+                                "p75": stats["p75"],
+                                "p99": stats["p99"],
+                                "max": stats["max"],
+                                "ratio": round(ratio, 1),
+                                "alert": (
+                                    f"{severity} cluster — use "
+                                    f"find_anomalies(pattern_id='{pid}', "
+                                    f"rank_by_property='{dim}') to surface"
+                                ),
+                            }
+                        )
             if alerts:
                 entry["profiling_alerts"] = sorted(
-                    alerts, key=lambda a: a["ratio"], reverse=True,
+                    alerts,
+                    key=lambda a: a["ratio"],
+                    reverse=True,
                 )
 
     if detail == "full":
@@ -152,7 +144,7 @@ def sphere_overview(pattern_id: str | None = None, detail: str = "summary") -> s
         divergence_alerts = _state["navigator"]._compute_event_rate_divergence()
         if divergence_alerts:
             # Group alerts by anchor pattern_id for inline placement
-            alerts_by_pattern: dict[str, list[dict]] = {}
+            alerts_by_pattern: dict[str, list[dict[str, Any]]] = {}
             for alert in divergence_alerts:
                 alerts_by_pattern.setdefault(alert["pattern_id"], []).append(alert)
             for entry in result:
@@ -179,22 +171,16 @@ def sphere_overview(pattern_id: str | None = None, detail: str = "summary") -> s
             # Temporal capabilities
             if entry.get("has_temporal"):
                 hints.append(
-                    "trajectory_anomaly: temporal data available"
-                    " — use detect_trajectory_anomaly"
+                    "trajectory_anomaly: temporal data available — use detect_trajectory_anomaly"
                 )
-                hints.append(
-                    "drift: temporal data — use find_drifting_entities"
-                )
-                hints.append(
-                    "regime_changes: temporal — use find_regime_changes"
-                )
+                hints.append("drift: temporal data — use find_drifting_entities")
+                hints.append("regime_changes: temporal — use find_regime_changes")
 
             # Cross-pattern: multiple patterns on same entity line
             entity_line = sphere.entity_line(pid)
             if entity_line:
                 patterns_on_line = [
-                    p for p in sphere.patterns
-                    if sphere.entity_line(p) == entity_line
+                    p for p in sphere.patterns if sphere.entity_line(p) == entity_line
                 ]
                 if len(patterns_on_line) >= 2:
                     hints.append(
@@ -214,8 +200,7 @@ def sphere_overview(pattern_id: str | None = None, detail: str = "summary") -> s
 
             # Neighbor contamination: always available via ANN index
             hints.append(
-                "neighbor_contamination: ANN index available"
-                " — use detect_neighbor_contamination"
+                "neighbor_contamination: ANN index available — use detect_neighbor_contamination"
             )
 
             # Anomaly scan: always available
@@ -230,22 +215,26 @@ def sphere_overview(pattern_id: str | None = None, detail: str = "summary") -> s
 
     # Phase 3: unlock full manual toolset after first sphere_overview
     if not _state.get("manual_mode"):
-        _register_manual_tools()
+        _register_manual_tools(ctx)
 
     # Sphere-level cross-pattern discrepancy (only when no pattern_id filter,
     # i.e. response covers the whole sphere).
-    cross_pattern_discrepancy: dict | None = None
+    cross_pattern_discrepancy: dict[str, Any] | None = None
     if pattern_id is None:
         cross_pattern_discrepancy = _state["navigator"]._compute_cross_pattern_discrepancy()
 
-    response = {
+    response: dict[str, Any] = {
         "patterns": result,
         "cross_pattern_discrepancy": cross_pattern_discrepancy,
     }
-    return json.dumps(_sanitize_for_json(response), indent=2, default=str)
+    warnings = [w for entry in result for w in entry.get("dim_quality_warnings", [])]
+    advice = hoist_repeated_text(warnings, "type", "advice")
+    if advice:
+        response["advice_by_warning_type"] = advice
+    return json.dumps(sanitize_for_json(response), indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def compare_time_windows(
     pattern_id: str,
@@ -267,10 +256,10 @@ def compare_time_windows(
         window_b_from,
         window_b_to,
     )
-    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+    return json.dumps(sanitize_for_json(result), indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def detect_data_quality_issues(
     pattern_id: str,
@@ -283,7 +272,7 @@ def detect_data_quality_issues(
     Does NOT detect domain-level outliers (unusual values, truncated dates) — use find_anomalies for those.
     sample_size/sample_pct: subsample for large patterns (>500K entities).
     Returns: findings[] sorted by severity (HIGH first). Empty = no structural issues.
-    """
+    """  # noqa: E501
     _require_navigator()
     _effective_sample = sample_size
     if sample_pct is not None and _effective_sample is None:
@@ -296,12 +285,12 @@ def detect_data_quality_issues(
         sample_size=_effective_sample,
     )
     return json.dumps(
-        _sanitize_for_json({"pattern_id": pattern_id, "findings": findings}),
+        sanitize_for_json({"pattern_id": pattern_id, "findings": findings}),
         indent=2,
     )
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def find_regime_changes(
     pattern_id: str,
@@ -312,7 +301,7 @@ def find_regime_changes(
     """Detect when population geometry shifted significantly (changepoint detection, anchor only).
 
     timestamp_from/timestamp_to: optional ISO-8601 bounds. n_regimes: max changepoints (default 3).
-    Returns: changepoints with timestamp, magnitude, top_changed_dimensions.
+    Returns: {results: [...]} changepoints with timestamp, magnitude, top_changed_dimensions.
     """
     _require_navigator()
     result = _state["navigator"].π12_attract_regime_change(
@@ -321,10 +310,10 @@ def find_regime_changes(
         timestamp_to=timestamp_to,
         n_regimes=n_regimes,
     )
-    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+    return json.dumps({"results": sanitize_for_json(result)}, indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def line_geometry_stats(
     line_id: str,
@@ -349,10 +338,10 @@ def line_geometry_stats(
         pattern_id,
         sample_size=_effective_sample,
     )
-    return json.dumps(_sanitize_for_json(result), indent=2)
+    return json.dumps(sanitize_for_json(result), indent=2)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def check_alerts(pattern_id: str | None = None) -> str:
     """Evaluate geometric health checks and return alerts (6 built-in checks).
@@ -361,10 +350,10 @@ def check_alerts(pattern_id: str | None = None) -> str:
     """
     _require_navigator()
     result = _state["navigator"].check_alerts(pattern_id)
-    return json.dumps(_sanitize_for_json(result), indent=2)
+    return json.dumps(sanitize_for_json(result), indent=2)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def audit_pattern_dims(pattern_id: str, top_k: int = 10) -> str:
     """Per-dim calibration audit of a pattern with recommended action.
@@ -419,11 +408,12 @@ def audit_pattern_dims(pattern_id: str, top_k: int = 10) -> str:
     Rows are sorted by ``|cohens_d_pos_neg|`` descending so the most
     label-separating dims surface first; ``top_k`` caps the result.
 
-    When the pattern has no label-aware calibration available (sphere
-    built without the YAML ``label_audit:`` block), the tool returns a
+    When the pattern has no label-aware calibration available (no YAML
+    ``label_audit:`` block, a block that does not list the pattern, or a
+    listed pattern not yet calibrated), the tool returns a
     fallback shape — one row per dim with only ``mu`` + ``sigma`` +
     ``recommended_action: "keep"`` — plus a top-level ``reason`` field
-    explaining the missing data.
+    naming which of these applies.
 
     Tier: ``base`` (manual-mode diagnostic).
 
@@ -496,20 +486,20 @@ def audit_pattern_dims(pattern_id: str, top_k: int = 10) -> str:
     if not lac:
         rows: list[dict[str, Any]] = []
         for i, label in enumerate(dim_labels):
-            rows.append({
-                "dim_label": label,
-                "mu": float(mu_vec[i]) if i < len(mu_vec) else None,
-                "sigma": float(sigma_vec[i]) if i < len(sigma_vec) else None,
-                "recommended_action": "keep",
-            })
+            rows.append(
+                {
+                    "dim_label": label,
+                    "mu": float(mu_vec[i]) if i < len(mu_vec) else None,
+                    "sigma": float(sigma_vec[i]) if i < len(sigma_vec) else None,
+                    "recommended_action": "keep",
+                }
+            )
         rows = rows[:top_k]
-        result = {
+        result: dict[str, Any] = {
             "pattern_id": pattern_id,
             "label_aware_available": False,
             "reason": (
-                "no label-aware calibration available — pattern was built "
-                "without the 'label_audit:' block in sphere.yaml; only raw "
-                "mu/sigma reported"
+                f"{label_aware_unavailable_reason(sphere, pattern_id)}; only raw mu/sigma reported"
             ),
             "n_dims_total": n_dims,
             "n_dims_returned": len(rows),
@@ -518,7 +508,7 @@ def audit_pattern_dims(pattern_id: str, top_k: int = 10) -> str:
                 pattern_id,
             ),
         }
-        return json.dumps(_sanitize_for_json(result), indent=2)
+        return json.dumps(sanitize_for_json(result), indent=2)
 
     rows = []
     for i, label in enumerate(dim_labels):
@@ -526,18 +516,20 @@ def audit_pattern_dims(pattern_id: str, top_k: int = 10) -> str:
         if dim_cal is None:
             # Dim listed in pattern.dim_labels but missing from calibration
             # — keep the row, surface only raw stats, mark "keep".
-            rows.append({
-                "dim_label": label,
-                "mu": float(mu_vec[i]) if i < len(mu_vec) else None,
-                "sigma": float(sigma_vec[i]) if i < len(sigma_vec) else None,
-                "mu_pos": None,
-                "sigma_pos": None,
-                "mu_neg": None,
-                "sigma_neg": None,
-                "cohens_d_pos_neg": None,
-                "direction_component": None,
-                "recommended_action": "keep",
-            })
+            rows.append(
+                {
+                    "dim_label": label,
+                    "mu": float(mu_vec[i]) if i < len(mu_vec) else None,
+                    "sigma": float(sigma_vec[i]) if i < len(sigma_vec) else None,
+                    "mu_pos": None,
+                    "sigma_pos": None,
+                    "mu_neg": None,
+                    "sigma_neg": None,
+                    "cohens_d_pos_neg": None,
+                    "direction_component": None,
+                    "recommended_action": "keep",
+                }
+            )
             continue
 
         mu_pos = float(dim_cal.mu_pos)
@@ -550,10 +542,7 @@ def audit_pattern_dims(pattern_id: str, top_k: int = 10) -> str:
         # action tree deterministic — sigma_pos = sigma_neg = 0 means
         # "no spread anywhere" → falls into ``drop_low_separation``.
         denom_sq = (sigma_pos * sigma_pos + sigma_neg * sigma_neg) / 2.0
-        if denom_sq <= 0.0:
-            cohens_d = 0.0
-        else:
-            cohens_d = abs(mu_pos - mu_neg) / math.sqrt(denom_sq)
+        cohens_d = 0.0 if denom_sq <= 0.0 else abs(mu_pos - mu_neg) / math.sqrt(denom_sq)
 
         # Closed-form Gaussian-approximation AUROC for the dim's
         # univariate signal: AUROC = Phi((mu_pos - mu_neg) /
@@ -562,25 +551,13 @@ def audit_pattern_dims(pattern_id: str, top_k: int = 10) -> str:
         # Degenerate when both class sigmas are zero (no spread) — both
         # tail under the same point; report AUROC = 0.5.
         sum_sq = sigma_pos * sigma_pos + sigma_neg * sigma_neg
-        if sum_sq <= 0.0:
-            auroc_per_dim = 0.5
-        else:
-            auroc_per_dim = float(
-                ndtr((mu_pos - mu_neg) / math.sqrt(sum_sq)),
-            )
+        auroc_per_dim = 0.5 if sum_sq <= 0.0 else float(ndtr((mu_pos - mu_neg) / math.sqrt(sum_sq)))
 
         sigma_i = float(sigma_vec[i]) if i < len(sigma_vec) else 0.0
         max_class_sigma = max(sigma_pos, sigma_neg)
-        kind_i = (
-            dim_kinds[i] if dim_kinds is not None and i < len(dim_kinds)
-            else None
-        )
+        kind_i = dim_kinds[i] if dim_kinds is not None and i < len(dim_kinds) else None
 
-        if (
-            kind_i == "gaussian"
-            and abs(direction) < 0.05
-            and cohens_d >= 0.3
-        ):
+        if kind_i == "gaussian" and abs(direction) < 0.05 and cohens_d >= 0.3:
             # Kind-tag mismatch — raw moments separate but the Fisher
             # axis ignores this dim. Re-declare kind or split.
             action = "kind_mismatch_review"
@@ -593,33 +570,31 @@ def audit_pattern_dims(pattern_id: str, top_k: int = 10) -> str:
         else:
             action = "keep"
 
-        rows.append({
-            "dim_label": label,
-            "mu": float(mu_vec[i]) if i < len(mu_vec) else None,
-            "sigma": sigma_i,
-            "mu_pos": mu_pos,
-            "sigma_pos": sigma_pos,
-            "mu_neg": mu_neg,
-            "sigma_neg": sigma_neg,
-            "cohens_d_pos_neg": cohens_d,
-            "auroc_per_dim": auroc_per_dim,
-            "direction_component": direction,
-            "recommended_action": action,
-        })
+        rows.append(
+            {
+                "dim_label": label,
+                "mu": float(mu_vec[i]) if i < len(mu_vec) else None,
+                "sigma": sigma_i,
+                "mu_pos": mu_pos,
+                "sigma_pos": sigma_pos,
+                "mu_neg": mu_neg,
+                "sigma_neg": sigma_neg,
+                "cohens_d_pos_neg": cohens_d,
+                "auroc_per_dim": auroc_per_dim,
+                "direction_component": direction,
+                "recommended_action": action,
+            }
+        )
 
     # Sort by |cohens_d| desc; rows without a Cohen's d (dim missing from
     # calibration) sort to the end via -1.0 sentinel.
     rows.sort(
-        key=lambda r: (
-            abs(r["cohens_d_pos_neg"])
-            if r["cohens_d_pos_neg"] is not None
-            else -1.0
-        ),
+        key=lambda r: abs(r["cohens_d_pos_neg"]) if r["cohens_d_pos_neg"] is not None else -1.0,
         reverse=True,
     )
     rows = rows[:top_k]
 
-    result: dict[str, Any] = {
+    result = {
         "pattern_id": pattern_id,
         "label_aware_available": True,
         "n_dims_total": n_dims,
@@ -636,21 +611,17 @@ def audit_pattern_dims(pattern_id: str, top_k: int = 10) -> str:
     # for shape stability.
     intr_mean = getattr(pattern, "intrinsic_displacement_mean", None)
     extr_mean = getattr(pattern, "extrinsic_displacement_mean", None)
-    result["intrinsic_displacement_mean"] = (
-        float(intr_mean) if intr_mean is not None else None
-    )
-    result["extrinsic_displacement_mean"] = (
-        float(extr_mean) if extr_mean is not None else None
-    )
+    result["intrinsic_displacement_mean"] = float(intr_mean) if intr_mean is not None else None
+    result["extrinsic_displacement_mean"] = float(extr_mean) if extr_mean is not None else None
     # ANN index-health observability: surface whether incrementally-added
     # rows landed outside the IVF index (metadata-only read, no column scan).
     result["vector_index_health"] = _state["navigator"].vector_index_health(
         pattern_id,
     )
-    return json.dumps(_sanitize_for_json(result), indent=2)
+    return json.dumps(sanitize_for_json(result), indent=2)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def audit_label_alignment(pattern_id: str, top_n: int = 10) -> str:
     """Fisher LDA direction alignment audit — AUROC against labelled classes.
@@ -722,7 +693,8 @@ def audit_label_alignment(pattern_id: str, top_n: int = 10) -> str:
         )
     try:
         result = _state["navigator"].audit_label_alignment(
-            pattern_id, top_n=top_n,
+            pattern_id,
+            top_n=top_n,
         )
     except (KeyError, ValueError) as exc:
         return json.dumps(
@@ -732,4 +704,4 @@ def audit_label_alignment(pattern_id: str, top_n: int = 10) -> str:
             },
             indent=2,
         )
-    return json.dumps(_sanitize_for_json(result), indent=2)
+    return json.dumps(sanitize_for_json(result), indent=2)

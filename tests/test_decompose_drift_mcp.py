@@ -8,12 +8,11 @@ MCP tool body, which would only surface when an entity actually reaches the
 serialization step (the ValueError gates fire BEFORE asdict, so a single-
 epoch sphere hides the bug).
 """
+
 from __future__ import annotations
 
 import json
 from unittest.mock import MagicMock
-
-import pytest
 
 
 class TestDecomposeDriftErrorEnvelope:
@@ -23,8 +22,9 @@ class TestDecomposeDriftErrorEnvelope:
     bubbling the exception out of the MCP tool."""
 
     def test_returns_json_error_on_calibration_not_found(self):
-        import hypertopos_mcp.tools.analysis  # noqa: F401 — register tools
         from hypertopos import CalibrationNotFoundError
+
+        import hypertopos_mcp.tools.analysis  # noqa: F401 — register tools
         from hypertopos_mcp.server import _state
         from hypertopos_mcp.tools.analysis import decompose_drift
 
@@ -38,7 +38,10 @@ class TestDecomposeDriftErrorEnvelope:
         _state["sphere"] = MagicMock()
         try:
             body = decompose_drift(
-                entity_key="E1", pattern_id="account_pattern", v_from=1, v_to=3,
+                primary_key="E1",
+                pattern_id="account_pattern",
+                v_from=1,
+                v_to=3,
             )
         finally:
             _state["navigator"] = saved_nav
@@ -53,8 +56,16 @@ class TestDecomposeDriftErrorEnvelope:
 class TestDecomposeDriftMcp:
     """Round-trip the MCP tool; the navigator + serializer must both work."""
 
-    def test_decompose_drift_returns_valid_json(self, open_berka_sphere):
+    def test_decompose_drift_returns_valid_json(self, writable_berka_sphere):
+        from hypertopos.sphere import HyperSphere
+
         from hypertopos_mcp.tools.analysis import decompose_drift, find_drifting_entities
+        from hypertopos_mcp.tools.session import open_sphere
+
+        # The built sphere has one calibration epoch; recalibrating a private
+        # copy adds the second one decompose_drift needs.
+        HyperSphere.open(writable_berka_sphere).session("t").recalibrate("account_behavior_pattern")
+        open_sphere(writable_berka_sphere)
 
         # Pick the top-drift entity from π9 — guaranteed to exist on a built sphere.
         drift = json.loads(
@@ -68,20 +79,12 @@ class TestDecomposeDriftMcp:
         entity_key = drift["results"][0]["primary_key"]
 
         payload = decompose_drift(
-            entity_key=entity_key,
+            primary_key=entity_key,
             pattern_id="account_behavior_pattern",
             top_n=3,
         )
         report = json.loads(payload)
-        if "error" in report:
-            # decompose_drift returns a JSON error envelope (never raises) when
-            # the on-disk Berka has <2 retained calibration epochs — its happy
-            # path needs a rebuild + recalibrate. Skip rather than fail on that
-            # build state (the previous try/except ValueError gate was dead: the
-            # tool documents that it never raises).
-            pytest.skip(
-                f"decompose_drift unavailable on this Berka build: {report['error']}"
-            )
+        assert "error" not in report, report.get("error")
         assert report["entity_key"] == entity_key
         assert report["pattern_id"] == "account_behavior_pattern"
         assert report["v_from"] >= 1

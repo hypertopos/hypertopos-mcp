@@ -1,0 +1,716 @@
+{
+  "clusters": [
+    {
+      "count": 3,
+      "delta": [
+        1.8,
+        1.5,
+        1.2,
+        -1.1,
+        1.1,
+        25.5,
+        17.6,
+        9.8,
+        0.0,
+        0.0
+      ],
+      "examples": [
+        "93",
+        "72",
+        "76"
+      ],
+      "label": "elevated: _d_burst_daily, _d_burst_weekly, _d_burst_monthly; missing: _d_n_operations"
+    },
+    {
+      "count": 1,
+      "delta": [
+        -1.2,
+        -16.3,
+        -0.7,
+        -0.4,
+        -1.1,
+        24.8,
+        16.2,
+        5.6,
+        0.0,
+        0.0
+      ],
+      "examples": [
+        "85"
+      ],
+      "label": "elevated: _d_burst_daily, _d_burst_weekly, _d_burst_monthly; missing: _d_n_distinct_banks, _d_tx_count, _d_n_standing_orders_derived"
+    },
+    {
+      "count": 1,
+      "delta": [
+        -0.4,
+        1.5,
+        -0.7,
+        1.6,
+        -1.1,
+        24.8,
+        16.2,
+        6.3,
+        0.0,
+        0.0
+      ],
+      "examples": [
+        "119"
+      ],
+      "label": "elevated: _d_burst_daily, _d_burst_weekly, _d_burst_monthly; missing: _d_n_standing_orders_derived, _d_n_categories, _d_tx_count"
+    },
+    {
+      "count": 1,
+      "delta": [
+        -0.1,
+        1.5,
+        0.3,
+        -0.4,
+        -1.1,
+        20.7,
+        16.2,
+        5.0,
+        0.0,
+        0.0
+      ],
+      "examples": [
+        "110"
+      ],
+      "label": "elevated: _d_burst_daily, _d_burst_weekly, _d_burst_monthly; missing: _d_n_standing_orders_derived, _d_n_operations, _d_tx_count"
+    },
+    {
+      "count": 1,
+      "delta": [
+        -2.0,
+        -20.7,
+        -1.6,
+        1.6,
+        -1.1,
+        -4.0,
+        -2.5,
+        -2.9,
+        0.0,
+        0.0
+      ],
+      "examples": [
+        "20"
+      ],
+      "label": "missing: _d_n_distinct_banks, _d_burst_daily, _d_burst_monthly; elevated: _d_n_operations"
+    }
+  ],
+  "dim_labels": [
+    "_d_tx_count",
+    "_d_n_distinct_banks",
+    "_d_n_categories",
+    "_d_n_operations",
+    "_d_n_standing_orders_derived",
+    "_d_burst_daily",
+    "_d_burst_weekly",
+    "_d_burst_monthly",
+    "owner_gender",
+    "frequency"
+  ],
+  "found": 7,
+  "note": "clusters[].count reflects returned polygons only (top_n). Call anomaly_summary for population-wide cluster counts.",
+  "offset": 0,
+  "pattern_id": "account_behavior_pattern",
+  "polygons": [
+    {
+      "alive_edges": 7,
+      "anomaly_confidence": 0.92,
+      "anomaly_dimensions": [
+        {
+          "contribution_pct": 52.3,
+          "delta": 24.8196,
+          "dim": 5,
+          "label": "_d_burst_daily"
+        },
+        {
+          "contribution_pct": 22.5,
+          "delta": -16.278,
+          "dim": 1,
+          "label": "_d_n_distinct_banks"
+        },
+        {
+          "contribution_pct": 22.2,
+          "delta": 16.1628,
+          "dim": 6,
+          "label": "_d_burst_weekly"
+        }
+      ],
+      "bregman_divergence": 8.1368,
+      "classification": "distorter",
+      "delta": [
+        -1.1636,
+        -16.278,
+        -0.6722,
+        -0.4286,
+        -1.125,
+        24.8196,
+        16.1628,
+        5.6344,
+        0.0,
+        0.0
+      ],
+      "delta_norm": 34.3107,
+      "delta_rank_pct": 99.17,
+      "is_anomaly": true,
+      "primary_key": "85",
+      "reliability_flags": {
+        "confidence": 0.92,
+        "dominant_dim": "_d_burst_daily",
+        "dominant_dim_share": 0.5233,
+        "flags": [],
+        "low_confidence_bucket": false,
+        "single_dim_driven": false
+      },
+      "total_edges": 8,
+      "total_impact": 0.1289949
+    },
+    {
+      "alive_edges": 8,
+      "anomaly_confidence": 1.0,
+      "anomaly_dimensions": [
+        {
+          "contribution_pct": 61.4,
+          "delta": 26.8766,
+          "dim": 5,
+          "label": "_d_burst_daily"
+        },
+        {
+          "contribution_pct": 26.3,
+          "delta": 17.5966,
+          "dim": 6,
+          "label": "_d_burst_weekly"
+        },
+        {
+          "contribution_pct": 11.3,
+          "delta": 11.5286,
+          "dim": 7,
+          "label": "_d_burst_monthly"
+        }
+      ],
+      "bregman_divergence": 9.1555,
+      "classification": "distorter",
+      "delta": [
+        2.2939,
+        1.4665,
+        1.1976,
+        -0.4286,
+        1.625,
+        26.8766,
+        17.5966,
+        11.5286,
+        0.0,
+        0.0
+      ],
+      "delta_norm": 34.3011,
+      "delta_rank_pct": 98.35,
+      "is_anomaly": true,
+      "primary_key": "93",
+      "reliability_flags": {
+        "confidence": 1.0,
+        "dominant_dim": "_d_burst_daily",
+        "dominant_dim_share": 0.6139,
+        "flags": [],
+        "low_confidence_bucket": false,
+        "single_dim_driven": false
+      },
+      "total_edges": 8,
+      "total_impact": 0.1540083
+    },
+    {
+      "alive_edges": 8,
+      "anomaly_confidence": 0.975,
+      "anomaly_dimensions": [
+        {
+          "contribution_pct": 64.9,
+          "delta": 26.8766,
+          "dim": 5,
+          "label": "_d_burst_daily"
+        },
+        {
+          "contribution_pct": 27.8,
+          "delta": 17.5966,
+          "dim": 6,
+          "label": "_d_burst_weekly"
+        },
+        {
+          "contribution_pct": 6.1,
+          "delta": 8.2541,
+          "dim": 7,
+          "label": "_d_burst_monthly"
+        }
+      ],
+      "bregman_divergence": 8.5346,
+      "classification": "distorter",
+      "delta": [
+        1.5655,
+        1.4665,
+        0.2627,
+        -2.4232,
+        1.625,
+        26.8766,
+        17.5966,
+        8.2541,
+        0.0,
+        0.0
+      ],
+      "delta_norm": 33.3662,
+      "delta_rank_pct": 97.52,
+      "is_anomaly": true,
+      "primary_key": "72",
+      "reliability_flags": {
+        "confidence": 0.975,
+        "dominant_dim": "_d_burst_daily",
+        "dominant_dim_share": 0.6488,
+        "flags": [],
+        "low_confidence_bucket": false,
+        "single_dim_driven": false
+      },
+      "total_edges": 8,
+      "total_impact": 0.13896
+    },
+    {
+      "alive_edges": 8,
+      "anomaly_confidence": 0.825,
+      "anomaly_dimensions": [
+        {
+          "contribution_pct": 55.8,
+          "delta": 22.7626,
+          "dim": 5,
+          "label": "_d_burst_daily"
+        },
+        {
+          "contribution_pct": 33.4,
+          "delta": 17.5966,
+          "dim": 6,
+          "label": "_d_burst_weekly"
+        },
+        {
+          "contribution_pct": 9.9,
+          "delta": 9.5639,
+          "dim": 7,
+          "label": "_d_burst_monthly"
+        }
+      ],
+      "bregman_divergence": 7.3078,
+      "classification": "distorter",
+      "delta": [
+        1.4732,
+        1.4665,
+        2.1324,
+        -0.4286,
+        0.25,
+        22.7626,
+        17.5966,
+        9.5639,
+        0.0,
+        0.0
+      ],
+      "delta_norm": 30.469,
+      "delta_rank_pct": 96.69,
+      "is_anomaly": true,
+      "primary_key": "76",
+      "reliability_flags": {
+        "confidence": 0.825,
+        "dominant_dim": "_d_burst_daily",
+        "dominant_dim_share": 0.5581,
+        "flags": [],
+        "low_confidence_bucket": false,
+        "single_dim_driven": false
+      },
+      "total_edges": 8,
+      "total_impact": 0.1235898
+    },
+    {
+      "alive_edges": 7,
+      "anomaly_confidence": 0.835,
+      "anomaly_dimensions": [
+        {
+          "contribution_pct": 66.7,
+          "delta": 24.8196,
+          "dim": 5,
+          "label": "_d_burst_daily"
+        },
+        {
+          "contribution_pct": 28.3,
+          "delta": 16.1628,
+          "dim": 6,
+          "label": "_d_burst_weekly"
+        }
+      ],
+      "bregman_divergence": 7.3821,
+      "classification": "distorter",
+      "delta": [
+        -0.4351,
+        1.4665,
+        -0.6722,
+        1.566,
+        -1.125,
+        24.8196,
+        16.1628,
+        6.2893,
+        0.0,
+        0.0
+      ],
+      "delta_norm": 30.386,
+      "delta_rank_pct": 95.87,
+      "is_anomaly": true,
+      "primary_key": "119",
+      "reliability_flags": {
+        "confidence": 0.835,
+        "dominant_dim": "_d_burst_daily",
+        "dominant_dim_share": 0.6672,
+        "flags": [],
+        "low_confidence_bucket": false,
+        "single_dim_driven": false
+      },
+      "total_edges": 8,
+      "total_impact": 0.1130669
+    },
+    {
+      "alive_edges": 7,
+      "anomaly_confidence": 0.675,
+      "anomaly_dimensions": [
+        {
+          "contribution_pct": 59.7,
+          "delta": 20.7057,
+          "dim": 5,
+          "label": "_d_burst_daily"
+        },
+        {
+          "contribution_pct": 36.4,
+          "delta": 16.1628,
+          "dim": 6,
+          "label": "_d_burst_weekly"
+        }
+      ],
+      "bregman_divergence": 6.0896,
+      "classification": "distorter",
+      "delta": [
+        -0.0555,
+        1.4665,
+        0.2627,
+        -0.4286,
+        -1.125,
+        20.7057,
+        16.1628,
+        4.9795,
+        0.0,
+        0.0
+      ],
+      "delta_norm": 26.8035,
+      "delta_rank_pct": 95.04,
+      "is_anomaly": true,
+      "primary_key": "110",
+      "reliability_flags": {
+        "confidence": 0.675,
+        "dominant_dim": "_d_burst_daily",
+        "dominant_dim_share": 0.5968,
+        "flags": [],
+        "low_confidence_bucket": false,
+        "single_dim_driven": false
+      },
+      "total_edges": 8,
+      "total_impact": 0.09222894
+    },
+    {
+      "alive_edges": 7,
+      "anomaly_confidence": 0.6,
+      "anomaly_dimensions": [
+        {
+          "contribution_pct": 91.4,
+          "delta": -20.7141,
+          "dim": 1,
+          "label": "_d_n_distinct_banks"
+        }
+      ],
+      "bregman_divergence": 2.654,
+      "classification": "distorter",
+      "delta": [
+        -1.9638,
+        -20.7141,
+        -1.6071,
+        1.566,
+        -1.125,
+        -3.9779,
+        -2.4766,
+        -2.8794,
+        0.0,
+        0.0
+      ],
+      "delta_norm": 21.6675,
+      "delta_rank_pct": 94.21,
+      "is_anomaly": true,
+      "primary_key": "20",
+      "reliability_flags": {
+        "confidence": 0.6,
+        "dominant_dim": "_d_n_distinct_banks",
+        "dominant_dim_share": 0.9139,
+        "flags": [
+          "single_dim_driven"
+        ],
+        "low_confidence_bucket": false,
+        "single_dim_driven": true
+      },
+      "total_edges": 8,
+      "total_impact": 0.109381
+    }
+  ],
+  "properties": {
+    "columns": [
+      "primary_key",
+      "account_id",
+      "frequency",
+      "district_id",
+      "region",
+      "owner_gender",
+      "owner_birth_year",
+      "n_clients",
+      "n_standing_orders",
+      "loan_amount",
+      "loan_duration",
+      "balance_to_loan",
+      "min_balance",
+      "balance_volatility",
+      "income_coverage",
+      "balance_trend",
+      "penalty_interest_count",
+      "tx_count",
+      "n_distinct_banks",
+      "n_categories",
+      "n_operations",
+      "n_standing_orders_derived",
+      "burst_daily",
+      "burst_weekly",
+      "burst_monthly",
+      "has_loan",
+      "loan_status",
+      "has_card",
+      "card_type"
+    ],
+    "rows": [
+      [
+        "85",
+        "85",
+        "POPLATEK TYDNE",
+        "9",
+        "Region-2",
+        "F",
+        1959,
+        1,
+        0,
+        0,
+        0,
+        0.0,
+        -414304.7,
+        1.166361,
+        0.0,
+        -11591.45,
+        0,
+        120.0,
+        6.0,
+        4.0,
+        5.0,
+        0.0,
+        15.0,
+        16.0,
+        17.0,
+        null,
+        null,
+        null,
+        null
+      ],
+      [
+        "93",
+        "93",
+        "POPLATEK MESICNE",
+        "11",
+        "Region-4",
+        "F",
+        1963,
+        1,
+        2,
+        382675,
+        60,
+        -0.6658003,
+        -617635.8,
+        0.9009369,
+        3.935757,
+        -12650.79,
+        1,
+        457.0,
+        14.0,
+        6.0,
+        5.0,
+        2.0,
+        19.0,
+        23.0,
+        28.0,
+        "yes",
+        "C",
+        null,
+        null
+      ],
+      [
+        "72",
+        "72",
+        "POPLATEK MESICNE",
+        "4",
+        "Region-4",
+        "F",
+        1952,
+        1,
+        2,
+        85121,
+        48,
+        -5.96726,
+        -744611.0,
+        0.4389379,
+        4.719392,
+        -9989.62,
+        0,
+        386.0,
+        14.0,
+        5.0,
+        4.0,
+        2.0,
+        17.0,
+        17.0,
+        21.0,
+        "yes",
+        "C",
+        null,
+        null
+      ],
+      [
+        "76",
+        "76",
+        "POPLATEK TYDNE",
+        "6",
+        "Region-6",
+        "M",
+        1973,
+        1,
+        1,
+        39046,
+        36,
+        -0.8233517,
+        -278914.2,
+        2.308081,
+        17.02799,
+        -1712.077,
+        7,
+        377.0,
+        14.0,
+        7.0,
+        5.0,
+        1.0,
+        14.0,
+        17.0,
+        23.0,
+        "yes",
+        "B",
+        null,
+        null
+      ],
+      [
+        "119",
+        "119",
+        "POPLATEK PO OBRATU",
+        "7",
+        "Region-7",
+        "F",
+        1948,
+        2,
+        0,
+        0,
+        0,
+        0.0,
+        -340446.1,
+        0.4257416,
+        0.0,
+        -2944.26,
+        0,
+        191.0,
+        14.0,
+        4.0,
+        6.0,
+        0.0,
+        15.0,
+        16.0,
+        18.0,
+        null,
+        null,
+        "yes",
+        "junior"
+      ],
+      [
+        "110",
+        "110",
+        "POPLATEK PO OBRATU",
+        "1",
+        "Prague",
+        "M",
+        1963,
+        1,
+        0,
+        0,
+        0,
+        0.0,
+        -293485.9,
+        12.40665,
+        0.0,
+        -1107.203,
+        1,
+        228.0,
+        14.0,
+        5.0,
+        5.0,
+        0.0,
+        13.0,
+        16.0,
+        16.0,
+        null,
+        null,
+        null,
+        null
+      ],
+      [
+        "20",
+        "20",
+        "POPLATEK MESICNE",
+        "2",
+        "Region-2",
+        "M",
+        1956,
+        1,
+        0,
+        0,
+        0,
+        0.0,
+        -16647.4,
+        2.162286,
+        0.0,
+        686.5418,
+        0,
+        42.0,
+        4.0,
+        3.0,
+        6.0,
+        0.0,
+        1.0,
+        3.0,
+        4.0,
+        null,
+        null,
+        "yes",
+        "classic"
+      ]
+    ]
+  },
+  "radius": 1,
+  "ranked_by": "delta_norm",
+  "total_found": 7
+}

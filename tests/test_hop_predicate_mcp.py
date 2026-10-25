@@ -1,4 +1,5 @@
 """MCP wrapper tests for find_motif_by_hops."""
+
 from __future__ import annotations
 
 import json
@@ -15,7 +16,7 @@ def test_returns_valid_json_with_motifs_block(open_berka_sphere):
     out = find_motif_by_hops(
         pattern_id="tx_pattern",
         hops=[{"amount_min": 1.0}],
-        max_results=3,
+        top_n=3,
     )
     parsed = json.loads(out)
     assert "motifs" in parsed
@@ -35,7 +36,7 @@ def test_invalid_amount_ratio_raises_before_edge_table_check(open_berka_sphere):
         find_motif_by_hops(
             pattern_id="tx_pattern",
             hops=[{}, {"amount_ratio_to_prev": 1.5}],
-            max_results=3,
+            top_n=3,
         )
 
 
@@ -48,7 +49,7 @@ def test_invalid_hop0_amount_ratio_raises_before_edge_table_check(open_berka_sph
         find_motif_by_hops(
             pattern_id="tx_pattern",
             hops=[{"amount_ratio_to_prev": 0.5}, {}],
-            max_results=3,
+            top_n=3,
         )
 
 
@@ -98,7 +99,7 @@ def test_amount_ratio_to_prev_passthrough(open_berka_sphere, monkeypatch):
     out = find_motif_by_hops(
         pattern_id="tx_pattern",
         hops=[{}, {"amount_ratio_to_prev": 0.5}],
-        max_results=3,
+        top_n=3,
     )
     parsed = json.loads(out)
     assert "motifs" in parsed
@@ -125,7 +126,7 @@ def test_amount_ratio_to_prev_passthrough(open_berka_sphere, monkeypatch):
             {"amount_ratio_to_prev": 0.5, "time_delta_max_hours": 24.0},
             {"amount_ratio_to_prev": 0.6, "direction": "forward"},
         ],
-        max_results=5,
+        top_n=5,
     )
 
     assert "hops" in captured
@@ -166,7 +167,7 @@ def test_time_window_hours_passthrough(open_berka_sphere, monkeypatch):
     find_motif_by_hops(
         pattern_id="tx_pattern",
         hops=[{"amount_min": 100.0}, {}],
-        max_results=5,
+        top_n=5,
         time_window_hours=24.0,
     )
 
@@ -174,7 +175,8 @@ def test_time_window_hours_passthrough(open_berka_sphere, monkeypatch):
 
 
 def test_require_anomalous_entity_passthrough(
-    open_berka_sphere, monkeypatch,
+    open_berka_sphere,
+    monkeypatch,
 ):
     """MCP layer must thread require_anomalous_entity through to engine
     HopPredicate. Berka has no edge_table so engine validation does not
@@ -200,7 +202,7 @@ def test_require_anomalous_entity_passthrough(
             {"amount_min": 100.0, "require_anomalous_entity": False},
             {"amount_min": 100.0},
         ],
-        max_results=5,
+        top_n=5,
     )
 
     parsed = captured["hops"]
@@ -211,7 +213,8 @@ def test_require_anomalous_entity_passthrough(
 
 
 def test_score_response_serializes_anchor_pattern_id(
-    open_berka_sphere, monkeypatch,
+    open_berka_sphere,
+    monkeypatch,
 ):
     """MCP serializer must thread anchor_pattern_id provenance through
     JSON when score=True returns motifs scored against an anchor companion."""
@@ -248,7 +251,7 @@ def test_score_response_serializes_anchor_pattern_id(
     out = find_motif_by_hops(
         pattern_id="tx_pattern",
         hops=[{"amount_min": 1.0}],
-        max_results=5,
+        top_n=5,
         score=True,
     )
     parsed = json.loads(out)
@@ -274,13 +277,13 @@ def test_invalid_time_window_hours_raises_before_edge_table_check(
         find_motif_by_hops(
             pattern_id="tx_pattern",
             hops=[{}, {}],
-            max_results=3,
+            top_n=3,
             time_window_hours=-1.0,
         )
     with pytest.raises(Exception, match="time_window_hours"):
         find_motif_by_hops(
             pattern_id="tx_pattern",
             hops=[{}, {}],
-            max_results=3,
+            top_n=3,
             time_window_hours=0.0,
         )

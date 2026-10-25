@@ -5,13 +5,11 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import pytest
-
 from hypertopos.model.objects import Point
-
 
 _CONTINUOUS_MODE_ERROR = (
     "Cannot jump to 'accounts': edge uses continuous mode "
@@ -31,8 +29,8 @@ def continuous_mode_nav(open_berka_sphere):
         version=1,
         status="active",
         properties={},
-        created_at=datetime(1995, 1, 1, tzinfo=timezone.utc),
-        changed_at=datetime(1995, 1, 1, tzinfo=timezone.utc),
+        created_at=datetime(1995, 1, 1, tzinfo=UTC),
+        changed_at=datetime(1995, 1, 1, tzinfo=UTC),
     )
 
     nav = MagicMock()

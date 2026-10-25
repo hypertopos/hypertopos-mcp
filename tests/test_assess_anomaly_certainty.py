@@ -14,6 +14,7 @@ Coverage matrix:
 - Step-status uniformity: each sub-composition step produces ``{ok: true}``
   or ``{ok: false, error: <message>}`` — never nulls, never missing keys.
 """
+
 from __future__ import annotations
 
 import json
@@ -21,9 +22,10 @@ import math
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import hypertopos_mcp.tools.analysis  # noqa: F401 — register tools
 import numpy as np
 import pytest
+
+import hypertopos_mcp.tools.analysis  # noqa: F401 — register tools
 from hypertopos_mcp.server import _TOOL_TIERS, _state
 from hypertopos_mcp.tools.analysis import assess_anomaly_certainty
 
@@ -173,7 +175,9 @@ def test_high_certainty_anomalous_full_agreement(fake_state):
     assert parsed["reliability_flags"]["near_data_boundary"] is False
     assert parsed["reliability_flags"]["calibration_stale"] is False
     assert parsed["stability_across_alphas"] == {
-        "0.005": True, "0.01": True, "0.05": True,
+        "0.005": True,
+        "0.01": True,
+        "0.05": True,
     }
     assert parsed["certainty_score"] >= 0.90
 
@@ -245,9 +249,7 @@ def test_discriminator_four_distinct_verdicts(fake_state):
         stability_per_alpha=(True, True, True),
         calibration_health="good",
     )
-    verdicts.add(json.loads(
-        assess_anomaly_certainty("E1", "account_pattern")
-    )["certainty_verdict"])
+    verdicts.add(json.loads(assess_anomaly_certainty("E1", "account_pattern"))["certainty_verdict"])
 
     # Case 2 — single-dim on boundary → contested
     _stub_default_navigator(
@@ -257,9 +259,7 @@ def test_discriminator_four_distinct_verdicts(fake_state):
         single_dim_driven=True,
         stability_per_alpha=(True, True, True),
     )
-    verdicts.add(json.loads(
-        assess_anomaly_certainty("E1", "account_pattern")
-    )["certainty_verdict"])
+    verdicts.add(json.loads(assess_anomaly_certainty("E1", "account_pattern"))["certainty_verdict"])
 
     # Case 3 — only loosest alpha keeps it anomalous (1/3) → low
     _stub_default_navigator(
@@ -269,9 +269,7 @@ def test_discriminator_four_distinct_verdicts(fake_state):
         single_dim_driven=False,
         stability_per_alpha=(False, False, True),
     )
-    verdicts.add(json.loads(
-        assess_anomaly_certainty("E1", "account_pattern")
-    )["certainty_verdict"])
+    verdicts.add(json.loads(assess_anomaly_certainty("E1", "account_pattern"))["certainty_verdict"])
 
     # Case 4 — 2/3 stability, healthy → moderate
     _stub_default_navigator(
@@ -281,9 +279,7 @@ def test_discriminator_four_distinct_verdicts(fake_state):
         single_dim_driven=False,
         stability_per_alpha=(False, True, True),
     )
-    verdicts.add(json.loads(
-        assess_anomaly_certainty("E1", "account_pattern")
-    )["certainty_verdict"])
+    verdicts.add(json.loads(assess_anomaly_certainty("E1", "account_pattern"))["certainty_verdict"])
 
     assert verdicts == {"high", "contested", "low", "moderate"}, (
         f"Discriminator collapsed — got {sorted(verdicts)}; "
@@ -323,8 +319,8 @@ def test_genuinely_anomalous_entity_not_contested_without_sampling(fake_state):
     _stub_default_navigator(
         fake_state,
         is_anomaly=True,
-        delta_norm=12.0,          # far above 1.2 * 2.5 = 3.0 → not boundary
-        conformal_p=0.0005,       # in the extreme tail → stable at every alpha
+        delta_norm=12.0,  # far above 1.2 * 2.5 = 3.0 → not boundary
+        conformal_p=0.0005,  # in the extreme tail → stable at every alpha
         single_dim_driven=False,
         calibration_health="good",
     )
@@ -335,7 +331,9 @@ def test_genuinely_anomalous_entity_not_contested_without_sampling(fake_state):
     assert parsed["is_anomalous"] is True
     # All three alphas pass (0.0005 <= 0.005/0.01/0.05) → stability_count == 3.
     assert parsed["stability_across_alphas"] == {
-        "0.005": True, "0.01": True, "0.05": True,
+        "0.005": True,
+        "0.01": True,
+        "0.05": True,
     }
     assert parsed["certainty_verdict"] != "contested"
     assert parsed["certainty_verdict"] == "high"
@@ -381,9 +379,7 @@ def test_step_status_records_failure_for_cross_pattern(fake_state):
         delta_norm=10.0,
         stability_per_alpha=(True, True, True),
     )
-    fake_state.cross_pattern_profile.side_effect = ValueError(
-        "no anchor line for entity"
-    )
+    fake_state.cross_pattern_profile.side_effect = ValueError("no anchor line for entity")
 
     body = assess_anomaly_certainty("E1", "account_pattern")
     parsed = json.loads(body)

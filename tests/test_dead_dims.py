@@ -74,4 +74,3 @@ class TestDeadDimensions:
         dead_dim_indices("account_behavior_pattern")
         assert len(nav._dead_dim_cache) > 0
         # Cache is owned by navigator, not MCP guards
-

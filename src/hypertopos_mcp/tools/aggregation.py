@@ -5,70 +5,66 @@
 from __future__ import annotations
 
 import json
-import math
-from typing import Literal
+from typing import Any, Literal
 
+from mcp.types import ToolAnnotations
+
+from hypertopos_mcp._format import sanitize_for_json
 from hypertopos_mcp.server import _require_sphere, _state, mcp, timed
 
-
-def _sanitize_for_json(obj):
-    """Recursively replace non-finite floats (±inf / NaN) with None so strict
-    JSON parsers accept the output. avg / sum / min / max over empty or
-    degenerate groups can yield ±inf / NaN. ``nav.aggregate`` returns plain
-    Python floats (Lance SQL output), so a ``float`` check suffices — this
-    module stays numpy-free by design (thin wrapper over the navigator).
-    """
-    if isinstance(obj, float) and not math.isfinite(obj):
-        return None
-    if isinstance(obj, dict):
-        return {k: _sanitize_for_json(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_sanitize_for_json(v) for v in obj]
-    if isinstance(obj, tuple):
-        return tuple(_sanitize_for_json(v) for v in obj)
-    return obj
+# Request parameters the engine echoes into its result; dropped when unset.
+_PARAMETER_ECHOES = (
+    "group_by_property",
+    "pivot_event_field",
+    "distinct",
+    "collapse_by_property",
+    "filters",
+    "geometry_filters",
+)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def aggregate(
     event_pattern_id: str,
     group_by_line: str,
     metric: str = "count",
-    filters: list[dict] | None = None,
+    filters: list[dict[Any, Any]] | None = None,
     group_by_property: str | None = None,
     distinct: bool = False,
     collapse_by_property: bool = False,
-    limit: int = 20,
+    top_n: int = 20,
     offset: int = 0,
     pivot_event_field: str | None = None,
     sample_size: int | None = None,
     sample_pct: float | None = None,
     seed: int | None = None,
-    geometry_filters: dict | None = None,
-    property_filters: dict | None = None,
+    geometry_filters: dict[Any, Any] | None = None,
+    property_filters: dict[Any, Any] | None = None,
     include_properties: list[str] | None = None,
     sort: Literal["desc", "asc"] = "desc",
     filter_by_keys: list[str] | None = None,
-    event_filters: dict | None = None,
+    event_filters: dict[Any, Any] | None = None,
     time_from: str | None = None,
     time_to: str | None = None,
     missing_edge_to: str | None = None,
-    having: dict | None = None,
-    entity_filters: dict | None = None,
+    having: dict[Any, Any] | None = None,
+    entity_filters: dict[Any, Any] | None = None,
     group_by_line_2: str | None = None,
+    group_by_relation: str | None = None,
 ) -> str:
     """Aggregate event polygons grouped by a dimension line. Metrics: count, count_distinct, sum, avg, min, max, median, pct<N>.
 
     group_by_line: declared relation of the event pattern.
+    group_by_relation: display name of the relation to group by when the event pattern relates to group_by_line more than once (e.g. "sender"/"receiver"); required in that case.
     metric: "count" (default), "sum:<field>", "avg:<field>", "median:<field>", "pct90:<field>", "count_distinct:<line_id>".
     group_by_property: "line_id:property_name" for property-level grouping.
     group_by_line_2: second grouping line for multi-level GROUP BY.
     filters: [{"line": str, "key": str}] partition filters. time_from/time_to: ISO-8601 event date range.
     geometry_filters: {"is_anomaly": bool, "delta_rank_pct": {"gt": N}, "delta_dim": {...}, "alias_inside": "id"}.
-    property_filters: filter group_by_line entities ({"prop": {"op": "<", "value": N}}).
+    property_filters: filter group_by_line entities ({"prop": {"op": "<", "value": N}}; op "in" takes a list).
     entity_filters: filter pattern's own entity line (same syntax as property_filters).
-    event_filters: filter event line columns ({"col": {"gt": N}}). Null checks: {"col": null}.
+    event_filters: filter event line columns ({"col": {"gt": N}}, {"col": {"in": [...]}}). Null checks: {"col": null}.
     having: post-aggregation filter ({"gt": X, "lt": Y}). missing_edge_to: orphan filter.
     distinct/collapse_by_property: collapse to property-value groups. pivot_event_field: pivot by event column.
     sample_size/sample_pct/seed: sampling. filter_by_keys: scope to specific polygon keys.
@@ -84,6 +80,7 @@ def aggregate(
     result = nav.aggregate(
         event_pattern_id=event_pattern_id,
         group_by_line=group_by_line,
+        group_by_relation=group_by_relation,
         metric=metric,
         filters=filters,
         group_by_property=group_by_property,
@@ -102,7 +99,7 @@ def aggregate(
         sample_size=sample_size,
         sample_pct=sample_pct,
         seed=seed,
-        limit=limit,
+        limit=top_n,
         offset=offset,
         sort=sort,
         group_by_line_2=group_by_line_2,
@@ -239,4 +236,7 @@ def aggregate(
                     if pivot_labels:
                         result["pivot_labels"] = pivot_labels
 
-    return json.dumps(_sanitize_for_json(result), separators=(",", ":"))
+    for field in _PARAMETER_ECHOES:
+        if result.get(field) is None or result.get(field) is False:
+            result.pop(field, None)
+    return json.dumps(sanitize_for_json(result), separators=(",", ":"))

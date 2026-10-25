@@ -1,0 +1,361 @@
+{
+  "advice_by_warning_type": {
+    "dominant_dim_mass": "Top-N anomaly ranking is likely single-dim-driven on this dim. Cross-check by inspecting reliability_flags.single_dim_driven incidence among find_anomalies results. If high, the sphere is effectively a one-dim detector; rebalance by splitting the dim into a saturating component + a tail component, or adding correlated dims that capture independent signal.",
+    "non_normal_dim": "Consider a log1p / sqrt / rank transform of the raw shape values before mu/sigma computation, or re-declare kind as 'poisson' (discrete counts) or 'bernoulli' (binary presence) if applicable. Untransformed, the gaussian z-score concentrates the delta mass in a few extreme rows and poorly discriminates the bulk of the population.",
+    "sparse_dim": "Gaussian z-score assumption is wrong for this dim. Use Bregman divergence with a poisson / bernoulli kind tag instead, or split into a binary 'is_active' dim + a continuous 'value_when_active' dim."
+  },
+  "cross_pattern_discrepancy": null,
+  "patterns": [
+    {
+      "anomaly_rate": 0.05,
+      "anomaly_rate_source": "delta_norm_scan",
+      "calibration_health": "good",
+      "continuous_mode_note": "This pattern uses continuous edge encoding \u2014 centroid_map(group_by_line) and contrast_populations(edge spec) are unavailable. Use group_by_property instead.",
+      "dim_quality_warnings": [
+        {
+          "dim_label": "balance",
+          "evidence_value": 0.9874,
+          "reason": "p99-tail mass share = 0.9874 (dim drives >70% of population tail variance across 2 dims with percentile coverage)",
+          "threshold": 0.7,
+          "type": "dominant_dim_mass"
+        },
+        {
+          "dim_label": "amount",
+          "evidence_value": 0.0,
+          "reason": "normality test p=0.00e+00 < 0.01 \u2014 z-score assumes normality, this dim's distribution is heavy-tailed or otherwise non-normal",
+          "threshold": 0.01,
+          "type": "non_normal_dim"
+        },
+        {
+          "dim_label": "balance",
+          "evidence_value": 0.0,
+          "reason": "normality test p=0.00e+00 < 0.01 \u2014 z-score assumes normality, this dim's distribution is heavy-tailed or otherwise non-normal",
+          "threshold": 0.01,
+          "type": "non_normal_dim"
+        }
+      ],
+      "dimension_kinds": "bernoulli x4, gaussian x2",
+      "geometry_mode": "mixed",
+      "pattern_id": "tx_pattern",
+      "pattern_type": "event",
+      "profiling_alerts": [
+        {
+          "alert": "extreme cluster \u2014 use find_anomalies(pattern_id='tx_pattern', rank_by_property='amount') to surface",
+          "dimension": "amount",
+          "entity_line": "transactions",
+          "max": 91381.9,
+          "p25": 1627.25,
+          "p50": 4006.2,
+          "p75": 10671.95,
+          "p99": 26281.21,
+          "ratio": 3.5
+        },
+        {
+          "alert": "moderate cluster \u2014 use find_anomalies(pattern_id='tx_pattern', rank_by_property='balance') to surface",
+          "dimension": "balance",
+          "entity_line": "transactions",
+          "max": 275854.2,
+          "p25": -81090.93,
+          "p50": -18950.5,
+          "p75": 17234.25,
+          "p99": 156673.7,
+          "ratio": 1.8
+        }
+      ],
+      "theta_norm": 11.8281,
+      "theta_sensitivity_summary": {
+        "n_cliffs": 0,
+        "stable_band_from": "p90",
+        "stable_band_length": 10,
+        "stable_band_to": "p99",
+        "theta_at_p95": 11.8281
+      },
+      "total_entities": 28534
+    },
+    {
+      "anomaly_rate": 0.0579,
+      "anomaly_rate_source": "delta_norm_scan",
+      "calibration_health": "good",
+      "continuous_mode_note": "This pattern uses continuous edge encoding \u2014 centroid_map(group_by_line) and contrast_populations(edge spec) are unavailable. Use group_by_property instead.",
+      "dim_quality_warnings": [
+        {
+          "dim_label": "balance_to_loan",
+          "reason": "median = 0 with p99 = 0.3654 (mostly-zero with rare nonzero; approx fraction zero >=0.75)",
+          "type": "sparse_dim"
+        },
+        {
+          "dim_label": "income_coverage",
+          "reason": "median = 0 with p99 = 24.084 (mostly-zero with rare nonzero; approx fraction zero 0.50-0.75)",
+          "type": "sparse_dim"
+        },
+        {
+          "dim_label": "tx_count",
+          "evidence_value": 0.992,
+          "reason": "p99-tail mass share = 0.9920 (dim drives >70% of population tail variance across 8 dims with percentile coverage)",
+          "threshold": 0.7,
+          "type": "dominant_dim_mass"
+        }
+      ],
+      "dimension_kinds": "poisson x8, bernoulli x2",
+      "geometry_mode": "mixed",
+      "has_temporal": true,
+      "inactive_ratio": 0.3554,
+      "pattern_id": "account_behavior_pattern",
+      "pattern_type": "anchor",
+      "profiling_alerts": [
+        {
+          "alert": "moderate cluster \u2014 use find_anomalies(pattern_id='account_behavior_pattern', rank_by_property='tx_count') to surface",
+          "dimension": "tx_count",
+          "entity_line": "accounts",
+          "max": 805.0,
+          "p25": 162.0,
+          "p50": 222.0,
+          "p75": 296.0,
+          "p99": 525.4,
+          "ratio": 1.5
+        }
+      ],
+      "theta_norm": 21.6675,
+      "theta_sensitivity_summary": {
+        "n_cliffs": 0,
+        "stable_band_from": "p91",
+        "stable_band_length": 9,
+        "stable_band_to": "p99",
+        "theta_at_p95": 21.6675
+      },
+      "total_entities": 121
+    },
+    {
+      "anomaly_rate": 0.1074,
+      "anomaly_rate_source": "delta_norm_scan",
+      "calibration_health": "good",
+      "continuous_mode_note": "This pattern uses continuous edge encoding \u2014 centroid_map(group_by_line) and contrast_populations(edge spec) are unavailable. Use group_by_property instead.",
+      "dim_quality_warnings": [
+        {
+          "dim_label": "balance_to_loan",
+          "reason": "median = 0 with p99 = 0.3654 (mostly-zero with rare nonzero; approx fraction zero >=0.75)",
+          "type": "sparse_dim"
+        },
+        {
+          "dim_label": "income_coverage",
+          "reason": "median = 0 with p99 = 24.084 (mostly-zero with rare nonzero; approx fraction zero 0.50-0.75)",
+          "type": "sparse_dim"
+        },
+        {
+          "dim_label": "mean_balance",
+          "evidence_value": 0.9639,
+          "reason": "p99-tail mass share = 0.9639 (dim drives >70% of population tail variance across 5 dims with percentile coverage)",
+          "threshold": 0.7,
+          "type": "dominant_dim_mass"
+        },
+        {
+          "dim_label": "min_balance",
+          "evidence_value": 5.529187e-12,
+          "reason": "normality test p=5.53e-12 < 0.01 \u2014 z-score assumes normality, this dim's distribution is heavy-tailed or otherwise non-normal",
+          "threshold": 0.01,
+          "type": "non_normal_dim"
+        },
+        {
+          "dim_label": "balance_volatility",
+          "evidence_value": 1.242138e-22,
+          "reason": "normality test p=1.24e-22 < 0.01 \u2014 z-score assumes normality, this dim's distribution is heavy-tailed or otherwise non-normal",
+          "threshold": 0.01,
+          "type": "non_normal_dim"
+        },
+        {
+          "dim_label": "balance_trend",
+          "evidence_value": 2.398986e-06,
+          "reason": "normality test p=2.40e-06 < 0.01 \u2014 z-score assumes normality, this dim's distribution is heavy-tailed or otherwise non-normal",
+          "threshold": 0.01,
+          "type": "non_normal_dim"
+        },
+        {
+          "dim_label": "amount_std",
+          "evidence_value": 4.631132e-08,
+          "reason": "normality test p=4.63e-08 < 0.01 \u2014 z-score assumes normality, this dim's distribution is heavy-tailed or otherwise non-normal",
+          "threshold": 0.01,
+          "type": "non_normal_dim"
+        },
+        {
+          "dim_label": "mean_balance",
+          "evidence_value": 3.488527e-07,
+          "reason": "normality test p=3.49e-07 < 0.01 \u2014 z-score assumes normality, this dim's distribution is heavy-tailed or otherwise non-normal",
+          "threshold": 0.01,
+          "type": "non_normal_dim"
+        }
+      ],
+      "dimension_kinds": "gaussian x6, bernoulli x2",
+      "geometry_mode": "mixed",
+      "has_temporal": true,
+      "inactive_ratio": 0.2975,
+      "pattern_id": "account_stress_pattern",
+      "pattern_type": "anchor",
+      "profiling_alerts": [
+        {
+          "alert": "moderate cluster \u2014 use find_anomalies(pattern_id='account_stress_pattern', rank_by_property='balance_volatility') to surface",
+          "dimension": "balance_volatility",
+          "entity_line": "accounts_stress",
+          "max": 71.7342,
+          "p25": 0.5291,
+          "p50": 0.6637,
+          "p75": 1.0677,
+          "p99": 31.2754,
+          "ratio": 2.3
+        }
+      ],
+      "theta_norm": 20.656,
+      "theta_sensitivity_summary": {
+        "n_cliffs": 0,
+        "stable_band_from": "p90",
+        "stable_band_length": 10,
+        "stable_band_to": "p99",
+        "theta_at_p95": 32.7657
+      },
+      "total_entities": 121
+    },
+    {
+      "anomaly_rate": 0.1111,
+      "anomaly_rate_source": "delta_norm_scan",
+      "calibration_health": "good",
+      "continuous_mode_note": "This pattern uses continuous edge encoding \u2014 centroid_map(group_by_line) and contrast_populations(edge spec) are unavailable. Use group_by_property instead.",
+      "dim_quality_warnings": [
+        {
+          "dim_label": "mean_balance",
+          "evidence_value": 0.9915,
+          "reason": "p99-tail mass share = 0.9915 (dim drives >70% of population tail variance across 6 dims with percentile coverage)",
+          "threshold": 0.7,
+          "type": "dominant_dim_mass"
+        },
+        {
+          "dim_label": "balance_to_loan",
+          "evidence_value": 1.535287e-08,
+          "reason": "normality test p=1.54e-08 < 0.01 \u2014 z-score assumes normality, this dim's distribution is heavy-tailed or otherwise non-normal",
+          "threshold": 0.01,
+          "type": "non_normal_dim"
+        },
+        {
+          "dim_label": "min_balance",
+          "evidence_value": 2.17542e-05,
+          "reason": "normality test p=2.18e-05 < 0.01 \u2014 z-score assumes normality, this dim's distribution is heavy-tailed or otherwise non-normal",
+          "threshold": 0.01,
+          "type": "non_normal_dim"
+        },
+        {
+          "dim_label": "balance_volatility",
+          "evidence_value": 1.854559e-13,
+          "reason": "normality test p=1.85e-13 < 0.01 \u2014 z-score assumes normality, this dim's distribution is heavy-tailed or otherwise non-normal",
+          "threshold": 0.01,
+          "type": "non_normal_dim"
+        },
+        {
+          "dim_label": "income_coverage",
+          "evidence_value": 2.146983e-10,
+          "reason": "normality test p=2.15e-10 < 0.01 \u2014 z-score assumes normality, this dim's distribution is heavy-tailed or otherwise non-normal",
+          "threshold": 0.01,
+          "type": "non_normal_dim"
+        },
+        {
+          "dim_label": "mean_balance",
+          "evidence_value": 0.0001796727,
+          "reason": "normality test p=1.80e-04 < 0.01 \u2014 z-score assumes normality, this dim's distribution is heavy-tailed or otherwise non-normal",
+          "threshold": 0.01,
+          "type": "non_normal_dim"
+        }
+      ],
+      "dimension_kinds": "gaussian x8, bernoulli x1",
+      "geometry_mode": "mixed",
+      "has_temporal": true,
+      "inactive_ratio": 0.5333,
+      "pattern_id": "loan_stress_pattern",
+      "pattern_type": "anchor",
+      "profiling_alerts": [
+        {
+          "alert": "moderate cluster \u2014 use find_anomalies(pattern_id='loan_stress_pattern', rank_by_property='balance_volatility') to surface",
+          "dimension": "balance_volatility",
+          "entity_line": "loan_accounts",
+          "max": 12.8818,
+          "p25": 0.5531,
+          "p50": 0.6481,
+          "p75": 0.8719,
+          "p99": 8.2616,
+          "ratio": 1.6
+        }
+      ],
+      "theta_norm": 18.6399,
+      "theta_sensitivity_summary": {
+        "n_cliffs": 0,
+        "stable_band_from": "p90",
+        "stable_band_length": 10,
+        "stable_band_to": "p99",
+        "theta_at_p95": 32.5112
+      },
+      "total_entities": 45
+    },
+    {
+      "anomaly_rate": 0.0502,
+      "anomaly_rate_source": "delta_norm_scan",
+      "calibration_health": "good",
+      "continuous_mode_note": "This pattern uses continuous edge encoding \u2014 centroid_map(group_by_line) and contrast_populations(edge spec) are unavailable. Use group_by_property instead.",
+      "dim_quality_warnings": [
+        {
+          "dim_label": "pair_sum_amount",
+          "evidence_value": 1.0,
+          "reason": "p99-tail mass share = 1.0000 (dim drives >70% of population tail variance across 4 dims with percentile coverage)",
+          "threshold": 0.7,
+          "type": "dominant_dim_mass"
+        },
+        {
+          "dim_label": "pair_sum_amount",
+          "evidence_value": 3.18657e-59,
+          "reason": "normality test p=3.19e-59 < 0.01 \u2014 z-score assumes normality, this dim's distribution is heavy-tailed or otherwise non-normal",
+          "threshold": 0.01,
+          "type": "non_normal_dim"
+        },
+        {
+          "dim_label": "pair_amount_std",
+          "evidence_value": 2.864015e-28,
+          "reason": "normality test p=2.86e-28 < 0.01 \u2014 z-score assumes normality, this dim's distribution is heavy-tailed or otherwise non-normal",
+          "threshold": 0.01,
+          "type": "non_normal_dim"
+        }
+      ],
+      "dimension_kinds": "poisson x2, gaussian x2",
+      "geometry_mode": "mixed",
+      "pattern_id": "account_bank_pairs_pattern",
+      "pattern_type": "anchor",
+      "profiling_alerts": [
+        {
+          "alert": "extreme cluster \u2014 use find_anomalies(pattern_id='account_bank_pairs_pattern', rank_by_property='pair_tx_count') to surface",
+          "dimension": "pair_tx_count",
+          "entity_line": "account_bank_pairs",
+          "max": 611.0,
+          "p25": 5.0,
+          "p50": 8.0,
+          "p75": 13.0,
+          "p99": 199.87,
+          "ratio": 3.1
+        },
+        {
+          "alert": "moderate cluster \u2014 use find_anomalies(pattern_id='account_bank_pairs_pattern', rank_by_property='pair_sum_amount') to surface",
+          "dimension": "pair_sum_amount",
+          "entity_line": "account_bank_pairs",
+          "max": 3782193.6,
+          "p25": 17751.58,
+          "p50": 53334.9,
+          "p75": 93322.77,
+          "p99": 1482299.41,
+          "ratio": 2.6
+        }
+      ],
+      "theta_norm": 3.7646,
+      "theta_sensitivity_summary": {
+        "n_cliffs": 0,
+        "stable_band_from": "p90",
+        "stable_band_length": 10,
+        "stable_band_to": "p99",
+        "theta_at_p95": 3.7646
+      },
+      "total_entities": 1614
+    }
+  ]
+}

@@ -9,18 +9,21 @@ carries the new ``signed_confidence_score`` / ``lda_alignment`` /
 pattern without label-aware calibration raises ``GDSNavigationError``
 through the navigator (not a silent fallback to ``delta_norm``).
 """
+
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
 
-import hypertopos_mcp.tools.navigation  # noqa: F401 — register tools
 import numpy as np
 import pyarrow as pa
 import pytest
 from hypertopos.builder import GDSBuilder, RelationSpec
 from hypertopos.cli.schema import LabelAuditConfig
 from hypertopos.navigation.navigator import GDSNavigationError
+
+import hypertopos_mcp.tools.navigation  # noqa: F401 — register tools
 from hypertopos_mcp.server import _do_open_sphere, _state
 from hypertopos_mcp.tools.navigation import find_anomalies
 
@@ -50,7 +53,9 @@ def _build_two_class_sphere(
         noise_pos = rng.normal(0.0, 1.0, n_pos).astype(np.float32)
         noise_neg = rng.normal(0.0, 1.0, n_per_class).astype(np.float32)
         noise_anti = rng.normal(
-            noise_outlier_mean, 1.0, n_anti_aligned,
+            noise_outlier_mean,
+            1.0,
+            n_anti_aligned,
         ).astype(np.float32)
         noise_score = np.concatenate([noise_pos, noise_neg, noise_anti])
         labels = ["anom"] * n_pos + ["norm"] * n_per_class + ["norm"] * n_anti_aligned
@@ -75,10 +80,17 @@ def _build_two_class_sphere(
     out_path = tmp_path / out_dir_name
     b = GDSBuilder("signed_conf_mcp_smoke", str(out_path))
     b.add_line(
-        "accounts", accounts, key_col="account_id", source_id="test",
+        "accounts",
+        accounts,
+        key_col="account_id",
+        source_id="test",
     )
     b.add_line(
-        "tx", tx, key_col="tx_id", source_id="test", role="event",
+        "tx",
+        tx,
+        key_col="tx_id",
+        source_id="test",
+        role="event",
     )
     b.add_pattern(
         "tx_pattern",
@@ -86,8 +98,10 @@ def _build_two_class_sphere(
         entity_line="tx",
         relations=[
             RelationSpec(
-                line_id="accounts", fk_col="account_id",
-                direction="in", required=True,
+                line_id="accounts",
+                fk_col="account_id",
+                direction="in",
+                required=True,
             ),
         ],
         anomaly_percentile=80.0,
@@ -107,9 +121,17 @@ def _build_two_class_sphere(
 @pytest.fixture
 def signed_conf_sphere(tmp_path):
     """Build + open a label-audit-enabled sphere for the smoke test."""
-    saved = {k: _state.get(k) for k in (
-        "sphere", "session", "navigator", "engine", "manifest", "path",
-    )}
+    saved = {
+        k: _state.get(k)
+        for k in (
+            "sphere",
+            "session",
+            "navigator",
+            "engine",
+            "manifest",
+            "path",
+        )
+    }
     out = _build_two_class_sphere(
         tmp_path,
         enable_label_audit=True,
@@ -118,19 +140,25 @@ def signed_conf_sphere(tmp_path):
     _do_open_sphere(out)
     yield out
     if _state.get("session") is not None:
-        try:
+        with contextlib.suppress(Exception):
             _state["session"].close()
-        except Exception:
-            pass
     _state.update(saved)
 
 
 @pytest.fixture
 def no_label_audit_sphere(tmp_path):
     """Build + open a sphere WITHOUT a label_audit block."""
-    saved = {k: _state.get(k) for k in (
-        "sphere", "session", "navigator", "engine", "manifest", "path",
-    )}
+    saved = {
+        k: _state.get(k)
+        for k in (
+            "sphere",
+            "session",
+            "navigator",
+            "engine",
+            "manifest",
+            "path",
+        )
+    }
     out = _build_two_class_sphere(
         tmp_path,
         enable_label_audit=False,
@@ -139,10 +167,8 @@ def no_label_audit_sphere(tmp_path):
     _do_open_sphere(out)
     yield out
     if _state.get("session") is not None:
-        try:
+        with contextlib.suppress(Exception):
             _state["session"].close()
-        except Exception:
-            pass
     _state.update(saved)
 
 

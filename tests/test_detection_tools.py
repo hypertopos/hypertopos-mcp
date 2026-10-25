@@ -7,8 +7,6 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock
 
-import pytest
-
 from hypertopos_mcp.server import _state
 
 
@@ -88,7 +86,18 @@ class TestDetectNeighborContamination:
                 "contamination_rate": 0.8,
                 "anomalous_neighbor_count": 8,
                 "total_neighbors": 10,
-                "neighbor_keys": ["C001", "C002", "C003", "C004", "C006", "C007", "C008", "C009", "C010", "C011"],
+                "neighbor_keys": [
+                    "C001",
+                    "C002",
+                    "C003",
+                    "C004",
+                    "C006",
+                    "C007",
+                    "C008",
+                    "C009",
+                    "C010",
+                    "C011",
+                ],
             }
         ]
         result = json.loads(detect_neighbor_contamination("pat_a", k=5, sample_size=10))
@@ -150,7 +159,9 @@ class TestDetectTrajectoryAnomaly:
     def test_detect_trajectory_anomaly_accepts_sample_size(self):
         """detect_trajectory_anomaly MCP tool must accept sample_size parameter."""
         import inspect
+
         from hypertopos_mcp.tools.detection import detect_trajectory_anomaly
+
         sig = inspect.signature(detect_trajectory_anomaly)
         assert "sample_size" in sig.parameters
 

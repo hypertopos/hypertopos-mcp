@@ -5,12 +5,11 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from unittest.mock import MagicMock
 
 import numpy as np
-import pyarrow as pa
 from hypertopos.model.objects import Edge, Polygon
-from hypertopos_mcp.enrichment import build_entity_lookups, enrich_polygon
+
+from hypertopos_mcp.enrichment import enrich_polygon
 from hypertopos_mcp.serializers import _serialize_polygon
 
 
@@ -34,158 +33,6 @@ def _make_polygon(bk: str = "CUST-0001") -> Polygon:
         last_refresh_at=datetime(2024, 1, 1, tzinfo=UTC),
         updated_at=datetime(2024, 1, 1, tzinfo=UTC),
     )
-
-
-def _customers_table() -> pa.Table:
-    return pa.table(
-        {
-            "primary_key": ["CUST-0001", "CUST-0002"],
-            "version": [1, 1],
-            "status": ["active", "active"],
-            "name": ["Alice", "Bob"],
-            "region": ["EMEA", "AMER"],
-            "created_at": [datetime(2024, 1, 1, tzinfo=UTC)] * 2,
-            "changed_at": [datetime(2024, 1, 1, tzinfo=UTC)] * 2,
-        }
-    )
-
-
-def _products_table() -> pa.Table:
-    return pa.table(
-        {
-            "primary_key": ["PROD-001", "PROD-002"],
-            "version": [1, 1],
-            "status": ["active", "active"],
-            "name": ["Keyboard", "Mouse"],
-            "category": ["Peripherals", "Peripherals"],
-            "price": [99.99, 49.99],
-            "created_at": [datetime(2024, 1, 1, tzinfo=UTC)] * 2,
-            "changed_at": [datetime(2024, 1, 1, tzinfo=UTC)] * 2,
-        }
-    )
-
-
-def _stores_table() -> pa.Table:
-    return pa.table(
-        {
-            "primary_key": ["STORE-01", "STORE-02"],
-            "version": [1, 1],
-            "status": ["active", "active"],
-            "name": ["Downtown Mall", "Uptown Plaza"],
-            "city": ["Warsaw", "Krakow"],
-            "created_at": [datetime(2024, 1, 1, tzinfo=UTC)] * 2,
-            "changed_at": [datetime(2024, 1, 1, tzinfo=UTC)] * 2,
-        }
-    )
-
-
-def _mock_sphere_and_reader():
-    sphere = MagicMock()
-    line_cust = MagicMock()
-    line_cust.line_role = "anchor"
-    line_cust.versions = [1]
-    line_prod = MagicMock()
-    line_prod.line_role = "anchor"
-    line_prod.versions = [1]
-    line_store = MagicMock()
-    line_store.line_role = "anchor"
-    line_store.versions = [1]
-    sphere.lines = {
-        "customers": line_cust,
-        "products": line_prod,
-        "stores": line_store,
-    }
-
-    reader = MagicMock()
-
-    def _read_points(line_id, version):
-        tables = {
-            "customers": _customers_table(),
-            "products": _products_table(),
-            "stores": _stores_table(),
-        }
-        return tables[line_id]
-
-    reader.read_points = MagicMock(side_effect=_read_points)
-    return sphere, reader
-
-
-class TestBuildEntityLookups:
-    def test_returns_props_for_requested_lines(self) -> None:
-        sphere, reader = _mock_sphere_and_reader()
-        lookups = build_entity_lookups(reader, sphere, {"customers", "stores"})
-        assert "customers" in lookups
-        assert "stores" in lookups
-        assert "products" not in lookups
-
-    def test_customer_props_include_name_and_region(self) -> None:
-        sphere, reader = _mock_sphere_and_reader()
-        lookups = build_entity_lookups(reader, sphere, {"customers"})
-        assert lookups["customers"]["CUST-0001"]["name"] == "Alice"
-        assert lookups["customers"]["CUST-0001"]["region"] == "EMEA"
-
-    def test_store_props_include_name_and_city(self) -> None:
-        sphere, reader = _mock_sphere_and_reader()
-        lookups = build_entity_lookups(reader, sphere, {"stores"})
-        assert lookups["stores"]["STORE-01"]["name"] == "Downtown Mall"
-        assert lookups["stores"]["STORE-01"]["city"] == "Warsaw"
-
-    def test_skips_meta_columns(self) -> None:
-        sphere, reader = _mock_sphere_and_reader()
-        lookups = build_entity_lookups(reader, sphere, {"customers"})
-        props = lookups["customers"]["CUST-0001"]
-        assert "primary_key" not in props
-        assert "version" not in props
-        assert "status" not in props
-        assert "created_at" not in props
-        assert "changed_at" not in props
-
-    def test_reads_only_requested_lines(self) -> None:
-        sphere, reader = _mock_sphere_and_reader()
-        build_entity_lookups(reader, sphere, {"stores"})
-        reader.read_points.assert_called_once_with("stores", 1)
-
-    def test_empty_line_ids_returns_empty(self) -> None:
-        sphere, reader = _mock_sphere_and_reader()
-        lookups = build_entity_lookups(reader, sphere, set())
-        assert lookups == {}
-
-    def test_unknown_line_id_skipped(self) -> None:
-        sphere, reader = _mock_sphere_and_reader()
-        lookups = build_entity_lookups(reader, sphere, {"nonexistent"})
-        assert lookups == {}
-
-
-class TestBuildEntityLookupsEvent:
-    def test_event_line_included(self) -> None:
-        sphere, reader = _mock_sphere_and_reader()
-        event_line = MagicMock()
-        event_line.line_role = "event"
-        event_line.versions = [1]
-        sphere.lines["sales_values"] = event_line
-
-        event_table = pa.table(
-            {
-                "primary_key": ["SALE-001"],
-                "version": [1],
-                "status": ["active"],
-                "amount": [150.0],
-                "quantity": [3],
-                "created_at": [datetime(2024, 1, 1, tzinfo=UTC)],
-                "changed_at": [datetime(2024, 1, 1, tzinfo=UTC)],
-            }
-        )
-        original_side_effect = reader.read_points.side_effect
-
-        def _read_points_with_event(line_id, version):
-            if line_id == "sales_values":
-                return event_table
-            return original_side_effect(line_id, version)
-
-        reader.read_points = MagicMock(side_effect=_read_points_with_event)
-        lookups = build_entity_lookups(reader, sphere, {"sales_values"})
-        assert lookups["sales_values"]["SALE-001"]["amount"] == 150.0
-        assert lookups["sales_values"]["SALE-001"]["quantity"] == 3
 
 
 class TestEnrichPolygon:

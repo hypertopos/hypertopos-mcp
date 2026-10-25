@@ -7,15 +7,17 @@ the ``label_audit:`` block, fallback shape when label-aware calibration
 is missing, error envelopes for bad input, strict-JSON sanitisation,
 and tier registration.
 """
+
 from __future__ import annotations
 
 import importlib.util
 import json
 from pathlib import Path
 
-import hypertopos_mcp.tools.observability  # noqa: F401 — register tool
 import pytest
 from hypertopos.sphere import HyperSphere
+
+import hypertopos_mcp.tools.observability  # noqa: F401 — register tool
 from hypertopos_mcp.server import _TOOL_TIERS, _state
 from hypertopos_mcp.tools.observability import audit_label_alignment
 
@@ -29,10 +31,18 @@ def _load_two_class_builder():
     """
     core_path = (
         Path(__file__).resolve().parent.parent.parent
-        / "hypertopos-py" / "tests" / "test_audit_label_alignment.py"
+        / "hypertopos-py"
+        / "tests"
+        / "test_audit_label_alignment.py"
     )
+    if not core_path.exists():
+        # Standalone hypertopos-mcp checkout: the core test helper is not present.
+        pytest.skip(
+            "requires the hypertopos-py test suite next to this package", allow_module_level=True
+        )
     spec = importlib.util.spec_from_file_location(
-        "_core_audit_label_alignment_tests", core_path,
+        "_core_audit_label_alignment_tests",
+        core_path,
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -85,9 +95,7 @@ def test_full_field_path_returns_high_auroc(tmp_path, fake_state):
     assert parsed["label_aware_available"] is True
     assert parsed["pattern_id"] == "tx_pattern"
     assert parsed["auroc"] is not None
-    assert parsed["auroc"] >= 0.95, (
-        f"MCP-wrapped AUROC={parsed['auroc']:.3f} should exceed 0.95"
-    )
+    assert parsed["auroc"] >= 0.95, f"MCP-wrapped AUROC={parsed['auroc']:.3f} should exceed 0.95"
     assert parsed["n_pos"] == 120
     assert parsed["n_neg"] == 120
     # top_n caps the dim list; sep_score must come first (highest |direction|).
@@ -96,7 +104,9 @@ def test_full_field_path_returns_high_auroc(tmp_path, fake_state):
     # Each row carries the full field set.
     for row in parsed["top_dims"]:
         assert set(row.keys()) == {
-            "dim_label", "direction_component", "abs_direction",
+            "dim_label",
+            "direction_component",
+            "abs_direction",
             "cohens_d_pos_neg",
         }
     # Strict-JSON: no Infinity / NaN literals.

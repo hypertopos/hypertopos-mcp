@@ -15,14 +15,16 @@ Coverage matrix:
 - Tier registration: must appear in _TOOL_TIERS as "multi_pattern" (mirrors the
   underlying classify_detector_consensus tier).
 """
+
 from __future__ import annotations
 
 import json
 import math
 from unittest.mock import MagicMock
 
-import hypertopos_mcp.tools.analysis  # noqa: F401 — register tools
 import pytest
+
+import hypertopos_mcp.tools.analysis  # noqa: F401 — register tools
 from hypertopos_mcp.server import _TOOL_TIERS, _state
 from hypertopos_mcp.tools.analysis import consensus_classification
 
@@ -41,17 +43,24 @@ def fake_nav():
     _state["sphere"] = saved_sphere
 
 
-def _entry(pk, classification, *, anomalous=None, normal=None, borderline=None,
-           hmp=0.01, rank=1, p_per_detector=None):
+def _entry(
+    pk,
+    classification,
+    *,
+    anomalous=None,
+    normal=None,
+    borderline=None,
+    hmp=0.01,
+    rank=1,
+    p_per_detector=None,
+):
     return {
         "primary_key": pk,
         "classification": classification,
         "anomalous_detectors": anomalous or [],
         "normal_detectors": normal or [],
         "borderline_detectors": borderline or [],
-        "n_detectors_fired": (
-            len(anomalous or []) + len(normal or []) + len(borderline or [])
-        ),
+        "n_detectors_fired": (len(anomalous or []) + len(normal or []) + len(borderline or [])),
         "hmp": hmp,
         "p_per_detector": p_per_detector or {},
         "rank": rank,
@@ -64,10 +73,8 @@ def test_tool_is_registered_in_multi_pattern_tier():
 
 def test_extracts_focal_row(fake_nav):
     fake_nav.classify_detector_consensus.return_value = [
-        _entry("E1", "mixed_signal",
-               anomalous=["delta_norm"], normal=["segment_shift"], rank=1),
-        _entry("E2", "normal_consensus",
-               normal=["delta_norm", "segment_shift"], rank=2),
+        _entry("E1", "mixed_signal", anomalous=["delta_norm"], normal=["segment_shift"], rank=1),
+        _entry("E2", "normal_consensus", normal=["delta_norm", "segment_shift"], rank=2),
     ]
     body = consensus_classification("E2", "account_pattern")
     parsed = json.loads(body)
@@ -87,9 +94,13 @@ def test_calls_underlying_with_high_top_n_to_defeat_truncation(fake_nav):
     # top_n forced high so a scored entity is never lost to list truncation.
     assert kwargs["top_n"] >= 100_000
     assert kwargs["sample_size"] == 5000
+    # The focal entity is always scored, sampled or not.
+    assert kwargs["include_keys"] == ["E1"]
 
 
-def test_not_in_sample_returns_found_false_with_note(fake_nav):
+def test_not_found_means_the_entity_is_not_in_the_pattern(fake_nav):
+    # include_keys forces the focal entity into the scored sample, so a miss
+    # can only mean it has no geometry row — never "raise sample_size".
     fake_nav.classify_detector_consensus.return_value = [
         _entry("OTHER", "mixed_signal", anomalous=["a"], normal=["b"]),
     ]
@@ -97,36 +108,24 @@ def test_not_in_sample_returns_found_false_with_note(fake_nav):
     parsed = json.loads(body)
     assert parsed["found"] is False
     assert parsed["classification"] is None
-    assert "note" in parsed
-    assert "100" in parsed["note"]
-
-
-def test_not_found_note_does_not_suggest_raising_when_full_scan(fake_nav):
-    """When the caller already scanned the full population (sample_size=None),
-    the not-found note must not contradict itself by suggesting 'raise
-    sample_size / pass null'."""
-    fake_nav.classify_detector_consensus.return_value = [
-        _entry("OTHER", "mixed_signal", anomalous=["a"], normal=["b"]),
-    ]
-    body = consensus_classification("GHOST", "account_pattern", sample_size=None)
-    parsed = json.loads(body)
-    assert parsed["found"] is False
-    assert "raise sample_size" not in parsed["note"]
-    assert "full-population" in parsed["note"]
+    assert "does not exist in this pattern" in parsed["note"]
+    assert "sample_size" not in parsed["note"]
 
 
 def test_discriminator_distinct_keys_distinct_classifications(fake_nav):
     """Four engineered entities with distinct classifications must each be
     extracted correctly — a constant or wrong-row bug collapses them."""
     fake_nav.classify_detector_consensus.return_value = [
-        _entry("MIX", "mixed_signal",
-               anomalous=["delta_norm"], normal=["segment_shift"], rank=1),
-        _entry("ANOM", "anomalous_consensus",
-               anomalous=["delta_norm", "density_gap"], rank=2),
-        _entry("SINGLE", "single_detector_signal",
-               anomalous=["delta_norm"], borderline=["segment_shift"], rank=3),
-        _entry("NORM", "normal_consensus",
-               normal=["delta_norm", "segment_shift"], rank=4),
+        _entry("MIX", "mixed_signal", anomalous=["delta_norm"], normal=["segment_shift"], rank=1),
+        _entry("ANOM", "anomalous_consensus", anomalous=["delta_norm", "density_gap"], rank=2),
+        _entry(
+            "SINGLE",
+            "single_detector_signal",
+            anomalous=["delta_norm"],
+            borderline=["segment_shift"],
+            rank=3,
+        ),
+        _entry("NORM", "normal_consensus", normal=["delta_norm", "segment_shift"], rank=4),
     ]
     got = {}
     for key in ("MIX", "ANOM", "SINGLE", "NORM"):
@@ -142,9 +141,14 @@ def test_discriminator_distinct_keys_distinct_classifications(fake_nav):
 
 def test_sanitises_non_finite_p_values(fake_nav):
     fake_nav.classify_detector_consensus.return_value = [
-        _entry("E1", "mixed_signal", anomalous=["a"], normal=["b"],
-               hmp=math.nan,
-               p_per_detector={"a": 0.0, "b": math.inf}),
+        _entry(
+            "E1",
+            "mixed_signal",
+            anomalous=["a"],
+            normal=["b"],
+            hmp=math.nan,
+            p_per_detector={"a": 0.0, "b": math.inf},
+        ),
     ]
     body = consensus_classification("E1", "account_pattern")
     parsed = json.loads(body)

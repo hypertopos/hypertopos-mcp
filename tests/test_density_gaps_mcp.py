@@ -1,4 +1,5 @@
 """MCP wrapper tests for find_density_gaps."""
+
 from __future__ import annotations
 
 import json
@@ -10,7 +11,8 @@ def test_returns_valid_json_with_gaps_block(open_berka_sphere):
     from hypertopos_mcp.tools.analysis import find_density_gaps
 
     out = find_density_gaps(
-        pattern_id="account_behavior_pattern", top_n=5,
+        pattern_id="account_behavior_pattern",
+        top_n=5,
     )
     parsed = json.loads(out)
     assert "gaps" in parsed
@@ -24,7 +26,8 @@ def test_validation_invalid_alpha(open_berka_sphere):
 
     with pytest.raises(Exception, match="alpha"):
         find_density_gaps(
-            pattern_id="account_behavior_pattern", alpha=2.0,
+            pattern_id="account_behavior_pattern",
+            alpha=2.0,
         )
 
 
@@ -42,7 +45,8 @@ def test_returns_finite_q_values(open_berka_sphere):
     from hypertopos_mcp.tools.analysis import find_density_gaps
 
     out = find_density_gaps(
-        pattern_id="account_behavior_pattern", top_n=5,
+        pattern_id="account_behavior_pattern",
+        top_n=5,
     )
     parsed = json.loads(out)
     for gap in parsed["gaps"]:

@@ -1,0 +1,199 @@
+{
+  "avg_amount_by_frequency": {
+    "event_pattern_id": "tx_pattern",
+    "group_by_line": "accounts",
+    "group_by_property": "accounts:frequency",
+    "metric": "avg:amount",
+    "offset": 0,
+    "results": [
+      {
+        "count": 195,
+        "frequency": "POPLATEK MESICNE",
+        "key": "15",
+        "value": 20061.91
+      },
+      {
+        "count": 228,
+        "frequency": "POPLATEK PO OBRATU",
+        "key": "110",
+        "value": 14342.13
+      },
+      {
+        "count": 193,
+        "frequency": "POPLATEK MESICNE",
+        "key": "5",
+        "value": 13251.35
+      },
+      {
+        "count": 233,
+        "frequency": "POPLATEK MESICNE",
+        "key": "28",
+        "value": 12729.81
+      },
+      {
+        "count": 162,
+        "frequency": "POPLATEK MESICNE",
+        "key": "116",
+        "value": 12427.09
+      },
+      {
+        "count": 264,
+        "frequency": "POPLATEK TYDNE",
+        "key": "114",
+        "value": 11752.04
+      },
+      {
+        "count": 195,
+        "frequency": "POPLATEK MESICNE",
+        "key": "52",
+        "value": 11141.06
+      },
+      {
+        "count": 256,
+        "frequency": "POPLATEK MESICNE",
+        "key": "98",
+        "value": 10620.08
+      },
+      {
+        "count": 206,
+        "frequency": "POPLATEK MESICNE",
+        "key": "92",
+        "value": 10360.07
+      },
+      {
+        "count": 203,
+        "frequency": "POPLATEK PO OBRATU",
+        "key": "79",
+        "value": 10023.76
+      },
+      {
+        "count": 263,
+        "frequency": "POPLATEK MESICNE",
+        "key": "81",
+        "value": 9927.6
+      },
+      {
+        "count": 325,
+        "frequency": "POPLATEK MESICNE",
+        "key": "105",
+        "value": 9698.03
+      },
+      {
+        "count": 255,
+        "frequency": "POPLATEK PO OBRATU",
+        "key": "66",
+        "value": 9582.04
+      },
+      {
+        "count": 254,
+        "frequency": "POPLATEK MESICNE",
+        "key": "86",
+        "value": 9194.97
+      },
+      {
+        "count": 276,
+        "frequency": "POPLATEK MESICNE",
+        "key": "60",
+        "value": 9155.44
+      },
+      {
+        "count": 191,
+        "frequency": "POPLATEK PO OBRATU",
+        "key": "119",
+        "value": 9133.82
+      },
+      {
+        "count": 333,
+        "frequency": "POPLATEK MESICNE",
+        "key": "89",
+        "value": 9122.87
+      },
+      {
+        "count": 155,
+        "frequency": "POPLATEK MESICNE",
+        "key": "96",
+        "value": 9077.95
+      },
+      {
+        "count": 207,
+        "frequency": "POPLATEK MESICNE",
+        "key": "4",
+        "value": 9069.68
+      },
+      {
+        "count": 415,
+        "frequency": "POPLATEK TYDNE",
+        "key": "12",
+        "value": 9043.87
+      }
+    ],
+    "sampled": false,
+    "total_entities": 121,
+    "total_groups": 121
+  },
+  "count_by_account": {
+    "event_pattern_id": "tx_pattern",
+    "group_by_line": "accounts",
+    "metric": "count",
+    "offset": 0,
+    "results": [
+      {
+        "anomaly_rate": 0.0832,
+        "count": 805,
+        "key": "42",
+        "value": 805
+      },
+      {
+        "anomaly_rate": 0.0112,
+        "count": 536,
+        "key": "67",
+        "value": 536
+      },
+      {
+        "anomaly_rate": 0.0041,
+        "count": 483,
+        "key": "91",
+        "value": 483
+      },
+      {
+        "anomaly_rate": 0.0197,
+        "count": 457,
+        "key": "93",
+        "value": 457
+      },
+      {
+        "anomaly_rate": 0.3591,
+        "count": 440,
+        "key": "80",
+        "value": 440
+      }
+    ],
+    "sampled": false,
+    "total_groups": 121
+  },
+  "sum_amount_by_tx_type": {
+    "event_pattern_id": "tx_pattern",
+    "group_by_line": "tx_types",
+    "metric": "sum:amount",
+    "offset": 0,
+    "results": [
+      {
+        "count": 17087,
+        "key": "VYDAJ",
+        "value": 96817831.7
+      },
+      {
+        "count": 10984,
+        "key": "PRIJEM",
+        "value": 89539468.5
+      },
+      {
+        "count": 463,
+        "key": "VYBER",
+        "value": 2182639.9
+      }
+    ],
+    "sampled": false,
+    "total_groups": 3
+  }
+}

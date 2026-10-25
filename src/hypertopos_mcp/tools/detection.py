@@ -6,7 +6,11 @@ from __future__ import annotations
 
 import json
 import math
+from typing import Any
 
+from mcp.types import ToolAnnotations
+
+from hypertopos_mcp._format import json_default, sanitize_for_json
 from hypertopos_mcp.server import _require_navigator, _state, mcp, timed
 
 
@@ -20,29 +24,7 @@ def _sanitize_float(value: float) -> float | None:
     return None
 
 
-def _sanitize_for_json(obj):
-    """Recursively replace non-finite floats (±inf / NaN) with None.
-
-    The navigator's detection scans emit per-entity floats (delta_norm,
-    contamination_rate, displacement, shift_ratio) that can be ±inf / NaN on
-    degenerate populations; strict JSON parsers reject the Infinity / NaN
-    literals Python's json.dumps would otherwise produce. Mirrors the helper in
-    analysis.py — kept module-local so detection.py carries no cross-module
-    import for a 20-line utility. Navigator detection methods return plain
-    Python floats in their result dicts, so a ``float`` check suffices.
-    """
-    if isinstance(obj, float) and not math.isfinite(obj):
-        return None
-    if isinstance(obj, dict):
-        return {k: _sanitize_for_json(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_sanitize_for_json(v) for v in obj]
-    if isinstance(obj, tuple):
-        return tuple(_sanitize_for_json(v) for v in obj)
-    return obj
-
-
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def detect_cross_pattern_discrepancy(
     entity_line: str,
@@ -57,8 +39,7 @@ def detect_cross_pattern_discrepancy(
     nav = _state["navigator"]
     sphere = _state["sphere"]._sphere
     covering = [
-        pid for pid, _p in sphere.patterns.items()
-        if sphere.entity_line(pid) == entity_line
+        pid for pid, _p in sphere.patterns.items() if sphere.entity_line(pid) == entity_line
     ]
     if len(covering) < 2:
         return json.dumps(
@@ -69,21 +50,22 @@ def detect_cross_pattern_discrepancy(
                 "diagnostic": (
                     f"entity_line '{entity_line}' is covered by "
                     f"{len(covering)} pattern(s) ({covering}). "
-                    "detect_cross_pattern_discrepancy requires >=2 anchor patterns on the same entity line."
+                    "detect_cross_pattern_discrepancy requires >=2 anchor patterns "
+                    "on the same entity line."
                 ),
             },
             indent=2,
         )
     results = nav.detect_cross_pattern_discrepancy(entity_line, top_n=top_n)
     return json.dumps(
-        _sanitize_for_json(
+        sanitize_for_json(
             {"entity_line": entity_line, "total_found": len(results), "results": results}
         ),
         indent=2,
     )
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def detect_neighbor_contamination(
     pattern_id: str,
@@ -103,7 +85,7 @@ def detect_neighbor_contamination(
         pattern_id, k=k, sample_size=sample_size, contamination_threshold=contamination_threshold
     )
     return json.dumps(
-        _sanitize_for_json(
+        sanitize_for_json(
             {
                 "pattern_id": pattern_id,
                 "k": k,
@@ -117,7 +99,7 @@ def detect_neighbor_contamination(
     )
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def detect_trajectory_anomaly(
     pattern_id: str,
@@ -144,7 +126,7 @@ def detect_trajectory_anomaly(
     except ValueError as exc:
         return json.dumps({"error": str(exc)}, indent=2)
     return json.dumps(
-        _sanitize_for_json(
+        sanitize_for_json(
             {
                 "pattern_id": pattern_id,
                 "displacement_ranks": displacement_ranks or [0, 20, 100],
@@ -155,11 +137,11 @@ def detect_trajectory_anomaly(
             }
         ),
         indent=2,
-        default=str,
+        default=json_default,
     )
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def classify_trajectory(
     primary_key: str,
@@ -185,7 +167,9 @@ def classify_trajectory(
     nav = _state["navigator"]
     try:
         result = nav.classify_trajectory(
-            primary_key, pattern_id, sample_size=sample_size,
+            primary_key,
+            pattern_id,
+            sample_size=sample_size,
         )
     except ValueError as exc:
         return json.dumps({"error": str(exc)}, indent=2)
@@ -201,7 +185,7 @@ def classify_trajectory(
     )
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def detect_segment_shift(
     pattern_id: str,
@@ -221,11 +205,7 @@ def detect_segment_shift(
     entity_line_id = sphere.entity_line(pattern_id)
     line = sphere.lines.get(entity_line_id) if entity_line_id else None
     string_cols = (
-        [
-            c.name
-            for c in (line.columns or [])
-            if c.type == "string" and c.name != "primary_key"
-        ]
+        [c.name for c in (line.columns or []) if c.type == "string" and c.name != "primary_key"]
         if line
         else []
     )
@@ -238,7 +218,7 @@ def detect_segment_shift(
         )
     except ValueError as exc:
         return json.dumps({"error": str(exc)}, indent=2)
-    out: dict = {
+    out: dict[str, Any] = {
         "pattern_id": pattern_id,
         "max_cardinality": max_cardinality,
         "min_shift_ratio": min_shift_ratio,
@@ -258,4 +238,4 @@ def detect_segment_shift(
                 f"min_shift_ratio={min_shift_ratio}x the population anomaly rate. "
                 f"Try lowering min_shift_ratio (e.g. 1.5) or max_cardinality={max_cardinality}."
             )
-    return json.dumps(_sanitize_for_json(out), indent=2)
+    return json.dumps(sanitize_for_json(out), indent=2)

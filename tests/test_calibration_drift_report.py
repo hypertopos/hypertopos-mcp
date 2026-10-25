@@ -11,15 +11,17 @@ Coverage matrix:
 - error envelope: a ValueError from the underlying compare_calibrations returns
   a JSON error, not an unhandled exception.
 """
+
 from __future__ import annotations
 
 import json
 import math
 from unittest.mock import MagicMock
 
-import hypertopos_mcp.tools.analysis  # noqa: F401 — register tools
 import pytest
 from hypertopos.model.sphere import CalibrationDriftReport, DimensionDrift
+
+import hypertopos_mcp.tools.analysis  # noqa: F401 — register tools
 from hypertopos_mcp.server import _TOOL_TIERS, _state
 from hypertopos_mcp.tools.analysis import calibration_drift_report
 
@@ -93,20 +95,14 @@ def test_significant_verdict(fake_nav):
     parsed = json.loads(calibration_drift_report("account_pattern"))
     assert parsed["drift_verdict"] == "significant"
     # Significant drift must route the agent to decompose_drift.
-    assert any(
-        "decompose_drift" in s for s in parsed["recommended_next_steps"]
-    )
+    assert any("decompose_drift" in s for s in parsed["recommended_next_steps"])
 
 
 def test_discriminator_three_distinct_verdicts(fake_nav):
     verdicts = set()
     for rms in (0.05, 0.20, 0.55):
         fake_nav.compare_calibrations.return_value = _report(rms)
-        verdicts.add(
-            json.loads(calibration_drift_report("account_pattern"))[
-                "drift_verdict"
-            ]
-        )
+        verdicts.add(json.loads(calibration_drift_report("account_pattern"))["drift_verdict"])
     assert verdicts == {"stable", "moderate", "significant"}, (
         f"Drift verdict collapsed — got {sorted(verdicts)}"
     )
@@ -122,11 +118,8 @@ def test_sanitises_non_finite_rms(fake_nav):
 
 
 def test_returns_json_error_on_value_error(fake_nav):
-    fake_nav.compare_calibrations.side_effect = ValueError(
-        "v_from and v_to must differ (both=3)"
-    )
-    body = calibration_drift_report("account_pattern", calibration_a=3,
-                                    calibration_b=3)
+    fake_nav.compare_calibrations.side_effect = ValueError("v_from and v_to must differ (both=3)")
+    body = calibration_drift_report("account_pattern", calibration_a=3, calibration_b=3)
     parsed = json.loads(body)
     assert "error" in parsed
     assert parsed["pattern_id"] == "account_pattern"
@@ -141,8 +134,7 @@ def test_returns_json_error_on_calibration_not_found(fake_nav):
     fake_nav.compare_calibrations.side_effect = CalibrationNotFoundError(
         "calibration version 1 for 'account_pattern' was garbage-collected"
     )
-    body = calibration_drift_report("account_pattern", calibration_a=1,
-                                    calibration_b=3)
+    body = calibration_drift_report("account_pattern", calibration_a=1, calibration_b=3)
     parsed = json.loads(body)
     assert "error" in parsed
     assert "garbage-collected" in parsed["error"]

@@ -9,19 +9,44 @@ Validates:
 - score-based classification (strong / moderate / weak) at boundaries
 - tier registration as ``base``
 """
+
 from __future__ import annotations
 
 import json
 from unittest.mock import MagicMock
 
-import hypertopos_mcp.tools.analysis  # noqa: F401 — register tools
 import pytest
+
+import hypertopos_mcp.tools.analysis  # noqa: F401 — register tools
 from hypertopos_mcp.server import _TOOL_TIERS, _state
 from hypertopos_mcp.tools.analysis import (
     _classify_chain_full_loop_summary,
     _score_chain_full_loop,
     chain_full_loop_summary,
 )
+
+# -- Navigator output shapes -------------------------------------------------
+# Match what GDSNavigator.classify_chain_typology / investigate_chain return
+# (pinned on the navigator side in hypertopos-py test_investigate_chain.py).
+
+
+def _typology_output(shape: str, position: str) -> dict:
+    return {
+        "chain_id": "CH-1",
+        "typology": {"shape": shape, "position_in_chain": position},
+    }
+
+
+def _investigate_output(*, n_anomalous: int, shape_anomaly: bool) -> dict:
+    return {
+        "chain_id": "CH-1",
+        "trace": {
+            "ok": True,
+            "data": {"hops": [], "summary": {"n_hops": 5, "n_anomalous": n_anomalous}},
+        },
+        "shape_anomaly": {"ok": True, "data": {"is_anomaly": shape_anomaly}},
+    }
+
 
 # -- Fixtures ----------------------------------------------------------------
 
@@ -45,12 +70,14 @@ def fake_state():
         "pattern_id": "chain_pattern",
         "anchor_pattern_id": "account_pattern",
         "n_results": 1,
-        "chains": [{
-            "chain_id": "CH-1",
-            "run_length": 4,
-            "max_delta_norm": 2.5,
-            "top_dim": "fan_asymmetry",
-        }],
+        "chains": [
+            {
+                "chain_id": "CH-1",
+                "run_length": 4,
+                "max_delta_norm": 2.5,
+                "top_dim": "fan_asymmetry",
+            }
+        ],
     }
     nav.chain_witness_intersection.return_value = {
         "chain_id": "CH-1",
@@ -64,11 +91,7 @@ def fake_state():
         "n_members": 4,
         "chain_drift_score": 0.55,
     }
-    nav.classify_chain_typology.return_value = {
-        "chain_id": "CH-1",
-        "shape": "monotone-rising",
-        "position_in_chain": "transit",
-    }
+    nav.classify_chain_typology.return_value = _typology_output("monotone-rising", "transit")
     nav.extend_chain.return_value = {
         "boundary_key": "A-9",
         "boundary_position": "end",
@@ -78,17 +101,7 @@ def fake_state():
         ],
         "summary": {"n_candidates": 2, "n_anomalous_candidates": 2},
     }
-    nav.investigate_chain.return_value = {
-        "chain_id": "CH-1",
-        "trace": {
-            "ok": True,
-            "data": {
-                "n_anomalies": 3,
-                "is_cyclic": False,
-                "cross_bank_count": 2,
-            },
-        },
-    }
+    nav.investigate_chain.return_value = _investigate_output(n_anomalous=3, shape_anomaly=False)
     nav.generate_sar_rationale.return_value = {
         "chain_id": "CH-1",
         "sar_narrative": "Evidence indicates...",
@@ -133,8 +146,7 @@ def test_smoke_returns_seven_step_blocks_plus_summary(fake_state):
 
     # Summary present + structured
     assert "summary" in parsed
-    for key in ("investigation_strength", "recommended_action",
-                "rationale", "score"):
+    for key in ("investigation_strength", "recommended_action", "rationale", "score"):
         assert key in parsed["summary"]
     assert isinstance(parsed["summary"]["score"], int)
     assert "elapsed_ms" in parsed
@@ -288,27 +300,21 @@ def _build_blocks(
     sar_ok=False,
 ):
     """Construct per-step block dicts with controlled fire/skip status."""
-    coherent = _ok({"in_coherent_set": True}) if coherent_hit else _ok(
-        {"in_coherent_set": False, "note": "not in set"}
+    coherent = (
+        _ok({"in_coherent_set": True})
+        if coherent_hit
+        else _ok({"in_coherent_set": False, "note": "not in set"})
     )
-    witness = _ok({"coordinated": coordinated}) if coordinated else _ok(
-        {"coordinated": False}
-    )
+    witness = _ok({"coordinated": coordinated}) if coordinated else _ok({"coordinated": False})
     drift = _ok({"chain_drift_score": drift_score})
     if typology_default:
-        typology = _ok({"shape": "no-anomalous-run",
-                        "position_in_chain": "no-run"})
+        typology = _ok(_typology_output("no-anomalous-run", "no-run"))
     else:
-        typology = _ok({"shape": "monotone-rising",
-                        "position_in_chain": "transit"})
+        typology = _ok(_typology_output("monotone-rising", "transit"))
     if investigate_substantive:
-        investigate = _ok({"trace": {"ok": True, "data": {
-            "n_anomalies": 5, "is_cyclic": True, "cross_bank_count": 3,
-        }}})
+        investigate = _ok(_investigate_output(n_anomalous=5, shape_anomaly=True))
     else:
-        investigate = _ok({"trace": {"ok": True, "data": {
-            "n_anomalies": 0, "is_cyclic": False, "cross_bank_count": 1,
-        }}})
+        investigate = _ok(_investigate_output(n_anomalous=0, shape_anomaly=False))
     # extension_total candidates split fwd/bwd
     fwd_count = extension_total // 2
     bwd_count = extension_total - fwd_count
@@ -325,21 +331,25 @@ def _build_blocks(
 
 def test_score_all_signals_fire_yields_strong(fake_state):
     """All-signals-fire → score >= 70 → strong + escalate to SAR."""
-    coherent, witness, drift, typology, extension, investigate, sar = (
-        _build_blocks(
-            coherent_hit=True,
-            coordinated=True,
-            drift_score=0.5,
-            typology_default=False,
-            investigate_substantive=True,
-            extension_total=4,
-            sar_ok=True,
-        )
+    coherent, witness, drift, typology, extension, investigate, sar = _build_blocks(
+        coherent_hit=True,
+        coordinated=True,
+        drift_score=0.5,
+        typology_default=False,
+        investigate_substantive=True,
+        extension_total=4,
+        sar_ok=True,
     )
     score_b = _score_chain_full_loop(
-        coherent=coherent, witness=witness, drift=drift,
-        typology=typology, extension=extension, investigate=investigate,
-        sar=sar, include_sar_rationale=True, top_n_extensions=3,
+        coherent=coherent,
+        witness=witness,
+        drift=drift,
+        typology=typology,
+        extension=extension,
+        investigate=investigate,
+        sar=sar,
+        include_sar_rationale=True,
+        top_n_extensions=3,
     )
     # 20+15+15+10+20+10+10 = 100
     assert score_b["score"] == 100
@@ -351,21 +361,25 @@ def test_score_all_signals_fire_yields_strong(fake_state):
 def test_score_strong_boundary_exact_70(fake_state):
     """Score exactly 70 → strong (>= 70)."""
     # Pick a subset summing to exactly 70: 20 + 15 + 15 + 20 = 70
-    coherent, witness, drift, typology, extension, investigate, sar = (
-        _build_blocks(
-            coherent_hit=True,         # +20
-            coordinated=True,          # +15
-            drift_score=0.5,           # +15
-            typology_default=True,     # +0
-            investigate_substantive=True,  # +20
-            extension_total=0,         # +0
-            sar_ok=False,              # +0
-        )
+    coherent, witness, drift, typology, extension, investigate, sar = _build_blocks(
+        coherent_hit=True,  # +20
+        coordinated=True,  # +15
+        drift_score=0.5,  # +15
+        typology_default=True,  # +0
+        investigate_substantive=True,  # +20
+        extension_total=0,  # +0
+        sar_ok=False,  # +0
     )
     score_b = _score_chain_full_loop(
-        coherent=coherent, witness=witness, drift=drift,
-        typology=typology, extension=extension, investigate=investigate,
-        sar=sar, include_sar_rationale=False, top_n_extensions=3,
+        coherent=coherent,
+        witness=witness,
+        drift=drift,
+        typology=typology,
+        extension=extension,
+        investigate=investigate,
+        sar=sar,
+        include_sar_rationale=False,
+        top_n_extensions=3,
     )
     assert score_b["score"] == 70
     summary = _classify_chain_full_loop_summary(score_b)
@@ -375,21 +389,25 @@ def test_score_strong_boundary_exact_70(fake_state):
 def test_score_moderate_boundary_exact_40(fake_state):
     """Score exactly 40 → moderate (>= 40, < 70)."""
     # 20 + 20 = 40
-    coherent, witness, drift, typology, extension, investigate, sar = (
-        _build_blocks(
-            coherent_hit=True,         # +20
-            coordinated=False,         # +0
-            drift_score=0.0,           # +0
-            typology_default=True,     # +0
-            investigate_substantive=True,  # +20
-            extension_total=0,         # +0
-            sar_ok=False,              # +0
-        )
+    coherent, witness, drift, typology, extension, investigate, sar = _build_blocks(
+        coherent_hit=True,  # +20
+        coordinated=False,  # +0
+        drift_score=0.0,  # +0
+        typology_default=True,  # +0
+        investigate_substantive=True,  # +20
+        extension_total=0,  # +0
+        sar_ok=False,  # +0
     )
     score_b = _score_chain_full_loop(
-        coherent=coherent, witness=witness, drift=drift,
-        typology=typology, extension=extension, investigate=investigate,
-        sar=sar, include_sar_rationale=False, top_n_extensions=3,
+        coherent=coherent,
+        witness=witness,
+        drift=drift,
+        typology=typology,
+        extension=extension,
+        investigate=investigate,
+        sar=sar,
+        include_sar_rationale=False,
+        top_n_extensions=3,
     )
     assert score_b["score"] == 40
     summary = _classify_chain_full_loop_summary(score_b)
@@ -400,21 +418,25 @@ def test_score_moderate_boundary_exact_40(fake_state):
 def test_score_weak_below_40(fake_state):
     """Score 39 (just below 40) → weak."""
     # 15 + 15 + 0 + ... build with witness + drift only = 30
-    coherent, witness, drift, typology, extension, investigate, sar = (
-        _build_blocks(
-            coherent_hit=False,        # +0
-            coordinated=True,          # +15
-            drift_score=0.5,           # +15
-            typology_default=True,     # +0
-            investigate_substantive=False,  # +0
-            extension_total=0,         # +0
-            sar_ok=False,              # +0
-        )
+    coherent, witness, drift, typology, extension, investigate, sar = _build_blocks(
+        coherent_hit=False,  # +0
+        coordinated=True,  # +15
+        drift_score=0.5,  # +15
+        typology_default=True,  # +0
+        investigate_substantive=False,  # +0
+        extension_total=0,  # +0
+        sar_ok=False,  # +0
     )
     score_b = _score_chain_full_loop(
-        coherent=coherent, witness=witness, drift=drift,
-        typology=typology, extension=extension, investigate=investigate,
-        sar=sar, include_sar_rationale=False, top_n_extensions=3,
+        coherent=coherent,
+        witness=witness,
+        drift=drift,
+        typology=typology,
+        extension=extension,
+        investigate=investigate,
+        sar=sar,
+        include_sar_rationale=False,
+        top_n_extensions=3,
     )
     assert score_b["score"] == 30
     summary = _classify_chain_full_loop_summary(score_b)
@@ -424,26 +446,80 @@ def test_score_weak_below_40(fake_state):
 
 def test_score_zero_yields_weak_with_no_signal_rationale(fake_state):
     """No firing signals → score 0 → weak with explicit no-signals rationale."""
-    coherent, witness, drift, typology, extension, investigate, sar = (
-        _build_blocks(
-            coherent_hit=False,
-            coordinated=False,
-            drift_score=0.0,
-            typology_default=True,
-            investigate_substantive=False,
-            extension_total=0,
-            sar_ok=False,
-        )
+    coherent, witness, drift, typology, extension, investigate, sar = _build_blocks(
+        coherent_hit=False,
+        coordinated=False,
+        drift_score=0.0,
+        typology_default=True,
+        investigate_substantive=False,
+        extension_total=0,
+        sar_ok=False,
     )
     score_b = _score_chain_full_loop(
-        coherent=coherent, witness=witness, drift=drift,
-        typology=typology, extension=extension, investigate=investigate,
-        sar=sar, include_sar_rationale=False, top_n_extensions=3,
+        coherent=coherent,
+        witness=witness,
+        drift=drift,
+        typology=typology,
+        extension=extension,
+        investigate=investigate,
+        sar=sar,
+        include_sar_rationale=False,
+        top_n_extensions=3,
     )
     assert score_b["score"] == 0
     summary = _classify_chain_full_loop_summary(score_b)
     assert summary["investigation_strength"] == "weak"
     assert "no load-bearing signals" in summary["rationale"]
+
+
+# -- 5b. Failed steps ---------------------------------------------------------
+
+
+def test_failed_steps_that_could_change_the_verdict_make_it_inconclusive(fake_state):
+    """A step that errored is missing evidence, not an exoneration."""
+    error = GDSNavigationErrorLike("ambiguous chain_id 'CH-1'")
+    fake_state.find_chains_with_coherent_anomaly.return_value = {"chains": []}
+    fake_state.chain_witness_intersection.side_effect = error
+    fake_state.chain_drift_trajectory.side_effect = error
+    fake_state.classify_chain_typology.side_effect = error
+    fake_state.extend_chain.side_effect = error
+
+    parsed = json.loads(
+        chain_full_loop_summary(
+            "CH-1", chain_pattern_id="chain_pattern", anchor_pattern_id="account_pattern"
+        )
+    )
+
+    summary = parsed["summary"]
+    assert summary["investigation_strength"] == "inconclusive"
+    assert summary["recommended_action"] != "false-positive candidate"
+    assert set(summary["failed_steps"]) == {
+        "chain_witness_intersection",
+        "chain_drift_trajectory",
+        "classify_chain_typology",
+        "extend_chain",
+    }
+
+
+def test_repeated_step_errors_are_listed_once(fake_state):
+    error = GDSNavigationErrorLike("ambiguous chain_id 'CH-1'")
+    fake_state.classify_chain_typology.side_effect = error
+    fake_state.extend_chain.side_effect = error
+
+    body = chain_full_loop_summary(
+        "CH-1", chain_pattern_id="chain_pattern", anchor_pattern_id="account_pattern"
+    )
+    parsed = json.loads(body)
+
+    assert body.count("ambiguous chain_id") == 1
+    [(ref, text)] = parsed["errors"].items()
+    assert "ambiguous chain_id" in text
+    assert parsed["classify_chain_typology"]["error_ref"] == ref
+    assert parsed["extend_chain"]["data"]["forward"]["error_ref"] == ref
+
+
+class GDSNavigationErrorLike(ValueError):
+    """Any of the step errors the orchestrator catches."""
 
 
 # -- 6. Tier mapping --------------------------------------------------------

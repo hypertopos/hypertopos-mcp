@@ -11,15 +11,17 @@ Coverage matrix:
 - error envelope: a ValueError (pre-diagnostic epoch / no epochs) returns a
   JSON error.
 """
+
 from __future__ import annotations
 
 import json
 import math
 from unittest.mock import MagicMock
 
-import hypertopos_mcp.tools.analysis  # noqa: F401 — register tools
 import pytest
 from hypertopos.model.sphere import ThetaSensitivityReport
+
+import hypertopos_mcp.tools.analysis  # noqa: F401 — register tools
 from hypertopos_mcp.server import _TOOL_TIERS, _state
 from hypertopos_mcp.tools.analysis import (
     theta_sensitivity,
@@ -104,18 +106,14 @@ def test_unsafe_verdict_no_band(fake_nav):
 def test_discriminator_three_distinct_verdicts(fake_nav):
     cases = [
         ("safe", _report(band_length=10, cliffs=[])),
-        ("caution", _report(band_length=5,
-                            cliffs=[{"from": "p97", "to": "p98", "ratio": 1.8}])),
-        ("unsafe", _report(band_length=0,
-                          cliffs=[{"from": "p90", "to": "p91", "ratio": 1.6}])),
+        ("caution", _report(band_length=5, cliffs=[{"from": "p97", "to": "p98", "ratio": 1.8}])),
+        ("unsafe", _report(band_length=0, cliffs=[{"from": "p90", "to": "p91", "ratio": 1.6}])),
     ]
     verdicts = set()
     for _, rep in cases:
         fake_nav.theta_sensitivity.return_value = rep
         verdicts.add(
-            json.loads(theta_sensitivity_report("account_pattern"))[
-                "recalibration_safety"
-            ]
+            json.loads(theta_sensitivity_report("account_pattern"))["recalibration_safety"]
         )
     assert verdicts == {"safe", "caution", "unsafe"}, (
         f"Recalibration safety verdict collapsed — got {sorted(verdicts)}"

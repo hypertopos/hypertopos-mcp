@@ -16,14 +16,16 @@ Coverage matrix:
 - Tier registration: must appear in _TOOL_TIERS as "base".
 - error envelope: a ValueError from the navigator returns a JSON error.
 """
+
 from __future__ import annotations
 
 import json
 import math
 from unittest.mock import MagicMock
 
-import hypertopos_mcp.tools.analysis  # noqa: F401 — register tools
 import pytest
+
+import hypertopos_mcp.tools.analysis  # noqa: F401 — register tools
 from hypertopos_mcp.server import _TOOL_TIERS, _state
 from hypertopos_mcp.tools.analysis import diverse_explanations
 
@@ -55,8 +57,7 @@ def _hyp(hid, labels, neutralizes):
     }
 
 
-def _raw(hypotheses, *, delta_norm=8.0, theta_norm=3.0,
-         diversity_score=1.0, degraded_reason=None):
+def _raw(hypotheses, *, delta_norm=8.0, theta_norm=3.0, diversity_score=1.0, degraded_reason=None):
     return {
         "primary_key": "E1",
         "pattern_id": "account_pattern",
@@ -75,9 +76,7 @@ def test_tool_is_registered_in_base_tier():
 
 
 def test_forces_validate_true(fake_nav):
-    fake_nav.find_diverse_explanations.return_value = _raw(
-        [_hyp(1, ["a"], True)]
-    )
+    fake_nav.find_diverse_explanations.return_value = _raw([_hyp(1, ["a"], True)])
     diverse_explanations("E1", "account_pattern", k=2)
     _, kwargs = fake_nav.find_diverse_explanations.call_args
     assert kwargs["validate"] is True
@@ -131,13 +130,9 @@ def test_discriminator_four_distinct_verdicts(fake_nav):
     for hyps in cases.values():
         fake_nav.find_diverse_explanations.return_value = _raw(hyps)
         verdicts.add(
-            json.loads(diverse_explanations("E1", "account_pattern"))[
-                "robustness_verdict"
-            ]
+            json.loads(diverse_explanations("E1", "account_pattern"))["robustness_verdict"]
         )
-    assert verdicts == set(cases.keys()), (
-        f"Robustness verdict collapsed — got {sorted(verdicts)}"
-    )
+    assert verdicts == set(cases.keys()), f"Robustness verdict collapsed — got {sorted(verdicts)}"
 
 
 def test_sanitises_non_finite_magnitudes(fake_nav):
@@ -153,9 +148,7 @@ def test_sanitises_non_finite_magnitudes(fake_nav):
 
 
 def test_returns_json_error_on_value_error(fake_nav):
-    fake_nav.find_diverse_explanations.side_effect = ValueError(
-        "entity 'ghost' not found"
-    )
+    fake_nav.find_diverse_explanations.side_effect = ValueError("entity 'ghost' not found")
     body = diverse_explanations("ghost", "account_pattern")
     parsed = json.loads(body)
     assert "error" in parsed

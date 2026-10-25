@@ -34,4 +34,3 @@ class TestPolygonTemporalHint:
         result = json.loads(get_polygon("tx_pattern"))
         assert "error" not in result, result
         assert "temporal_hint" not in result, "Event pattern should not have temporal_hint"
-

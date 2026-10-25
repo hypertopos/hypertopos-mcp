@@ -6,14 +6,16 @@ Validates: passthrough wiring to navigator, strict-JSON sanitisation
 (NaN/inf -> null in serialised body), tier registration (must appear in
 _TOOL_TIERS as "base" so it surfaces only after sphere_overview).
 """
+
 from __future__ import annotations
 
 import json
 import math
 from unittest.mock import MagicMock
 
-import hypertopos_mcp.tools.analysis  # noqa: F401 — register tools
 import pytest
+
+import hypertopos_mcp.tools.analysis  # noqa: F401 — register tools
 from hypertopos_mcp.server import _TOOL_TIERS, _state
 from hypertopos_mcp.tools.analysis import chain_drift_trajectory
 
@@ -125,9 +127,7 @@ def test_returns_json_error_on_value_error(fake_state):
     """Navigator-raised ValueError must surface as JSON error envelope,
     not an unhandled Python exception bubbling to the MCP framework.
     """
-    fake_state.chain_drift_trajectory.side_effect = ValueError(
-        "test_error_message_for_chain_drift"
-    )
+    fake_state.chain_drift_trajectory.side_effect = ValueError("test_error_message_for_chain_drift")
     body = chain_drift_trajectory(
         "test_chain",
         chain_pattern="x",

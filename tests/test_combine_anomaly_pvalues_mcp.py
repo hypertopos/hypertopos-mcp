@@ -6,6 +6,7 @@ Drives the full strict-JSON path on the Berka fixture — regression guard
 for the M1.6 contract (HMP combiner exposed at the MCP layer, no chi2/df
 fields surfacing on composite_risk).
 """
+
 from __future__ import annotations
 
 import json
@@ -23,9 +24,12 @@ class TestCombineAnomalyPvaluesMcp:
         )
         # strict=True rejects Infinity / NaN literals — _sanitize_for_json
         # must have folded any non-finite navigator outputs to null.
-        results = json.loads(payload, parse_constant=lambda c: (_ for _ in ()).throw(
-            AssertionError(f"Non-strict JSON literal {c!r} survived sanitisation"),
-        ))
+        results = json.loads(
+            payload,
+            parse_constant=lambda c: (_ for _ in ()).throw(
+                AssertionError(f"Non-strict JSON literal {c!r} survived sanitisation"),
+            ),
+        )["results"]
         assert isinstance(results, list)
         assert len(results) <= 5
         for entry in results:
@@ -49,7 +53,7 @@ class TestCombineAnomalyPvaluesMcp:
             sample_size=500,
             top_n=10,
         )
-        results = json.loads(payload)
+        results = json.loads(payload)["results"]
         hmps = [r["hmp"] for r in results if r.get("hmp") is not None]
         assert hmps == sorted(hmps), "results must be ranked ascending by hmp"
         for i, entry in enumerate(results, start=1):
@@ -64,7 +68,7 @@ class TestCombineAnomalyPvaluesMcp:
             sample_size=500,
             top_n=3,
         )
-        results = json.loads(payload)
+        results = json.loads(payload)["results"]
         assert len(results) > 0
         # delta_norm is the always-available primary path; with the subset
         # narrowed to {delta_norm}, every entry's per-detector keys must be
@@ -104,9 +108,5 @@ class TestCompositeRiskHmpShape:
         assert "caught_p005" in report
         for entry in report["results"]:
             # HMP-only fields permitted.
-            assert "chi2" not in entry, (
-                "Fisher chi2 must not surface in HMP-era composite_risk"
-            )
-            assert "df" not in entry, (
-                "Fisher df must not surface in HMP-era composite_risk"
-            )
+            assert "chi2" not in entry, "Fisher chi2 must not surface in HMP-era composite_risk"
+            assert "df" not in entry, "Fisher df must not surface in HMP-era composite_risk"

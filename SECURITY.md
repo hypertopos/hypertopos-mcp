@@ -1,15 +1,22 @@
 # Security
 
-## Current version: 0.8.1
+## Current version: 0.9.0
 
-`hypertopos-mcp` runs locally as a stdio MCP server. No network services, no auth layer, no multi-tenancy.
+`hypertopos-mcp` runs locally as an MCP server over stdio or local HTTP. No auth layer, no multi-tenancy.
 
 ## What to watch for
 
 - **Sphere paths** — `open_sphere(path)` reads from the local filesystem. Don't point it at user-controlled paths without validation.
-- **stdio transport** — communicates with the agent host over stdio. Not designed for network exposure.
+- **Transports** — stdio talks to one agent host. `--transport http` binds to the loopback interface with no authentication, and any session can open any sphere path the server process can read: it is for local use on one machine and must not be exposed to a network.
 - **Force reload** — `open_sphere(force_reload=true)` reloads Python modules and is intended for development only. Not thread-safe; do not call from concurrent agents.
-- **Inherits from `hypertopos`** — see [hypertopos-py SECURITY.md](https://github.com/hypertopos/hypertopos-py/blob/main/SECURITY.md) for the underlying core library considerations (pickle chain cache, sphere file trust).
+- **Inherits from `hypertopos`** — see [hypertopos-py SECURITY.md](https://github.com/hypertopos/hypertopos-py/blob/main/SECURITY.md) for the underlying core library considerations (sphere file trust).
+
+## Supported Versions
+
+| Version | Supported |
+|---|---|
+| Latest 0.9.x | Yes |
+| < 0.9 | No |
 
 ## Reporting
 

@@ -1,0 +1,639 @@
+{
+  "clusters": [
+    {
+      "count": 4,
+      "delta": [
+        0.0,
+        0.0,
+        1.0,
+        -0.9,
+        41.9,
+        14.4
+      ],
+      "examples": [
+        "TX-0027039",
+        "TX-0013072",
+        "TX-0021864"
+      ],
+      "label": "elevated: amount, balance, operations; missing: cpty_banks"
+    },
+    {
+      "count": 1,
+      "delta": [
+        0.0,
+        0.0,
+        1.0,
+        -0.9,
+        42.9,
+        -1.9
+      ],
+      "examples": [
+        "TX-0017339"
+      ],
+      "label": "elevated: amount, operations; missing: balance, cpty_banks"
+    }
+  ],
+  "dim_labels": [
+    "accounts",
+    "tx_types",
+    "operations",
+    "cpty_banks",
+    "amount",
+    "balance"
+  ],
+  "found": 5,
+  "note": "clusters[].count reflects returned polygons only (top_n). Call anomaly_summary for population-wide cluster counts.",
+  "offset": 0,
+  "pattern_id": "tx_pattern",
+  "polygons": [
+    {
+      "alive_edges": 3,
+      "anomaly_dimensions": [
+        {
+          "contribution_pct": 75.9,
+          "delta": 41.4031,
+          "dim": 4,
+          "label": "amount"
+        },
+        {
+          "contribution_pct": 24.0,
+          "delta": 23.2983,
+          "dim": 5,
+          "label": "balance"
+        }
+      ],
+      "bregman_divergence": 287.7335,
+      "classification": null,
+      "delta": [
+        0.0,
+        0.0,
+        1.0042,
+        -0.8526,
+        41.4031,
+        23.2983
+      ],
+      "delta_norm": 47.5265,
+      "delta_rank_pct": 100.0,
+      "edges": [
+        {
+          "direction": "in",
+          "is_jumpable": true,
+          "line_id": "accounts",
+          "point_key": "114",
+          "status": "alive"
+        },
+        {
+          "direction": "in",
+          "is_jumpable": true,
+          "line_id": "tx_types",
+          "point_key": "PRIJEM",
+          "status": "alive"
+        },
+        {
+          "direction": "in",
+          "is_jumpable": true,
+          "line_id": "operations",
+          "point_key": "VKLAD",
+          "status": "alive"
+        }
+      ],
+      "is_anomaly": true,
+      "primary_key": "TX-0027039",
+      "reliability_flags": {
+        "confidence": null,
+        "dominant_dim": "amount",
+        "dominant_dim_share": 0.7589,
+        "flags": [
+          "single_dim_driven"
+        ],
+        "low_confidence_bucket": false,
+        "single_dim_driven": true
+      },
+      "total_edges": 4,
+      "total_impact": null
+    },
+    {
+      "alive_edges": 3,
+      "anomaly_dimensions": [
+        {
+          "contribution_pct": 93.1,
+          "delta": 42.8691,
+          "dim": 4,
+          "label": "amount"
+        },
+        {
+          "contribution_pct": 6.8,
+          "delta": 11.5692,
+          "dim": 5,
+          "label": "balance"
+        }
+      ],
+      "bregman_divergence": 251.8381,
+      "classification": null,
+      "delta": [
+        0.0,
+        0.0,
+        1.0042,
+        -0.8526,
+        42.8691,
+        11.5692
+      ],
+      "delta_norm": 44.4223,
+      "delta_rank_pct": 99.99,
+      "edges": [
+        {
+          "direction": "in",
+          "is_jumpable": true,
+          "line_id": "accounts",
+          "point_key": "16",
+          "status": "alive"
+        },
+        {
+          "direction": "in",
+          "is_jumpable": true,
+          "line_id": "tx_types",
+          "point_key": "PRIJEM",
+          "status": "alive"
+        },
+        {
+          "direction": "in",
+          "is_jumpable": true,
+          "line_id": "operations",
+          "point_key": "VKLAD",
+          "status": "alive"
+        }
+      ],
+      "is_anomaly": true,
+      "primary_key": "TX-0013072",
+      "reliability_flags": {
+        "confidence": null,
+        "dominant_dim": "amount",
+        "dominant_dim_share": 0.9313,
+        "flags": [
+          "single_dim_driven"
+        ],
+        "low_confidence_bucket": false,
+        "single_dim_driven": true
+      },
+      "total_edges": 4,
+      "total_impact": null
+    },
+    {
+      "alive_edges": 3,
+      "anomaly_dimensions": [
+        {
+          "contribution_pct": 93.5,
+          "delta": 42.8691,
+          "dim": 4,
+          "label": "amount"
+        },
+        {
+          "contribution_pct": 6.4,
+          "delta": 11.2367,
+          "dim": 5,
+          "label": "balance"
+        }
+      ],
+      "bregman_divergence": 250.8808,
+      "classification": null,
+      "delta": [
+        0.0,
+        0.0,
+        1.0042,
+        -0.8526,
+        42.8691,
+        11.2367
+      ],
+      "delta_norm": 44.3369,
+      "delta_rank_pct": 99.99,
+      "edges": [
+        {
+          "direction": "in",
+          "is_jumpable": true,
+          "line_id": "accounts",
+          "point_key": "113",
+          "status": "alive"
+        },
+        {
+          "direction": "in",
+          "is_jumpable": true,
+          "line_id": "tx_types",
+          "point_key": "PRIJEM",
+          "status": "alive"
+        },
+        {
+          "direction": "in",
+          "is_jumpable": true,
+          "line_id": "operations",
+          "point_key": "VKLAD",
+          "status": "alive"
+        }
+      ],
+      "is_anomaly": true,
+      "primary_key": "TX-0021864",
+      "reliability_flags": {
+        "confidence": null,
+        "dominant_dim": "amount",
+        "dominant_dim_share": 0.9349,
+        "flags": [
+          "single_dim_driven"
+        ],
+        "low_confidence_bucket": false,
+        "single_dim_driven": true
+      },
+      "total_edges": 4,
+      "total_impact": null
+    },
+    {
+      "alive_edges": 3,
+      "anomaly_dimensions": [
+        {
+          "contribution_pct": 99.7,
+          "delta": 42.8691,
+          "dim": 4,
+          "label": "amount"
+        }
+      ],
+      "bregman_divergence": 235.4095,
+      "classification": null,
+      "delta": [
+        0.0,
+        0.0,
+        1.0042,
+        -0.8526,
+        42.8691,
+        -1.9286
+      ],
+      "delta_norm": 42.9327,
+      "delta_rank_pct": 99.99,
+      "edges": [
+        {
+          "direction": "in",
+          "is_jumpable": true,
+          "line_id": "accounts",
+          "point_key": "85",
+          "status": "alive"
+        },
+        {
+          "direction": "in",
+          "is_jumpable": true,
+          "line_id": "tx_types",
+          "point_key": "VYDAJ",
+          "status": "alive"
+        },
+        {
+          "direction": "in",
+          "is_jumpable": true,
+          "line_id": "operations",
+          "point_key": "VYBER",
+          "status": "alive"
+        }
+      ],
+      "is_anomaly": true,
+      "primary_key": "TX-0017339",
+      "reliability_flags": {
+        "confidence": null,
+        "dominant_dim": "amount",
+        "dominant_dim_share": 0.997,
+        "flags": [
+          "single_dim_driven"
+        ],
+        "low_confidence_bucket": false,
+        "single_dim_driven": true
+      },
+      "total_edges": 4,
+      "total_impact": null
+    },
+    {
+      "alive_edges": 3,
+      "anomaly_dimensions": [
+        {
+          "contribution_pct": 92.4,
+          "delta": 40.2957,
+          "dim": 4,
+          "label": "amount"
+        },
+        {
+          "contribution_pct": 7.5,
+          "delta": 11.4624,
+          "dim": 5,
+          "label": "balance"
+        }
+      ],
+      "bregman_divergence": 224.2652,
+      "classification": null,
+      "delta": [
+        0.0,
+        0.0,
+        1.0042,
+        -0.8526,
+        40.2957,
+        11.4624
+      ],
+      "delta_norm": 41.915,
+      "delta_rank_pct": 99.98,
+      "edges": [
+        {
+          "direction": "in",
+          "is_jumpable": true,
+          "line_id": "accounts",
+          "point_key": "47",
+          "status": "alive"
+        },
+        {
+          "direction": "in",
+          "is_jumpable": true,
+          "line_id": "tx_types",
+          "point_key": "PRIJEM",
+          "status": "alive"
+        },
+        {
+          "direction": "in",
+          "is_jumpable": true,
+          "line_id": "operations",
+          "point_key": "VKLAD",
+          "status": "alive"
+        }
+      ],
+      "is_anomaly": true,
+      "primary_key": "TX-0008362",
+      "reliability_flags": {
+        "confidence": null,
+        "dominant_dim": "amount",
+        "dominant_dim_share": 0.9242,
+        "flags": [
+          "single_dim_driven"
+        ],
+        "low_confidence_bucket": false,
+        "single_dim_driven": true
+      },
+      "total_edges": 4,
+      "total_impact": null
+    }
+  ],
+  "properties": {
+    "columns": [
+      "primary_key",
+      "account_id",
+      "date",
+      "type",
+      "operation",
+      "amount",
+      "balance",
+      "k_symbol",
+      "bank"
+    ],
+    "rows": [
+      [
+        "TX-0027039",
+        "114",
+        "1998-10-01",
+        "PRIJEM",
+        "VKLAD",
+        76373.4,
+        228998.0,
+        "",
+        ""
+      ],
+      [
+        "TX-0013072",
+        "16",
+        "1996-05-29",
+        "PRIJEM",
+        "VKLAD",
+        80539.9,
+        122526.4,
+        "",
+        ""
+      ],
+      [
+        "TX-0021864",
+        "113",
+        "1997-11-18",
+        "PRIJEM",
+        "VKLAD",
+        85979.0,
+        119508.4,
+        "",
+        ""
+      ],
+      [
+        "TX-0017339",
+        "85",
+        "1997-02-14",
+        "VYDAJ",
+        "VYBER",
+        91381.9,
+        -348287.7,
+        "",
+        ""
+      ],
+      [
+        "TX-0008362",
+        "47",
+        "1995-08-11",
+        "PRIJEM",
+        "VKLAD",
+        74507.3,
+        121557.0,
+        "",
+        ""
+      ]
+    ]
+  },
+  "radius": 1,
+  "ranked_by": "delta_norm",
+  "related_properties": {
+    "accounts": {
+      "columns": [
+        "point_key",
+        "account_id",
+        "frequency",
+        "district_id",
+        "region",
+        "owner_gender",
+        "owner_birth_year",
+        "n_clients",
+        "n_standing_orders",
+        "loan_amount",
+        "loan_duration",
+        "balance_to_loan",
+        "min_balance",
+        "balance_volatility",
+        "income_coverage",
+        "balance_trend",
+        "penalty_interest_count",
+        "tx_count",
+        "n_distinct_banks",
+        "n_categories",
+        "n_operations",
+        "n_standing_orders_derived",
+        "burst_daily",
+        "burst_weekly",
+        "burst_monthly",
+        "has_loan",
+        "loan_status",
+        "has_card",
+        "card_type"
+      ],
+      "rows": [
+        [
+          "114",
+          "114",
+          "POPLATEK TYDNE",
+          "1",
+          "Prague",
+          "M",
+          1976,
+          1,
+          0,
+          0,
+          0,
+          0.0,
+          -37611.2,
+          1.366285,
+          0.0,
+          4683.659,
+          0,
+          264.0,
+          14.0,
+          5.0,
+          5.0,
+          0.0,
+          3.0,
+          7.0,
+          16.0,
+          null,
+          null,
+          null,
+          null
+        ],
+        [
+          "16",
+          "16",
+          "POPLATEK MESICNE",
+          "1",
+          "Prague",
+          "F",
+          1954,
+          1,
+          1,
+          322453,
+          12,
+          0.3988164,
+          -6612.4,
+          0.7792834,
+          0.2946527,
+          5369.504,
+          0,
+          167.0,
+          14.0,
+          4.0,
+          5.0,
+          1.0,
+          3.0,
+          3.0,
+          6.0,
+          "yes",
+          "A",
+          null,
+          null
+        ],
+        [
+          "113",
+          "113",
+          "POPLATEK TYDNE",
+          "1",
+          "Prague",
+          "M",
+          1969,
+          1,
+          1,
+          130955,
+          36,
+          0.2262536,
+          -41304.2,
+          1.525979,
+          2.024353,
+          2829.275,
+          0,
+          150.0,
+          14.0,
+          5.0,
+          6.0,
+          1.0,
+          2.0,
+          4.0,
+          9.0,
+          "yes",
+          "C",
+          "yes",
+          "gold"
+        ],
+        [
+          "85",
+          "85",
+          "POPLATEK TYDNE",
+          "9",
+          "Region-2",
+          "F",
+          1959,
+          1,
+          0,
+          0,
+          0,
+          0.0,
+          -414304.7,
+          1.166361,
+          0.0,
+          -11591.45,
+          0,
+          120.0,
+          6.0,
+          4.0,
+          5.0,
+          0.0,
+          15.0,
+          16.0,
+          17.0,
+          null,
+          null,
+          null,
+          null
+        ],
+        [
+          "47",
+          "47",
+          "POPLATEK MESICNE",
+          "15",
+          "Region-8",
+          "M",
+          1971,
+          1,
+          1,
+          0,
+          0,
+          0.0,
+          -14266.5,
+          0.655737,
+          0.0,
+          1206.998,
+          0,
+          329.0,
+          14.0,
+          4.0,
+          5.0,
+          1.0,
+          2.0,
+          4.0,
+          8.0,
+          null,
+          null,
+          null,
+          null
+        ]
+      ]
+    }
+  },
+  "total_found": 1427
+}

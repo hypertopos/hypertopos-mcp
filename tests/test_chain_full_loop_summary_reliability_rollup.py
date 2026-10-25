@@ -13,13 +13,15 @@ fields on the ``summary`` block:
 …and that the ``"low"`` verdict subtracts 10 from the investigation score
 without breaking the existing strength / recommended_action mapping.
 """
+
 from __future__ import annotations
 
 import json
 from unittest.mock import MagicMock
 
-import hypertopos_mcp.tools.analysis  # noqa: F401 — register tools
 import pytest
+
+import hypertopos_mcp.tools.analysis  # noqa: F401 — register tools
 from hypertopos_mcp.server import _state
 from hypertopos_mcp.tools.analysis import chain_full_loop_summary
 
@@ -43,12 +45,14 @@ def fake_state():
     # Default per-step returns — copied from test_chain_full_loop_summary
     # so the orchestrator's seven base steps never raise.
     nav.find_chains_with_coherent_anomaly.return_value = {
-        "chains": [{
-            "chain_id": "CH-1",
-            "run_length": 4,
-            "max_delta_norm": 2.5,
-            "top_dim": "fan_asymmetry",
-        }],
+        "chains": [
+            {
+                "chain_id": "CH-1",
+                "run_length": 4,
+                "max_delta_norm": 2.5,
+                "top_dim": "fan_asymmetry",
+            }
+        ],
     }
     nav.chain_witness_intersection.return_value = {
         "chain_id": "CH-1",
@@ -61,8 +65,7 @@ def fake_state():
     }
     nav.classify_chain_typology.return_value = {
         "chain_id": "CH-1",
-        "shape": "monotone-rising",
-        "position_in_chain": "transit",
+        "typology": {"shape": "monotone-rising", "position_in_chain": "transit"},
     }
     nav.extend_chain.return_value = {
         "boundary_key": "A-9",
@@ -75,12 +78,9 @@ def fake_state():
         "chain_id": "CH-1",
         "trace": {
             "ok": True,
-            "data": {
-                "n_anomalies": 3,
-                "is_cyclic": False,
-                "cross_bank_count": 2,
-            },
+            "data": {"hops": [], "summary": {"n_hops": 4, "n_anomalous": 3}},
         },
+        "shape_anomaly": {"ok": True, "data": {"is_anomaly": False}},
     }
     nav.generate_sar_rationale.return_value = {
         "chain_id": "CH-1",
@@ -177,8 +177,7 @@ def test_low_verdict_penalty_can_demote_moderate_to_weak(fake_state):
     # Gut the typology / extension / investigate signals to land at
     # exactly +20 (coherent) + 20 (investigate substantive) = 40.
     fake_state.classify_chain_typology.return_value = {
-        "shape": "no-anomalous-run",
-        "position_in_chain": "no-run",
+        "typology": {"shape": "no-anomalous-run", "position_in_chain": "no-run"},
     }
     fake_state.chain_witness_intersection.return_value = {
         "coordinated": False,

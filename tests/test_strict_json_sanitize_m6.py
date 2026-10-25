@@ -11,16 +11,18 @@ Covers the tools wrapped in the M6 sanitize sweep across detection.py,
 observability.py, and navigation.py — the previously-unsanitized navigator
 float emitters.
 """
+
 from __future__ import annotations
 
 import json
 import math
 from unittest.mock import MagicMock
 
+import pytest
+
 import hypertopos_mcp.tools.detection  # noqa: F401 — register tools
 import hypertopos_mcp.tools.navigation  # noqa: F401
 import hypertopos_mcp.tools.observability  # noqa: F401
-import pytest
 from hypertopos_mcp.server import _state
 from hypertopos_mcp.tools.detection import (
     detect_neighbor_contamination,
@@ -51,8 +53,7 @@ def _assert_strict_json(body: str) -> dict:
 
 def test_detect_neighbor_contamination_sanitizes(fake_nav):
     fake_nav.detect_neighbor_contamination.return_value = [
-        {"primary_key": "E1", "contamination_rate": math.inf,
-         "anomalous_neighbor_count": 5},
+        {"primary_key": "E1", "contamination_rate": math.inf, "anomalous_neighbor_count": 5},
     ]
     body = detect_neighbor_contamination("account_pattern")
     parsed = _assert_strict_json(body)
@@ -67,8 +68,7 @@ def test_detect_segment_shift_sanitizes(fake_nav):
     fake_nav_state_sphere._sphere = sphere
     _state["sphere"] = fake_nav_state_sphere
     fake_nav.detect_segment_shift.return_value = [
-        {"segment": "x", "anomaly_rate": math.nan, "shift_ratio": math.inf,
-         "entity_count": 3},
+        {"segment": "x", "anomaly_rate": math.nan, "shift_ratio": math.inf, "entity_count": 3},
     ]
     body = detect_segment_shift("account_pattern")
     parsed = _assert_strict_json(body)
@@ -95,8 +95,7 @@ def test_anomaly_summary_sanitizes(fake_nav, monkeypatch):
 
 def test_check_alerts_sanitizes(fake_nav):
     fake_nav.check_alerts.return_value = {
-        "alerts": [{"check": "anomaly_rate", "severity": math.inf,
-                    "value": math.nan}],
+        "alerts": [{"check": "anomaly_rate", "severity": math.inf, "value": math.nan}],
     }
     body = check_alerts("account_pattern")
     parsed = _assert_strict_json(body)

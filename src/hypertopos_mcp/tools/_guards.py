@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from hypertopos_mcp._format import record_failure
+
 if TYPE_CHECKING:
     from hypertopos.model.sphere import Pattern
 
@@ -33,8 +35,10 @@ def dead_dim_indices(pattern_id: str) -> list[int]:
     try:
         from hypertopos_mcp.server import _state
 
-        return _state["navigator"].dead_dim_indices(pattern_id)
-    except Exception:
+        dead: list[int] = _state["navigator"].dead_dim_indices(pattern_id)
+        return dead
+    except Exception as exc:
+        record_failure("dead_dimensions", exc)
         return []
 
 

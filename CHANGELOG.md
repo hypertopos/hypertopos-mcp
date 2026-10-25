@@ -6,6 +6,108 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-10-25
+
+### Added
+
+- `get_session_stats` reports whether a newer sphere state exists than the one the session opened (`snapshot` block, with a hint to call `open_sphere`). After `recalibrate`, every tool sees the new calibration.
+- `open_sphere` gains a `branch` parameter (string, default null) to open a named branch instead of main; the result includes a `ref` field that echoes which ref is active.
+- `recalibrate` gains `branch` (run the fit on a branch, created when absent, without touching main) and `exclude_keys` (list of entity keys omitted from the fit but still scored); result adds `n_excluded`, `branch`, and `mu_sha256`.
+- `compare_branches(pattern_id, branch, other=null, top_n=20)` — new read-only tool that compares one pattern between a branch and main (or two branches): anomaly counts, flipped-in / flipped-out entities, Jaccard overlap of anomaly sets, top movers by relative `delta_norm` change, keys present on one side only, calibration drift between the two fits, and the branch recipe log.
+- `manage_branch(action, name=null, purpose=null)` — new tool to list, create, delete, or promote branches; `promote` replays the branch recipe log on main, verifies the fit fingerprint (sha256 of mu), and deletes the branch on success; refuses when main moved since branch creation or when the replayed fit does not match.
+- `python -m hypertopos_mcp.main --transport http` accepts `--session-idle-timeout SECONDS` (default 1800) and `--max-sessions N` (default 10000). When an HTTP client session ends, by disconnect or idle timeout, the server closes that session's sphere and drops its state.
+- Tool responses carry a top-level `failed_parts` list (`{part, error}`) when an optional part — entity properties of a line, `temporal_hint`, `dead_dimensions` — could not be loaded, instead of dropping it silently.
+- `find_anomalies`, `aggregate_anomalies` and `aggregate` document the `in` membership operator for property and event filters.
+- `aggregate` takes `group_by_relation` to group an event pattern by one of several relations to the same line (e.g. sender or receiver accounts).
+- Over the HTTP transport each client session keeps its own open sphere, session state and call statistics: sessions are keyed by `Mcp-Session-Id`. stdio is unchanged.
+- `find_anomalies` takes `rank_order` (`"desc"` default or `"asc"`) for the direction of a `rank_by_property` ranking, and `detect_pattern` ranks ascending for queries about low, lowest or few values.
+- Response format control: `compact` (default) or `full`, chosen by `open_sphere(response_format=...)` for the session or the `HYPERTOPOS_MCP_FORMAT` environment variable. Compact leaves out positional `delta` vectors where a labelled form is present and numeric columns of entity `properties` tables (ranked and filtered properties stay), and every such response carries an `omitted` map naming what was left out and how to get it. `open_sphere` and `get_session_stats` report the active `response_format`.
+- `get_session_stats` reports `session_key` (which client session answered) and `sessions_live` (client sessions with a sphere open); `close_sphere` forgets a closed HTTP client session; `open_sphere(force_reload=True)` is refused while another client session has a sphere open.
+
+### Changed
+
+- The descriptions of `find_counterparties` and `extract_chains` clarify when to use which: one-hop counterparties vs chains, population-wide or seeded and exact from a specific entity.
+- After `recalibrate`, `compare_calibrations` and the other calibration-history tools can compare the previous and the new calibration.
+- The server runs on the MCP Python SDK 2.x (`mcp>=2.3,<3`); 1.x is no longer supported. Tool names, parameters and results are unchanged.
+- `extract_chains`: `from_col`, `to_col`, `time_col`, and `amount_col` parameters are now optional, defaulting to the event pattern's edge-table column configuration. With `seed_nodes` supplied, every event is used for those entities (exact chains — no start-node sampling).
+- One name per concept across tools: the entity key parameter is `primary_key` everywhere (`decompose_drift`, `find_lead_lag`, `score_motif`, `get_event_polygons` used `entity_key`) and the result-count parameter is `top_n` everywhere (`aggregate`, `get_event_polygons`, `get_line_profile`, `search_entities`, `search_entities_fts` used `limit`; `find_motif_by_hops`, `find_chains_with_coherent_anomaly`, `extend_chain` used `max_results`; `investigate_chain`'s `extension_max_results` is `extension_top_n`). `get_event_polygons` echoes `primary_key`.
+- A tool called with a parameter it does not declare now fails with an error naming the closest valid parameter (`unknown parameter 'limit' for tool 'aggregate'; did you mean 'top_n'?`) instead of silently using the default.
+- `get_polygon` in the compact format lists the dimension-line edges as one `dim_edges` list of line ids instead of a full edge object each (the full format is unchanged); `find_anomalies(summary=true)` also leaves the positional `delta` out of `clusters[]`, as documented.
+- `aggregate` no longer echoes request options that were not set: `group_by_property`, `pivot_event_field`, `filters` and `geometry_filters` appear only when given, `distinct` and `collapse_by_property` only when true.
+- `find_group_influence` and `find_drifting_similar` return an object with a `results` list instead of a bare list, so their responses carry `elapsed_ms` and `failed_parts` like every other tool; `find_drifting_similar` now has the same shape whether it finds matches or returns a `warning`
+- `get_centroid_map`: `centroid_drift.direction` is a `{dimension: value}` map instead of a positional list.
+- `compare_branches` in the compact response format cuts recipe list parameters longer than 10 items (such as a recalibration's `exclude_keys`) to their first 10 and reports each full length in `omitted.recipe`; the full format returns the complete lists.
+- `get_event_polygons` returns each event's own properties (amount, date, … from the event line) in a top-level `properties` table keyed by `primary_key`.
+- `get_event_polygons` and `find_anomalies` no longer copy the referenced entities' properties onto every edge: edges keep only `line_id`, `point_key`, `status`, `direction` and `is_jumpable`, and those properties are sent once per entity in `related_properties` (one `{columns, rows}` table per line, keyed by `point_key`).
+- Picks up the `pylance` 13.x requirement from `hypertopos`; existing spheres open without a rebuild and the MCP tools return the same payloads.
+- Smaller responses: search tools, `compare_entities`, `find_common_relations` and `get_centroid_map` return properties in one table; `get_sphere_info` lists derived-dimension lines once; `get_polygon` on an event puts endpoint properties in `related_properties`; compact `get_polygon` returns `delta_by_dim`; compact solids carry one `slice_dim_labels` header; `explain_anomaly` and `investigate_entity` leave out zero-share dimensions and repeated fields; `contagion_score_batch`, `simulate_edge_removal` and `find_high_potential_motifs` stop repeating per-item constants; unset parameters are no longer echoed.
+- `find_anomalies` per-dim FDR returns `q_values_per_dim` as a `{dim: q}` map of the dims with q < 1 and names the dominant dim in `dominant_q_dim`.
+- `find_high_potential_edges` drops the `score_rank_pct` alias of `score_rank_pct_global`.
+- Entity-list tools (`find_anomalies`, `find_clusters`, `find_hubs`, `find_similar_entities`, `find_drifting_entities`) return entity properties in one top-level `properties` table (`{columns: [<key field>, …], rows: [[key, …], …]}`) instead of a `properties` dict on every item.
+- `find_clusters`: `centroid_delta` is a `{dim: value}` map replacing the positional list plus `dim_profile`; `members` is a list of entity keys; `representative_properties` is dropped when the representative is among the members.
+- `find_anomalies` and `get_event_polygons`: polygons no longer repeat `type` and the requested `pattern_id`.
+- `sphere_overview`: warning remediation text is sent once in a top-level `advice_by_warning_type` map instead of an `advice` field on every `dim_quality_warnings` entry; `profiling_alerts` entries no longer repeat their pattern's `pattern_id`.
+- `passive_scan`: an interpretation text shared by several hits is sent once in a top-level `interpretations` map, referenced from each hit by `interpretation_ref`.
+- `get_sphere_info`: line `columns` is a `{name: type}` map.
+- `find_drifting_entities` echoes `filters` and `forecast_horizon` only when they are set.
+﻿- Tool responses are more compact: floats keep at least 7 significant digits (more for large integer parts) instead of full repr precision, non-ASCII text is emitted as-is instead of `\u`-escaped, and tool input schemas no longer carry auto-generated `title` keywords.
+- `open_sphere`, `get_sphere_info`, `get_line_schema` and `goto` no longer read whole points tables: line schemas and row counts come from dataset metadata, and `goto` reads only the requested point.
+- Over HTTP, tool calls of different client sessions run concurrently; each session's own calls still run one at a time.
+- The three tool phases (before `open_sphere`, after `open_sphere`, after `sphere_overview`) are tracked per client session: `tools/list` shows each session only its own tools, a call to a tool its phase has not unlocked is refused with a message naming the unlocking call, and the `sphere://capabilities` resource reports the calling session's sphere.
+- `explain_anomaly.top_dimensions` entries are `{dim, kind, delta, pct_of_total}`, with `pct_of_total` the dimension's share of `delta_norm²`; the `bregman` field is removed, and on spheres without kind tags the list holds every dimension with a nonzero share.
+- `reliability_flags.dominant_dim_share` / `single_dim_driven` on `find_anomalies`, `explain_anomaly` and `investigate_entity`, and the `find_diverse_explanations` / `diverse_explanations` hypotheses, use the same share.
+- `find_drifting_entities` leaves windows without events out of the trajectory and reports `num_inactive_slices`; entities with fewer than two active windows no longer appear.
+- The HTTP transport is documented as local-only: it binds to the loopback interface, has no authentication, and any session can open any sphere path the server process can read, so it must not be exposed to a network.
+- `find_anomalies` and `find_clusters` `summary` and the `verbose` flag of `compare_calibrations`, `decompose_drift`, `find_calibration_influencers` and `find_lead_lag` default to `null`, which follows the session response format; an explicit `true` / `false` still wins. `find_anomalies` in the full format also returns `dim_labels`, naming the positions of every `delta` vector.
+- `find_anomalies` leaves out `edges` on a polygon when it has no jumpable entity edges, instead of emitting an empty list (`total_edges` / `alive_edges` still give the counts).
+
+### Removed
+
+- Rank-derived p-values for FDR are removed: they only encoded an entity's position in the result set, so FDR filtering on them depended only on how many results were requested. `find_anomalies` and `attract_boundary` run FDR only on χ² model p-values (`p_value_method` defaults to and accepts only `"chi2"`), and `find_hubs` and `find_drifting_entities` no longer offer `fdr_alpha`, `fdr_method` or `p_value_method`.
+- The `find_neighborhood` tool is removed. Use `find_counterparties` for transaction partners, and `get_polygon` / `jump_polygon` for an entity's relation neighbours.
+- Removed `discover_chains` MCP tool; use `extract_chains` with `seed_nodes=[key]` for exact per-entity chain discovery.
+
+### Fixed
+
+- `find_drifting_entities`, `find_regime_changes`, `compare_time_windows`, `detect_trajectory_anomaly` and temporal-quality notes report deltas in the pattern's stored metric (Mahalanobis and dimension weights included), so their numbers agree with `dive_solid` and with the anomaly threshold.
+- Tool errors reach the agent with their message again (for example an unknown pattern or a missing prerequisite) instead of a bare "Error executing tool".
+- Responses are no longer sent twice (as text and as structured content), and tools no longer advertise an output schema.
+- Changes to the tool list are announced to clients of every protocol version.
+- Requests that read the open sphere run one at a time, so a sphere closed by one request is never read by another.
+- `manage_branch` and `recalibrate` are marked as destructive.
+- Sampling for `detect_pattern` checks the capabilities the client negotiated.
+- Every tool response is strict JSON: a non-finite number (±infinity, NaN) is returned as `null` in all tools, not only in the tools that handled it before.
+- `get_centroid_map` on a high-cardinality grouping property (tens of thousands of values) now returns in seconds with bounded memory instead of running out of memory: `max_groups` is applied before distances and centroid drift are computed, `inter_centroid_distances` covers the returned groups, and no entity line is read in full for the response. `detect_pattern`'s centroid step is capped the same way.
+- `detect_pattern` merges its step results in plan order and builds the plan from investigation hints in hint order, so the same query gives the same result order (and the same candidates for result filtering) on every call.
+﻿- `combine_anomaly_pvalues`, `classify_detector_consensus` and `assess_anomaly_certainty` accept `trajectory_continuous` in `detectors` and return its p-value (it never fired before); `detectors=null` uses the default set, which leaves this opt-in detector out.
+- `find_anomalies` documentation lists the metrics it accepts (`L2`, `Linf`); it no longer advertises a `"bregman"` metric the tool rejects, and points to the `bregman_divergence` field each result carries.
+- The tool reference documents every tool and every parameter the tools accept, and no parameter they reject: `classify_detector_consensus` and `calibration_influencer_history` have their own sections, and rows for options such as `include_reliability_flags` and `max_edges_loaded`, which the tools do not take, are gone.
+- Tool responses carry numpy numbers as JSON numbers and booleans, not as strings: a score, count or flag that came out of a numpy computation (for example `"0.5"` or `"True"`) is now `0.5` / `true`, and a non-finite numpy value is `null`. Dates and times are ISO strings.
+- `open_sphere(force_reload=True)` returns normally after reloading the server modules instead of failing at the end of the call.
+- `detect_pattern` keeps one result per plan step when a step runs for several patterns (keys `name[pattern_id]`), and coverage / follow-ups follow each step's own pattern.
+- A dimension named in a `detect_pattern` query ranks the fallback anomaly scan by that dimension.
+- `detect_pattern` handles planned steps without `params`, and `open_sphere` clears investigation hints left from a previous sphere.
+- Edge `direction`, `is_jumpable`, `line_id` and `point_key` are never overwritten by endpoint properties of the same name (those appear as `prop_<name>`).
+- `q_value`, `min_q_per_dim`, `q_values_per_dim` and `cell_q_*` keep full precision, so very small q-values are no longer reported as 0.
+- Local servers no longer delete each other's temporal scratch, a failed `open_sphere` leaves the previous session unchanged, and temporal tools are offered only when temporal data exists.
+- `find_counterparties` returns counterparties with equal `tx_count` in a deterministic order (`amount_sum` descending on the edge-table path, then key ascending), so `top_n` results are stable.
+- `find_anomalies` no longer adds a contradictory `signal_stability_note` ("Temporal signal is 'volatile' — 0% of anomalous entities change status") when the temporal history has no anomaly transitions to measure; the note is emitted only for `volatile` or `mixed` signals. `sphere_overview(detail="full")` reports such patterns with `temporal_quality.signal_quality="insufficient_data"`.
+- When an HTTP client session ends while one of its tool calls is still running, the server closes that session's sphere after the call finishes (waiting up to 4 seconds) instead of closing it under the running call.
+- `chain_full_loop_summary` counts its typology and R9-loop signals again; they never fired, so every chain was scored up to 30 points too low (a chain that `investigate_chain` escalated could come back as a false-positive candidate).
+- `open_sphere` lists each pattern's entity count (it showed `?`) and labels repeated relations by role (`sender`, `receiver`) instead of repeating the line name.
+- `open_sphere(force_reload=True)` serves the reloaded tool code instead of the code loaded at server start.
+- Six list-returning tools (`simulate_counterparty_removal`, `combine_anomaly_pvalues`, `classify_detector_consensus`, `find_topological_anomalies`, `find_novel_entities`, `find_regime_changes`) answer `{results: [...]}` with `elapsed_ms`, like every other tool.
+- `consensus_classification` always scores the focal entity; `found=false` now only means the entity has no geometry row.
+- `chain_full_loop_summary` and `investigate_chain` report `inconclusive` with `failed_steps` when failed steps could change the verdict; an error repeated across steps is given once.
+- `dive_solid` describes `base_polygon` as the current state (the slices are the history); `walk_line` from a polygon or solid position says to call `goto` first.
+- `find_hubs` and `hub_history` no longer report `alive_edges` for continuous patterns, where the hub score is a capacity-weighted sum of clipped shapes, not an edge count.
+- `audit_pattern_dims` explains why label-aware calibration is unavailable by naming the actual gap.
+- `detect_pattern` follow-up hints name each dimension once.
+- `find_anomalies(rank_by_property=...)` returns results in property order and pages with `offset`.
+- `HYPERTOPOS_SPHERE_PATH` now works as documented: it is the default path of `open_sphere()`, so an agent can open the configured sphere without knowing its path. Tools no longer try to open it behind the agent's back (that path was unreachable behind the tool phases).
+- `get_event_polygons` now rejects an `is_anomaly` key inside a partition `filters` entry and points to `geometry_filters`, instead of silently ignoring it.
+- `passive_scan` returns an error listing the allowed values (`"count"`, `"weighted"`) for an unsupported `scoring` mode, instead of silently ignoring `threshold`.
+
 ## [0.8.1] — 2026-06-01
 
 ### Changed

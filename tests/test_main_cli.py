@@ -5,6 +5,7 @@
 from unittest.mock import patch
 
 import pytest
+
 from hypertopos_mcp.main import _build_parser, main
 
 
@@ -34,12 +35,22 @@ def test_main_dispatches_stdio_by_default():
 def test_main_dispatches_streamable_http_when_requested():
     with patch("hypertopos_mcp.main.mcp") as mock_mcp:
         main(["--transport", "http", "--port", "8080"])
-    assert mock_mcp.settings.port == 8080
-    mock_mcp.run.assert_called_once_with(transport="streamable-http")
+    mock_mcp.run.assert_called_once_with(
+        transport="streamable-http", port=8080, session_idle_timeout=1800.0, max_sessions=10000
+    )
 
 
 def test_main_propagates_custom_port():
     with patch("hypertopos_mcp.main.mcp") as mock_mcp:
         main(["--transport", "http", "--port", "9090"])
-    assert mock_mcp.settings.port == 9090
-    mock_mcp.run.assert_called_once_with(transport="streamable-http")
+    mock_mcp.run.assert_called_once_with(
+        transport="streamable-http", port=9090, session_idle_timeout=1800.0, max_sessions=10000
+    )
+
+
+def test_main_propagates_http_session_limits():
+    with patch("hypertopos_mcp.main.mcp") as mock_mcp:
+        main(["--transport", "http", "--session-idle-timeout", "60", "--max-sessions", "4"])
+    mock_mcp.run.assert_called_once_with(
+        transport="streamable-http", port=8080, session_idle_timeout=60.0, max_sessions=4
+    )

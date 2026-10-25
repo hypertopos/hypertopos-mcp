@@ -5,43 +5,35 @@
 from __future__ import annotations
 
 import json
-import math
 from datetime import UTC, datetime
+from typing import Any
 
+from mcp.types import ToolAnnotations
+
+from hypertopos_mcp._format import (
+    compact_solid,
+    drop_positional_deltas,
+    json_default,
+    labelled,
+    project_descriptive,
+    sanitize_for_json,
+    slim_polygons,
+    tabulate_edge_properties,
+    tabulate_properties,
+)
 from hypertopos_mcp.enrichment import (
     enrich_polygons,
     lookup_entity,
     resolve_entity_line_id,
 )
 from hypertopos_mcp.serializers import _serialize_polygon, _serialize_position, _serialize_solid
-from hypertopos_mcp.server import _require_navigator, _state, mcp, timed
+from hypertopos_mcp.server import _require_navigator, _state, active_response_format, mcp, timed
 from hypertopos_mcp.tools._guards import adaptive_polygon_cap, binary_geometry_note_for_pattern
 
 _STALE_SOLID_DAYS = 180
 
 
-def _sanitize_for_json(obj):
-    """Recursively replace non-finite floats (±inf / NaN) with None.
-
-    Anomaly / boundary / aggregate scans emit per-entity floats (delta_norm,
-    signed_distance, q_value, mean_delta_norm) that can be ±inf / NaN on
-    degenerate populations; strict JSON parsers reject the Infinity / NaN
-    literals Python's json.dumps would otherwise produce. Module-local copy
-    matching the convention in analysis.py / observability.py / detection.py.
-    Navigator methods return plain Python floats, so a ``float`` check suffices.
-    """
-    if isinstance(obj, float) and not math.isfinite(obj):
-        return None
-    if isinstance(obj, dict):
-        return {k: _sanitize_for_json(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_sanitize_for_json(v) for v in obj]
-    if isinstance(obj, tuple):
-        return tuple(_sanitize_for_json(v) for v in obj)
-    return obj
-
-
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def goto(primary_key: str, line_id: str) -> str:
     """Navigate to a specific entity by business key and line. Sets current position.
@@ -52,10 +44,10 @@ def goto(primary_key: str, line_id: str) -> str:
     _require_navigator()
     nav = _state["navigator"]
     nav.goto(primary_key, line_id)
-    return json.dumps(_sanitize_for_json(_serialize_position(nav.position)), indent=2)
+    return json.dumps(sanitize_for_json(_serialize_position(nav.position)), indent=2)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def get_position() -> str:
     """Return the current navigator position (Point, Polygon, Solid, or None).
@@ -64,10 +56,12 @@ def get_position() -> str:
     the navigator has not been moved.
     """
     _require_navigator()
-    return json.dumps(_sanitize_for_json(_serialize_position(_state["navigator"].position)), indent=2)
+    return json.dumps(
+        sanitize_for_json(_serialize_position(_state["navigator"].position)), indent=2
+    )
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def walk_line(line_id: str, direction: str = "+") -> str:
     """Walk one step along a line to the next (+) or previous (-) entity.
@@ -77,19 +71,26 @@ def walk_line(line_id: str, direction: str = "+") -> str:
     """
     _require_navigator()
     nav = _state["navigator"]
+    from hypertopos.model.objects import Point
+
+    if nav.position is not None and not isinstance(nav.position, Point):
+        raise RuntimeError(
+            f"walk_line needs a Point position; the current position is "
+            f"{type(nav.position).__name__}. Call goto(primary_key, line_id) first."
+        )
     walk = nav.π1_walk_line
     walk(line_id, direction)
-    return json.dumps(_sanitize_for_json(_serialize_position(nav.position)), indent=2)
+    return json.dumps(sanitize_for_json(_serialize_position(nav.position)), indent=2)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def jump_polygon(target_line_id: str, edge_index: int = 0) -> str:
     """Jump through the current polygon to a point on another line via an alive edge.
 
     edge_index: which edge to follow when multiple exist (default 0). Check total_edges_to_target in response.
     Returns: new position on target line.
-    """
+    """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
     pos = nav.position
@@ -113,7 +114,7 @@ def jump_polygon(target_line_id: str, edge_index: int = 0) -> str:
         jump(polygon, target_line_id, edge_index=edge_index)
     except ValueError as exc:
         error_msg = str(exc)
-        resp: dict = {
+        resp: dict[str, Any] = {
             "error": error_msg,
             "pattern_id": pattern_id,
             "target_line_id": target_line_id,
@@ -149,10 +150,10 @@ def jump_polygon(target_line_id: str, edge_index: int = 0) -> str:
         return json.dumps(resp, indent=2)
     result = _serialize_position(nav.position)
     result["total_edges_to_target"] = alive_count
-    return json.dumps(_sanitize_for_json(result), indent=2)
+    return json.dumps(sanitize_for_json(result), indent=2)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def dive_solid(
     primary_key: str,
@@ -170,7 +171,12 @@ def dive_solid(
         drifting around a stationary entity?" — a stationary entity yields
         ``delta_norm_frozen_pop = 0`` across all slices. Default ``False``
         keeps the existing response shape.
-    Returns: base polygon, temporal slices, reputation, and forecast (if >=3 slices).
+    Returns: base polygon (the entity's current state, as get_polygon), temporal
+    slices (its recorded history, oldest first), reputation, and forecast (if >=3
+    slices). When the slices carry fewer dims than the pattern, the forecast adds
+    forecast_dims and forecast_theta_norm: the prediction is compared with the
+    threshold over those same dims. Compact format: as get_solid. After this call
+    the position is the Solid; goto(primary_key, line_id) returns to a Point.
     """
     _require_navigator()
     nav = _state["navigator"]
@@ -198,9 +204,8 @@ def dive_solid(
     # Add base_polygon_note when temporal history exists
     if solid.slices:
         ss["base_polygon_note"] = (
-            "Initial entity state before recorded deformations. "
-            "delta_norm here reflects the entity at first observation. "
-            "For the current state, call get_polygon(pattern_id=...)."
+            "base_polygon is the entity's current state (same as "
+            "get_polygon(pattern_id=...)); slices are its recorded history, oldest first."
         )
     # Add forecast when solid has enough slices
     if len(solid.slices) >= 3:
@@ -224,10 +229,17 @@ def dive_solid(
     rep = nav.solid_reputation(primary_key, pattern_id)
     if rep is not None:
         ss["reputation"] = rep
-    return json.dumps(_sanitize_for_json(ss), separators=(",", ":"), default=str)
+    if active_response_format() == "compact":
+        omitted = compact_solid(ss, pattern.dim_labels)
+        if omitted:
+            ss["omitted"] = {
+                **omitted,
+                "full_response": "open_sphere(<path>, response_format='full') returns every field",
+            }
+    return json.dumps(sanitize_for_json(ss), separators=(",", ":"), default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def emerge() -> str:
     """Emerge from a Polygon or Solid back to a synthetic Point.
@@ -258,10 +270,10 @@ def emerge() -> str:
             )
 
     result["entity_properties"] = entity_properties
-    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+    return json.dumps(sanitize_for_json(result), indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def find_anomalies(
     pattern_id: str,
@@ -271,10 +283,10 @@ def find_anomalies(
     offset: int = 0,
     missing_edge_to: str | None = None,
     rank_by_property: str | None = None,
-    property_filters: dict | None = None,
+    property_filters: dict[Any, Any] | None = None,
     fdr_alpha: float | None = None,
     fdr_method: str | None = None,
-    p_value_method: str | None = None,
+    p_value_method: str = "chi2",
     fdr_axis: str = "entity",
     fdr_resolution: str | None = None,
     fdr_temporal_resolution: str | None = None,
@@ -282,36 +294,39 @@ def find_anomalies(
     select: str = "top_norm",
     metric: str = "L2",
     min_confidence: float = 0.0,
-    dimension_weights: dict | None = None,
+    dimension_weights: dict[Any, Any] | None = None,
     sample_size: int | None = None,
     boundary_aware: bool = False,
-    summary: bool = False,
+    summary: bool | None = None,
+    rank_order: str = "desc",
 ) -> str:
     """Find the most anomalous polygons in a pattern, ranked by delta_norm.
 
-    metric: "L2" (default, pre-computed delta_norm), "Linf" (max single-dimension |delta|), or "bregman" (distribution-aware Bregman divergence).
+    metric: "L2" (default, pre-computed delta_norm) or "Linf" (max single-dimension |delta|).
+      Each result also carries bregman_divergence (distribution-aware) for comparison.
 
     radius: multiplier on theta_norm threshold (default 1). Higher = looser boundary.
     include_emerging: append entities trending toward anomaly (requires temporal data).
     missing_edge_to: keep only anomalous entities with NO edge to this line.
     rank_by_property: re-rank by a raw entity property instead of delta_norm.
-    property_filters: filter by entity properties before ranking ({"col": {"gt": X}}).
+    rank_order: "desc" (default) or "asc" for rank_by_property — "asc" lists the lowest values first; missing values rank last.
+    property_filters: filter by entity properties before ranking ({"col": {"gt": X}}, {"col": {"in": ["A", "B"]}}).
     fdr_alpha: apply Benjamini-Hochberg FDR control at this level. Returns only entities with q_value <= alpha. Default None = legacy behavior.
     fdr_method: "bh" (Benjamini-Hochberg assumes pi0=1) or "storey" (LSL estimator of true null proportion — shrinks q-values by pi0, typically recovers 10-15% more discoveries when combined with p_value_method="chi2" on spheres that have a genuine null mass). Default None — resolves to "bh" normally, "storey" when fdr_resolution / fdr_temporal_resolution is set on the entity axis (see fdr_resolution).
-    p_value_method: "rank" (uniform by construction) or "chi2" (upper-tail chi-squared survival on ||delta||², df=dimensionality). Pair with fdr_method="storey" for power recovery; with rank, Storey collapses to BH. Default None — resolves to "rank" normally, "chi2" when fdr_resolution / fdr_temporal_resolution is set on the entity axis (see fdr_resolution).
-    fdr_axis: "entity" (default, current behaviour — flat FDR over per-entity p-values), "per_dim" (independent BH/Storey per dim using chi²(1) univariate per-cell p-values; keep entity iff any dim's q ≤ alpha), "both" (entity-level AND ≥1 dim survives per-dim FDR). Per-dim mode reduces inflation when one dim drives many anomalies; per-polygon q_values_per_dim, min_q_per_dim, dominant_q_dim_idx attached for investigator drill-down. Warning: chi²(1) is direction-agnostic — both extreme-positive and extreme-negative deviations produce small p-values; on spheres with anti-signal dims (high |delta| correlated with non-fraud per per-dim label AUROC), per-dim mode flags both wings — combine with dimension_weights to silence anti-signal dims when labels exist.
-    fdr_resolution: optional spatial-hierarchy level name declared on the pattern's fdr_hierarchy. When set, survivors are gated to those whose cell at this level clears per-level BH/Storey FDR via hypergeom upper-tail on is_anomaly per cell. Requires fdr_alpha. Survivors gain cell_q_spatial and cell_path on the polygon entry. Use to localise anomalies to a geographic / segment region instead of a flat entity ranking. When set on the entity axis (default fdr_axis='entity'), an unspecified p_value_method (None) resolves to 'chi2' instead of 'rank' and an unspecified fdr_method (None) resolves to 'storey' instead of 'bh' — rank-based p-values are uniform-by-construction so BH rejects nothing under the resolution gate. Pass p_value_method='rank' or fdr_method='bh' explicitly to keep those values (e.g. for reproducing pre-upgrade behaviour or benchmarking the degenerate path on purpose).
-    fdr_temporal_resolution: optional temporal-hierarchy level name declared on the pattern's fdr_temporal_hierarchy. Same semantics as fdr_resolution but for the temporal axis (e.g. hour / day / week). Same sentinel-None default rules apply. Requires fdr_alpha. Survivors gain cell_q_temporal and cell_path. When both fdr_resolution and fdr_temporal_resolution are set, intersection-FDR applies — an entity survives iff its cell clears every named spatial level AND every named temporal level, and both cell_q_spatial and cell_q_temporal carry the conservative joint q (element-wise max across the cell's projections at each level).
+    p_value_method: "chi2" (default and only accepted value — upper-tail chi-squared survival on ||delta||², df=dimensionality). Pair with fdr_method="storey" for power recovery.
+    fdr_axis: "entity" (default, current behaviour — flat FDR over per-entity p-values), "per_dim" (independent BH/Storey per dim using chi²(1) univariate per-cell p-values; keep entity iff any dim's q ≤ alpha), "both" (entity-level AND ≥1 dim survives per-dim FDR). Per-dim mode reduces inflation when one dim drives many anomalies; per-polygon q_values_per_dim ({dim: q}, dims with q = 1 omitted), min_q_per_dim, dominant_q_dim (dim name) attached for investigator drill-down. Warning: chi²(1) is direction-agnostic — both extreme-positive and extreme-negative deviations produce small p-values; on spheres with anti-signal dims (high |delta| correlated with non-fraud per per-dim label AUROC), per-dim mode flags both wings — combine with dimension_weights to silence anti-signal dims when labels exist.
+    fdr_resolution: optional spatial-hierarchy level name declared on the pattern's fdr_hierarchy. When set, survivors are gated to those whose cell at this level clears per-level BH/Storey FDR via hypergeom upper-tail on is_anomaly per cell. Requires fdr_alpha. Survivors gain cell_q_spatial and cell_path on the polygon entry. Use to localise anomalies to a geographic / segment region instead of a flat entity ranking. When set on the entity axis (default fdr_axis='entity'), an unspecified fdr_method (None) resolves to 'storey' instead of 'bh'; pass fdr_method='bh' explicitly to keep BH.
+    fdr_temporal_resolution: optional temporal-hierarchy level name declared on the pattern's fdr_temporal_hierarchy. Same semantics as fdr_resolution but for the temporal axis (e.g. hour / day / week). Same fdr_method default rule applies. Requires fdr_alpha. Survivors gain cell_q_temporal and cell_path. When both fdr_resolution and fdr_temporal_resolution are set, intersection-FDR applies — an entity survives iff its cell clears every named spatial level AND every named temporal level, and both cell_q_spatial and cell_q_temporal carry the conservative joint q (element-wise max across the cell's projections at each level).
     rank_by: "delta_norm" (default), "min_q_per_dim" (sort survivors by smallest per-dim q-value ascending — requires fdr_alpha and fdr_axis in {"per_dim", "both"}; incompatible with select="diverse"), or "signed_confidence" (sort by delta_norm_signed × |lda_alignment| × (1 - reliability_penalty) descending where lda_alignment = (delta / ||delta||) · direction projects onto the Fisher LDA axis and reliability_penalty = 0.5 · single_dim_driven + 0.5 · low_confidence_bucket — requires a pattern rebuilt with sphere.yaml label_audit: enabled, fails with a structured error otherwise; incompatible with select="diverse"). Use signed_confidence to fuse delta_norm_signed, LDA direction alignment, and reliability_flags into one confidence-weighted ranking when labels are available.
     select: "top_norm" (default, rank by score) or "diverse" (submodular facility location — K most diverse representatives with representativeness counts).
     min_confidence: filter by bootstrap confidence threshold (0.0 = no filter). Requires bregman_calibration=True on the sphere.
     dimension_weights: optional {dim_name: float} mapping to multiply each dim's contribution before computing the rank score. Default None = no weighting. Missing dims default to 1.0; explicit 0.0 silences a dim; empty {} is equivalent to None. Requires metric in ('L2', 'Linf'). Connects stratified correlation gate verdicts to runtime ranking — discount NOISE-classified dims via 0.0, down-weight HEAVY-TAIL dims via 0.5. When weights are active, only `delta_norm` on the returned polygons is the weighted rank score; `delta`, `is_anomaly`, `bregman_divergence`, and `delta_rank_pct` come from storage and reflect unweighted calibration.
     sample_size: optional cap on geometry rows scanned. When set below the population size, a random sample is drawn before threshold filtering and ranking. Forces the in-process scan path. Default None = scan full population.
     boundary_aware: when True (default False), stratified sampling allocates half the sample_size budget to entities within [0.8 * theta_norm, 1.2 * theta_norm] (boundary band), other half drawn from the rest of the population. Requires sample_size to be set. Useful for calibration audits where boundary cases are under-represented under uniform sampling.
-    summary: when True, drops the full delta array, edges list, and enriched properties from each polygon to keep the response compact for wide patterns (>20 dims). Retains primary_key, delta_norm, is_anomaly, delta_rank_pct, bregman_divergence, q_value family, reliability_flags, and anomaly_dimensions. Call get_polygon for full per-polygon detail.
+    summary: None (default) follows the session response_format — compact drops positional delta vectors (anomaly_dimensions and cluster labels stay) and numeric properties columns, listed in `omitted`; full keeps everything plus top-level dim_labels. False forces full. True drops delta, edges and properties entirely (smallest payload); retains primary_key, delta_norm, is_anomaly, delta_rank_pct, bregman_divergence, q_value family, reliability_flags, and anomaly_dimensions. Call get_polygon for full per-polygon detail.
     The edges list (when present) is filtered to actual jumpable entity edges; degenerate dim-line edges with empty point_key are omitted for response size — call get_polygon to retrieve the full edge list including dim lines.
     Returns: anomalous polygons with anomaly_dimensions, clusters, total_found.
-    """
+    """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
     sphere = _state["sphere"]._sphere
@@ -351,6 +366,7 @@ def find_anomalies(
         missing_edge_to=missing_edge_to,
         include_emerging=include_emerging,
         rank_by_property=rank_by_property,
+        rank_order=rank_order,
         property_filters=property_filters,
         fdr_alpha=fdr_alpha,
         fdr_method=fdr_method,
@@ -376,6 +392,7 @@ def find_anomalies(
             from hypertopos.engine.geometry import GDSEngine
 
             ep["anomaly_dimensions"] = GDSEngine.anomaly_dimensions(ep["delta"], labels)
+        _label_q_values(ep, labels)
 
     # M4 additive: attach total_impact + classification per entry. Resolves
     # to None per-entry when pattern is event-type, N<2, or storage backend
@@ -383,11 +400,16 @@ def find_anomalies(
     enriched = nav._attach_influence_fields_to_anomaly_entries(enriched, pattern_id)
 
     # F2a — trim degenerate edges (empty point_key = dim-line edges, not jumpable).
-    # Full edges available via get_polygon. Applied even in default (non-summary) mode.
+    # Full edges available via get_polygon. Applied even in default (non-summary) mode;
+    # an empty list is dropped (total_edges / alive_edges still report the counts).
     for ep in enriched:
-        edges = ep.get("edges")
+        if "edges" not in ep:
+            continue
+        edges = [e for e in ep["edges"] or [] if e.get("point_key")]
         if edges:
-            ep["edges"] = [e for e in edges if e.get("point_key")]
+            ep["edges"] = edges
+        else:
+            del ep["edges"]
 
     # F2b — summary mode: drop heavy fields to keep response < 30% of full payload.
     if summary:
@@ -395,8 +417,28 @@ def find_anomalies(
         for ep in enriched:
             for k in _SUMMARY_DROP:
                 ep.pop(k, None)
+    slim_polygons(enriched, pattern_id)
+    properties_table = tabulate_properties(enriched, "primary_key")
+    related_properties = tabulate_edge_properties(enriched)
 
     clusters = nav.classify_anomalies(polygons, pattern_id)
+    if summary:
+        for cluster in clusters:
+            cluster.pop("delta", None)
+    omitted: dict[str, Any] = {}
+    mode = "full" if summary is False else active_response_format()
+    if summary is None and mode == "compact":
+        if drop_positional_deltas(enriched, clusters):
+            omitted["delta"] = "polygons and clusters (anomaly_dimensions / labels kept)"
+        if properties_table:
+            keep = {rank_by_property, *(property_filters or {})} - {None}
+            dropped = project_descriptive(properties_table, keep)
+            if dropped:
+                omitted["properties"] = dropped
+        if omitted:
+            omitted["full_response"] = (
+                f"repeat with summary=false, or get_polygon('{pattern_id}') after goto(<key>)"
+            )
     result = {
         "pattern_id": pattern_id,
         "radius": radius,
@@ -406,12 +448,18 @@ def find_anomalies(
         "ranked_by": rank_by_property or rank_by,
         **(pi5_meta if pi5_meta else {}),
         "polygons": enriched,
+        **({"properties": properties_table} if properties_table else {}),
+        **({"related_properties": related_properties} if related_properties else {}),
         "clusters": clusters,
         "note": (
             "clusters[].count reflects returned polygons only (top_n). "
             "Call anomaly_summary for population-wide cluster counts."
         ),
     }
+    if any("delta" in p or isinstance(p.get("q_values_per_dim"), list) for p in enriched):
+        result["dim_labels"] = pattern.dim_labels
+    if omitted:
+        result["omitted"] = omitted
     if capped_warning:
         result["capped_warning"] = capped_warning
 
@@ -427,7 +475,7 @@ def find_anomalies(
     # dataset (4M+ rows for 150K entities) — skip for large populations.
     if pattern.pattern_type == "anchor" and pattern.population_size <= 50_000:
         tq = nav.temporal_quality_summary(pattern_id)
-        if tq and tq.get("signal_quality") not in ("persistent", "no_anomalies", None):
+        if tq and tq.get("signal_quality") in ("volatile", "mixed"):
             sq = tq["signal_quality"]
             tr = tq.get("transition_rate", 0)
             result["signal_stability_note"] = (
@@ -436,31 +484,52 @@ def find_anomalies(
                 f"re-check after the next calibration cycle."
             )
 
-    return json.dumps(_sanitize_for_json(result), indent=2, default=str)
+    return json.dumps(sanitize_for_json(result), indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+def _label_q_values(entry: dict[str, Any], labels: list[str]) -> None:
+    """Per-dim FDR fields by dim name: ``q_values_per_dim`` keeps only dims with q < 1.
+
+    Left positional when two dims share a label.
+    """
+    q_values = entry.get("q_values_per_dim")
+    by_dim = labelled(q_values, labels) if q_values is not None else None
+    if by_dim is None:
+        return
+    entry["q_values_per_dim"] = {d: q for d, q in by_dim.items() if q < 1.0}
+    entry["dominant_q_dim"] = labels[entry.pop("dominant_q_dim_idx")]
+
+
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def anomaly_summary(pattern_id: str, max_clusters: int = 20) -> str:
     """Statistical overview of anomalies: count, rate, percentiles, clusters, top driving dimensions.
 
     max_clusters: cap on anomaly clusters returned (default 20). Set 0 for unlimited.
-    Returns: anomaly_count, anomaly_rate, delta_norm_percentiles, top_driving_dimensions.
-    """
+    Returns: anomaly_count, anomaly_rate, delta_norm_percentiles, top_driving_dimensions,
+    clusters (compact format drops each cluster's positional delta; its label stays).
+    """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
     summary = nav.anomaly_summary(pattern_id, max_clusters=max_clusters)
 
     # top_driving_dimensions is now computed by navigator.anomaly_summary (core)
+    if active_response_format() == "compact" and drop_positional_deltas(
+        [], summary.get("clusters") or []
+    ):
+        summary["omitted"] = {
+            "delta": "clusters (labels kept)",
+            "full_response": "open_sphere(<path>, response_format='full') returns every field",
+        }
 
     _bgn = binary_geometry_note_for_pattern(pattern_id)
     if _bgn:
         summary["binary_geometry_note"] = _bgn
 
-    return json.dumps(_sanitize_for_json(summary), indent=2, default=str)
+    return json.dumps(sanitize_for_json(summary), indent=2, default=json_default)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def aggregate_anomalies(
     pattern_id: str,
@@ -470,15 +539,16 @@ def aggregate_anomalies(
     sample_pct: float | None = None,
     include_keys: bool = False,
     keys_per_group: int = 5,
-    property_filters: dict | None = None,
+    property_filters: dict[Any, Any] | None = None,
 ) -> str:
     """Group all anomalous entities by a property column — shows anomaly distribution without pagination.
 
     group_by: entity line column name (or sub-key like "suppkey" for composite patterns).
     include_keys: include sample entity keys per group (default false).
     sample_size/sample_pct: subsample for large patterns (>500K entities).
+    property_filters: narrow the population first, same syntax as find_anomalies ({"col": {"in": ["A", "B"]}}).
     Returns: per-group anomaly_count and mean_delta_norm, sorted by count desc.
-    """
+    """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
     pattern = _state["sphere"]._sphere.patterns[pattern_id]
@@ -494,10 +564,10 @@ def aggregate_anomalies(
         keys_per_group=keys_per_group,
         property_filters=property_filters,
     )
-    return json.dumps(_sanitize_for_json(result), indent=2)
+    return json.dumps(sanitize_for_json(result), indent=2)
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def attract_boundary(
     alias_id: str,
@@ -506,7 +576,7 @@ def attract_boundary(
     top_n: int = 10,
     fdr_alpha: float | None = None,
     fdr_method: str = "bh",
-    p_value_method: str = "rank",
+    p_value_method: str = "chi2",
     select: str = "top_norm",
 ) -> str:
     """Find entities closest to an alias segment boundary (requires cutting_plane).
@@ -514,17 +584,22 @@ def attract_boundary(
     direction: "in" (at risk of leaving), "out" (about to enter), or "both".
     fdr_alpha: apply Benjamini-Hochberg FDR control at this level. Returns only entities with q_value <= alpha. Default None = legacy behavior.
     fdr_method: "bh" (default, Benjamini-Hochberg assumes pi0=1) or "storey" (LSL null-proportion estimator; recovers 10-15% more discoveries when combined with p_value_method="chi2" on spheres with genuine null mass).
-    p_value_method: "rank" (default) or "chi2" (parametric null, required for Storey to shrink q-values).
+    p_value_method: "chi2" (default and only accepted value — parametric χ² null on ||delta||²).
     select: "top_norm" (default, rank by score) or "diverse" (submodular facility location — K most diverse representatives with representativeness counts).
     Returns: entities sorted by |signed_distance| ascending. Positive = inside segment.
-    """
+    """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
     attract = nav.π6_attract_boundary
     pairs = attract(
-        alias_id, pattern_id, direction=direction, top_n=top_n,
-        fdr_alpha=fdr_alpha, fdr_method=fdr_method,
-        p_value_method=p_value_method, select=select,
+        alias_id,
+        pattern_id,
+        direction=direction,
+        top_n=top_n,
+        fdr_alpha=fdr_alpha,
+        fdr_method=fdr_method,
+        p_value_method=p_value_method,
+        select=select,
     )
 
     results = []
@@ -541,14 +616,14 @@ def attract_boundary(
         }
         q_value = getattr(polygon, "q_value", None)
         if q_value is not None:
-            entry["q_value"] = round(float(q_value), 6)
+            entry["q_value"] = float(q_value)
         representativeness = getattr(polygon, "representativeness", None)
         if representativeness is not None:
             entry["representativeness"] = int(representativeness)
         results.append(entry)
 
     return json.dumps(
-        _sanitize_for_json(
+        sanitize_for_json(
             {
                 "alias_id": alias_id,
                 "pattern_id": pattern_id,
@@ -559,28 +634,3 @@ def attract_boundary(
         ),
         indent=2,
     )
-
-
-@mcp.tool(annotations={"readOnlyHint": True})
-@timed
-def find_neighborhood(
-    primary_key: str,
-    pattern_id: str,
-    max_hops: int = 2,
-    max_entities: int = 100,
-) -> str:
-    """BFS traversal through jumpable polygon edges to discover an entity's neighborhood.
-
-    Only works for binary FK mode (explicit point_key). For continuous mode, use find_counterparties.
-    max_hops: edge-hops from center (default 2). max_entities: cap on returned neighbors (default 100).
-    Returns: reachable entities with hop distance, anomaly status, delta_rank_pct.
-    """
-    _require_navigator()
-    nav = _state["navigator"]
-    result = nav.find_neighborhood(
-        primary_key,
-        pattern_id,
-        max_hops=max_hops,
-        max_entities=max_entities,
-    )
-    return json.dumps(_sanitize_for_json(result), indent=2)

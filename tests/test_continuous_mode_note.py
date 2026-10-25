@@ -96,4 +96,3 @@ class TestContinuousModeNote:
             )
         finally:
             pattern.edge_max = original_edge_max
-

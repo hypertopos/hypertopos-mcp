@@ -6,6 +6,7 @@ Drives full asdict serialisation path on the rebuilt Berka fixture (sphere
 format 2.4) — regression guard for missing local imports per
 feedback_mcp_serializer_imports_local.md.
 """
+
 from __future__ import annotations
 
 import json
@@ -15,6 +16,7 @@ import pytest
 
 class TestFindCalibrationInfluencersMcp:
     def test_returns_valid_json_classify_all(self, open_berka_sphere):
+        from hypertopos_mcp.server import _state
         from hypertopos_mcp.tools.analysis import find_calibration_influencers
 
         payload = find_calibration_influencers(
@@ -23,28 +25,29 @@ class TestFindCalibrationInfluencersMcp:
             classify="all",
         )
         report = json.loads(payload)
+        expected = _state["sphere"]._sphere.patterns["account_behavior_pattern"].population_size
         assert report["pattern_id"] == "account_behavior_pattern"
-        assert report["population_size"] == 4500
-        assert sum(report["cell_counts"].values()) == 4500
+        assert report["population_size"] == expected
+        assert sum(report["cell_counts"].values()) == expected
         assert len(report["entries"]) <= 5
         for entry in report["entries"]:
             assert "total_impact" in entry
             assert entry["classification"] in {
-                "hidden", "distorter", "standard_anomaly", "normal",
+                "hidden",
+                "distorter",
+                "standard_anomaly",
+                "normal",
             }
-            assert entry["cascading_flip_count"] is None  # verbose=False default
+            assert "cascading_flip_count" not in entry  # verbose=False: field omitted
 
         # Patent-defensive end-to-end check: at least ONE cell beyond "normal"
         # must populate on real data. If the entire population classifies as
         # "normal", math regressed to noise under shape reconstruction
         # (delta * max(sigma_diag, 1e-2) + mu) — the unit-test pure-math guard
         # passes but the orchestrator's real-data path produces no signal.
-        non_normal = sum(
-            count for cell, count in report["cell_counts"].items()
-            if cell != "normal"
-        )
+        non_normal = sum(count for cell, count in report["cell_counts"].items() if cell != "normal")
         assert non_normal > 0, (
-            "All 4500 Berka entities classified 'normal' — math collapsed "
+            "All Berka entities classified 'normal' — math collapsed "
             "under sigma_floor=1e-2 shape reconstruction. Hidden-influencer "
             "guard test passes in pure-math but orchestrator end-to-end fails."
         )
@@ -84,11 +87,13 @@ class TestFindGroupInfluenceMcp:
             find_group_influence,
         )
 
-        ranked = json.loads(find_calibration_influencers(
-            pattern_id="account_behavior_pattern",
-            top_n=3,
-            classify="all",
-        ))
+        ranked = json.loads(
+            find_calibration_influencers(
+                pattern_id="account_behavior_pattern",
+                top_n=3,
+                classify="all",
+            )
+        )
         members = [e["entity_key"] for e in ranked["entries"][:3]]
         if len(members) < 2:
             pytest.skip("Need at least 2 entities to form a group")
@@ -97,7 +102,9 @@ class TestFindGroupInfluenceMcp:
             pattern_id="account_behavior_pattern",
             groups=[members[:2]],
         )
-        reports = json.loads(payload)
+        body = json.loads(payload)
+        assert "elapsed_ms" in body
+        reports = body["results"]
         assert isinstance(reports, list)
         assert len(reports) == 1
         r = reports[0]

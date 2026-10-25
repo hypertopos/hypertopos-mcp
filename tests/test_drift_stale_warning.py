@@ -76,4 +76,3 @@ class TestDriftStaleForecastWarning:
                 assert "stale_warning" in entry["drift_forecast"], (
                     f"{entry['primary_key']}: missing stale_warning"
                 )
-

@@ -4,7 +4,7 @@
 
 import argparse
 
-# Import tool modules to register them with the FastMCP instance
+# Import tool modules to register them with the MCPServer instance
 import hypertopos_mcp.tools.aggregation  # noqa: F401
 import hypertopos_mcp.tools.analysis  # noqa: F401
 import hypertopos_mcp.tools.detection  # noqa: F401
@@ -28,7 +28,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--transport",
         choices=("stdio", "http"),
         default="stdio",
-        help="Transport protocol (default: stdio). Use 'http' for the MCP streamable-HTTP transport.",
+        help=(
+            "Transport protocol (default: stdio). Use 'http' for the MCP streamable-HTTP transport."
+        ),
     )
     parser.add_argument(
         "--port",
@@ -36,14 +38,33 @@ def _build_parser() -> argparse.ArgumentParser:
         default=8080,
         help="TCP port for the HTTP transport (default: 8080). Ignored for stdio.",
     )
+    parser.add_argument(
+        "--session-idle-timeout",
+        type=float,
+        default=1800.0,
+        help=(
+            "Seconds an HTTP client session may stay idle before the server ends it "
+            "and closes its sphere (default: 1800). Ignored for stdio."
+        ),
+    )
+    parser.add_argument(
+        "--max-sessions",
+        type=int,
+        default=10000,
+        help="Most concurrent HTTP client sessions (default: 10000). Ignored for stdio.",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
     if args.transport == "http":
-        mcp.settings.port = args.port
-        mcp.run(transport="streamable-http")
+        mcp.run(
+            transport="streamable-http",
+            port=args.port,
+            session_idle_timeout=args.session_idle_timeout,
+            max_sessions=args.max_sessions,
+        )
     else:
         mcp.run(transport="stdio")
 

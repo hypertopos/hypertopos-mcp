@@ -5,13 +5,15 @@
 Validates: passthrough wiring to navigator, tier registration (must
 appear in _TOOL_TIERS as "base"), JSON error envelope on ValueError.
 """
+
 from __future__ import annotations
 
 import json
 from unittest.mock import MagicMock
 
-import hypertopos_mcp.tools.analysis  # noqa: F401 — register tools
 import pytest
+
+import hypertopos_mcp.tools.analysis  # noqa: F401 — register tools
 from hypertopos_mcp.server import _TOOL_TIERS, _state
 from hypertopos_mcp.tools.analysis import find_conformance_violations
 
@@ -79,9 +81,7 @@ def test_returns_json_error_on_value_error(fake_state):
     """Navigator-raised ValueError must surface as JSON error envelope,
     not an unhandled Python exception bubbling to the MCP framework.
     """
-    fake_state.find_conformance_violations.side_effect = ValueError(
-        "unknown pattern_id"
-    )
+    fake_state.find_conformance_violations.side_effect = ValueError("unknown pattern_id")
     body = find_conformance_violations("missing_pattern")
     result = json.loads(body)
     assert result["error"] == "unknown pattern_id"
