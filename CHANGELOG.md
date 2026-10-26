@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.3] — 2026-10-26
+
+### Fixed
+
+- HTTP sessions keyed by the `X-Hypertopos-Session` header, and the shared anonymous session, are ended after `--session-idle-timeout` of inactivity like transport sessions, closing their sphere; before, they stayed open for the life of the server.
+
 ## [0.9.2] — 2026-10-25
 
 ### Added

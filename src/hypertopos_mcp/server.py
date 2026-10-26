@@ -190,6 +190,7 @@ async def _serialize_tool_calls(ctx: Any, call_next: Callable[[Any], Any]) -> An
     only the tools of the session's phase; run a session's requests that read its
     state one at a time."""
     key = session_key(ctx)
+    evict_idle_header_sessions()
     if key.startswith("http:"):
         connection = ctx.session._connection
         if not connection.state.get("hypertopos_evict"):
@@ -360,6 +361,7 @@ class SessionState:
     data: dict[str, Any] = dataclasses.field(default_factory=_new_state)
     stats: dict[str, Any] = dataclasses.field(default_factory=_new_stats)
     lock: anyio.Lock = dataclasses.field(default_factory=anyio.Lock)
+    last_used: float = dataclasses.field(default_factory=time.monotonic)
 
 
 _LOCAL_KEY = "local"
@@ -404,6 +406,30 @@ def forget_session(key: str) -> None:
         _sessions.pop(key, None)
 
 
+# Sessions keyed by X-Hypertopos-Session (or the shared anonymous one) have no
+# connection whose end evicts them; they go after this many idle seconds, the
+# same timeout the HTTP transport applies to its own sessions.
+HEADER_SESSION_IDLE_SECONDS = 1800.0
+
+
+def set_header_session_idle_timeout(seconds: float) -> None:
+    """Idle seconds after which a header-keyed or anonymous session is evicted."""
+    global HEADER_SESSION_IDLE_SECONDS
+    HEADER_SESSION_IDLE_SECONDS = seconds
+
+
+def evict_idle_header_sessions() -> None:
+    """Evict header-keyed and anonymous sessions idle past the timeout.
+
+    A session with a call in progress (its lock held) stays.
+    """
+    cutoff = time.monotonic() - HEADER_SESSION_IDLE_SECONDS
+    for key, state in list(_sessions.items()):
+        header_keyed = key.startswith("header:") or key == "anonymous"
+        if header_keyed and state.last_used < cutoff and not state.lock.locked():
+            _evict_session(key)
+
+
 def _evict_session(key: str) -> None:
     """Close a client session's sphere and drop the session from the registry."""
     state = _sessions.pop(key, None)
@@ -433,6 +459,7 @@ async def _evict_session_when_idle(key: str) -> None:
 def session_scope(key: str) -> Iterator[SessionState]:
     """Run the enclosed block in session ``key`` (created on first use)."""
     state = _sessions.setdefault(key, SessionState(key))
+    state.last_used = time.monotonic()
     token = _current_session.set(state)
     try:
         yield state

@@ -301,3 +301,53 @@ def test_eviction_waits_for_a_running_call(open_berka_sphere: str) -> None:
     assert seen_during_call == ["active"], "the sphere must stay open until the call ends"
     assert session._manifest.status == "expired"
     assert "http:busy" not in _sessions
+
+
+def test_idle_header_sessions_are_evicted() -> None:
+    """Sessions keyed by X-Hypertopos-Session have no connection that ends, so the
+    server evicts them after the same idle timeout as HTTP sessions."""
+    import anyio
+
+    from hypertopos_mcp import server
+
+    closed: list[str] = []
+
+    class FakeSession:
+        def __init__(self, key: str) -> None:
+            self.key = key
+
+        def close(self, purge_temporal: bool = False) -> None:
+            closed.append(self.key)
+
+    def add(key: str, idle: float) -> server.SessionState:
+        state = server.SessionState(key)
+        state.data["session"] = FakeSession(key)
+        state.last_used -= idle
+        server._sessions[key] = state
+        return state
+
+    old = server.HEADER_SESSION_IDLE_SECONDS
+    server.set_header_session_idle_timeout(60.0)
+    try:
+        add("header:stale", 120.0)
+        add("anonymous", 120.0)
+        add("header:fresh", 5.0)
+        busy = add("header:busy", 120.0)
+        add("http:abc", 120.0)
+
+        async def sweep_while_busy() -> None:
+            async with busy.lock:
+                server.evict_idle_header_sessions()
+
+        anyio.run(sweep_while_busy)
+        assert "header:stale" not in server._sessions
+        assert "anonymous" not in server._sessions
+        assert sorted(closed) == ["anonymous", "header:stale"]
+        assert "header:fresh" in server._sessions
+        assert "header:busy" in server._sessions  # a running call keeps its session
+        assert "http:abc" in server._sessions  # ended by the SDK, not by this sweep
+        assert server._LOCAL_KEY in server._sessions
+    finally:
+        server.set_header_session_idle_timeout(old)
+        for key in ("header:fresh", "header:busy", "http:abc"):
+            server._sessions.pop(key, None)

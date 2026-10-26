@@ -13,7 +13,7 @@ import hypertopos_mcp.tools.navigation  # noqa: F401
 import hypertopos_mcp.tools.observability  # noqa: F401
 import hypertopos_mcp.tools.session  # noqa: F401
 import hypertopos_mcp.tools.smart  # noqa: F401
-from hypertopos_mcp.server import _unregister_phase2_tools, mcp
+from hypertopos_mcp.server import _unregister_phase2_tools, mcp, set_header_session_idle_timeout
 
 # Start in Phase 1 mode — only always-tier tools visible until open_sphere
 _unregister_phase2_tools()
@@ -43,7 +43,8 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=1800.0,
         help=(
-            "Seconds an HTTP client session may stay idle before the server ends it "
+            "Seconds an HTTP client session, including one keyed by the "
+            "X-Hypertopos-Session header, may stay idle before the server ends it "
             "and closes its sphere (default: 1800). Ignored for stdio."
         ),
     )
@@ -59,6 +60,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
     if args.transport == "http":
+        set_header_session_idle_timeout(args.session_idle_timeout)
         mcp.run(
             transport="streamable-http",
             port=args.port,
