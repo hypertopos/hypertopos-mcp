@@ -13,6 +13,9 @@ import json
 
 import pytest
 
+# Scored by delta_norm: the influencer classes are θ flips, refused on calibrated patterns.
+_PID = "account_bank_pairs_pattern"
+
 
 class TestFindCalibrationInfluencersMcp:
     def test_returns_valid_json_classify_all(self, open_berka_sphere):
@@ -20,13 +23,13 @@ class TestFindCalibrationInfluencersMcp:
         from hypertopos_mcp.tools.analysis import find_calibration_influencers
 
         payload = find_calibration_influencers(
-            pattern_id="account_behavior_pattern",
+            pattern_id=_PID,
             top_n=5,
             classify="all",
         )
         report = json.loads(payload)
-        expected = _state["sphere"]._sphere.patterns["account_behavior_pattern"].population_size
-        assert report["pattern_id"] == "account_behavior_pattern"
+        expected = _state["sphere"]._sphere.patterns[_PID].population_size
+        assert report["pattern_id"] == _PID
         assert report["population_size"] == expected
         assert sum(report["cell_counts"].values()) == expected
         assert len(report["entries"]) <= 5
@@ -56,7 +59,7 @@ class TestFindCalibrationInfluencersMcp:
         from hypertopos_mcp.tools.analysis import find_calibration_influencers
 
         payload = find_calibration_influencers(
-            pattern_id="account_behavior_pattern",
+            pattern_id=_PID,
             top_n=5,
             classify="hidden",
         )
@@ -68,7 +71,7 @@ class TestFindCalibrationInfluencersMcp:
         from hypertopos_mcp.tools.analysis import find_calibration_influencers
 
         payload = find_calibration_influencers(
-            pattern_id="account_behavior_pattern",
+            pattern_id=_PID,
             top_n=2,
             classify="all",
             verbose=True,
@@ -89,7 +92,7 @@ class TestFindGroupInfluenceMcp:
 
         ranked = json.loads(
             find_calibration_influencers(
-                pattern_id="account_behavior_pattern",
+                pattern_id=_PID,
                 top_n=3,
                 classify="all",
             )
@@ -99,7 +102,7 @@ class TestFindGroupInfluenceMcp:
             pytest.skip("Need at least 2 entities to form a group")
 
         payload = find_group_influence(
-            pattern_id="account_behavior_pattern",
+            pattern_id=_PID,
             groups=[members[:2]],
         )
         body = json.loads(payload)
@@ -111,3 +114,10 @@ class TestFindGroupInfluenceMcp:
         assert r["member_count"] == 2
         assert r["members"] == members[:2]
         assert isinstance(r["reinforcing_factor"], float)
+
+
+def test_calibrated_pattern_is_refused(open_berka_sphere):
+    from hypertopos_mcp.tools.analysis import find_calibration_influencers
+
+    with pytest.raises(ValueError, match="calibrated score"):
+        find_calibration_influencers(pattern_id="account_behavior_pattern", top_n=3)

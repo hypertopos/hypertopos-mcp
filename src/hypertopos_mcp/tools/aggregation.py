@@ -61,7 +61,7 @@ def aggregate(
     group_by_property: "line_id:property_name" for property-level grouping.
     group_by_line_2: second grouping line for multi-level GROUP BY.
     filters: [{"line": str, "key": str}] partition filters. time_from/time_to: ISO-8601 event date range.
-    geometry_filters: {"is_anomaly": bool, "delta_rank_pct": {"gt": N}, "delta_dim": {...}, "alias_inside": "id"}.
+    geometry_filters: {"is_anomaly": bool, "score_rank_pct": {"gt": N}, "delta_dim": {...}, "alias_inside": "id"}.
     property_filters: filter group_by_line entities ({"prop": {"op": "<", "value": N}}; op "in" takes a list).
     entity_filters: filter pattern's own entity line (same syntax as property_filters).
     event_filters: filter event line columns ({"col": {"gt": N}}, {"col": {"in": [...]}}). Null checks: {"col": null}.

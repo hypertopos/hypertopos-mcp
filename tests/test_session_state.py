@@ -24,13 +24,21 @@ def _ctx(*, session_id: str | None = None, request: object = None, headers: dict
         ({}, "local"),  # stdio / in-memory duplex: the process's own session
         ({"session_id": "abc"}, "http:abc"),  # stateful HTTP
         ({"headers": {"x-hypertopos-session": "agent-7"}}, "header:agent-7"),
-        ({"headers": {}}, "anonymous"),  # HTTP without any key
     ],
 )
 def test_session_key_resolution(ctx_kwargs: dict, expected: str) -> None:
     from hypertopos_mcp.server import session_key
 
     assert session_key(_ctx(**ctx_kwargs)) == expected
+
+
+def test_http_request_without_any_key_is_refused() -> None:
+    from mcp.shared.exceptions import MCPError
+
+    from hypertopos_mcp.server import session_key
+
+    with pytest.raises(MCPError, match="X-Hypertopos-Session"):
+        session_key(_ctx(headers={}))
 
 
 def test_sdk_still_exposes_the_connection_session_id() -> None:

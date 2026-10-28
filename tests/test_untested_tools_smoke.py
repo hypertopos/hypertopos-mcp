@@ -255,7 +255,7 @@ class TestCheckAnomalyBatch:
         for item in result["results"]:
             assert "primary_key" in item
             assert "is_anomaly" in item
-            assert "delta_rank_pct" in item
+            assert "score_rank_pct" in item
 
     def test_hard_cap_returns_error(self, open_berka_sphere):
         from hypertopos_mcp.tools.analysis import check_anomaly_batch

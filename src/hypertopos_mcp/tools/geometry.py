@@ -44,7 +44,11 @@ def get_polygon(pattern_id: str) -> str:
     """Build and return the polygon for the current Point position (call goto() first).
 
     Returns: delta vector, delta_norm, is_anomaly, alive edges, temporal_hint (anchor only).
-    When anomalous: includes anomaly_dimensions, witness set, and repair set.
+    Calibrated patterns (non-empty score_dims) add anomaly_score, conformal_p, score_rank_pct
+    and score_delta ({dim: rank-Gaussian coordinate} over score_dims); is_anomaly there is
+    conformal_p <= 1 - anomaly_percentile/100 and no theta_norm is reported.
+    Other patterns report theta_norm; when anomalous they add witness and repair sets.
+    When anomalous: anomaly_dimensions (largest shape-space |delta| dims).
     Endpoint properties of entity edges come in related_properties (one table per line).
     Compact format: delta_by_dim ({dim: value}) instead of the positional delta
     (kept when two dims share a label), dim-line edges folded into dim_edges; anchor
@@ -60,12 +64,26 @@ def get_polygon(pattern_id: str) -> str:
     entity_line_id = resolve_entity_line_id(sphere, pattern_id)
     [enriched] = enrich_polygons([sp], reader, sphere, entity_line_id)
     pattern = sphere.patterns[pattern_id]
-    enriched["theta_norm"] = round(pattern.theta_norm, 4)
-    if enriched.get("is_anomaly"):
-        labels = pattern.dim_labels
-        enriched["anomaly_dimensions"] = GDSEngine.anomaly_dimensions(enriched["delta"], labels)
-        enriched["witness"] = GDSEngine.witness_set(enriched["delta"], pattern.theta_norm, labels)
-        enriched["repair"] = GDSEngine.anti_witness(enriched["delta"], pattern.theta_norm, labels)
+    labels = pattern.dim_labels
+    if pattern.score_dims:
+        # Calibrated score: theta is not the boundary, so no theta-based
+        # witness / repair; the scored coordinates come labelled by dim.
+        if polygon.score_delta is not None:
+            enriched["score_delta"] = {
+                d: float(v) for d, v in zip(pattern.score_dims, polygon.score_delta, strict=True)
+            }
+        if enriched.get("is_anomaly"):
+            enriched["anomaly_dimensions"] = GDSEngine.anomaly_dimensions(enriched["delta"], labels)
+    else:
+        enriched["theta_norm"] = round(pattern.theta_norm, 4)
+        if enriched.get("is_anomaly"):
+            enriched["anomaly_dimensions"] = GDSEngine.anomaly_dimensions(enriched["delta"], labels)
+            enriched["witness"] = GDSEngine.witness_set(
+                enriched["delta"], pattern.theta_norm, labels
+            )
+            enriched["repair"] = GDSEngine.anti_witness(
+                enriched["delta"], pattern.theta_norm, labels
+            )
     # Temporal hint for anchor patterns
     if pattern.pattern_type == "anchor":
         try:
@@ -164,7 +182,7 @@ def get_event_polygons(
     """Find all event polygons that reference a given entity.
 
     filters: list of {"line": str, "key": str} partition filters.
-    geometry_filters: {"is_anomaly": bool, "delta_rank_pct": {"gt": N}, "delta_dim": {...}}.
+    geometry_filters: {"is_anomaly": bool, "score_rank_pct": {"gt": N}, "delta_dim": {...}}.
     sample/sample_pct/seed: random sampling controls.
     Returns: total, returned count, polygon list, properties (each event's own row: amount,
     date, ...) and related_properties (referenced entities, one table per line).

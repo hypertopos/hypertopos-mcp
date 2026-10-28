@@ -183,12 +183,17 @@ def timed[F: Callable[..., Any]](fn: F) -> F:
 # shares its Lance handles, so a session's tool calls run one at a time;
 # calls of different sessions run concurrently.
 _SERIALIZED_METHODS = frozenset({"tools/call", "resources/read", "prompts/get"})
+_SESSIONLESS_METHODS = frozenset({"server/discover"})
 
 
 async def _serialize_tool_calls(ctx: Any, call_next: Callable[[Any], Any]) -> Any:
     """Server middleware: bind the request to its client session; show and allow
     only the tools of the session's phase; run a session's requests that read its
     state one at a time."""
+    if ctx.method in _SESSIONLESS_METHODS:
+        # Capability discovery reads no session state; refusing it would break
+        # the client's connect instead of answering its first real request.
+        return await call_next(ctx)
     key = session_key(ctx)
     evict_idle_header_sessions()
     if key.startswith("http:"):
@@ -381,8 +386,10 @@ def session_key(ctx: Any) -> str:
 
     Stateful HTTP connections carry ``Mcp-Session-Id``; duplex transports
     (stdio, in-memory clients) have no HTTP request and map to the process's
-    own session; HTTP without a session id uses ``X-Hypertopos-Session`` when
-    sent, else one shared anonymous session.
+    own session; HTTP without a session id (a stateless embedding, or any
+    client on the stateless protocol) must send ``X-Hypertopos-Session``.
+    Such a request without the header is refused: two clients would
+    otherwise share one open sphere.
     """
     connection = getattr(getattr(ctx, "session", None), "_connection", None)
     session_id = getattr(connection, "session_id", None)
@@ -392,7 +399,14 @@ def session_key(ctx: Any) -> str:
     if request is None:
         return _LOCAL_KEY
     header = (getattr(request, "headers", None) or {}).get("x-hypertopos-session")
-    return f"header:{header}" if header else "anonymous"
+    if not header:
+        raise MCPError(
+            INVALID_PARAMS,
+            "This HTTP request carries no Mcp-Session-Id (stateless protocol): send an "
+            "X-Hypertopos-Session header naming your session, or connect with the "
+            "legacy (initialize) protocol.",
+        )
+    return f"header:{header}"
 
 
 def live_session_keys() -> list[str]:
@@ -406,7 +420,7 @@ def forget_session(key: str) -> None:
         _sessions.pop(key, None)
 
 
-# Sessions keyed by X-Hypertopos-Session (or the shared anonymous one) have no
+# Sessions keyed by X-Hypertopos-Session have no
 # connection whose end evicts them; they go after this many idle seconds, the
 # same timeout the HTTP transport applies to its own sessions.
 HEADER_SESSION_IDLE_SECONDS = 1800.0
@@ -419,13 +433,13 @@ def set_header_session_idle_timeout(seconds: float) -> None:
 
 
 def evict_idle_header_sessions() -> None:
-    """Evict header-keyed and anonymous sessions idle past the timeout.
+    """Evict header-keyed sessions idle past the timeout.
 
     A session with a call in progress (its lock held) stays.
     """
     cutoff = time.monotonic() - HEADER_SESSION_IDLE_SECONDS
     for key, state in list(_sessions.items()):
-        header_keyed = key.startswith("header:") or key == "anonymous"
+        header_keyed = key.startswith("header:")
         if header_keyed and state.last_used < cutoff and not state.lock.locked():
             _evict_session(key)
 

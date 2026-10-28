@@ -266,7 +266,9 @@ def _get_line_row_count(reader: GDSReader, line_id: str, version: int) -> int | 
 def get_sphere_info() -> str:
     """Return sphere schema: lines, patterns, aliases, active manifest.
 
-    Returns: per-line columns/has_fts_index, per-pattern relations,
+    Returns: per-line columns/has_fts_index, per-pattern relations and
+    anomaly_percentile (plus score_dims / score_axes on patterns with the
+    calibrated score, whose is_anomaly is conformal_p <= 1 - anomaly_percentile/100),
     per-alias has_cutting_plane, plus top-level ``label_aware_available``
     (True when the sphere carries a ``label_audit`` block). Builder-derived
     dimension lines (``_d_*``, key column only) are listed by name in
@@ -318,6 +320,12 @@ def get_sphere_info() -> str:
                 "type": pat.pattern_type,
                 "delta_dim": pat.delta_dim(),
                 "population_size": pat.population_size,
+                "anomaly_percentile": pat.anomaly_percentile,
+                **(
+                    {"score_dims": list(pat.score_dims), "score_axes": list(pat.score_axes or ())}
+                    if pat.score_dims
+                    else {}
+                ),
                 **({} if pat.description is None else {"description": pat.description}),
                 **(
                     {}

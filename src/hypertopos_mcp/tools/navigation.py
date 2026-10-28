@@ -14,7 +14,6 @@ from hypertopos_mcp._format import (
     compact_solid,
     drop_positional_deltas,
     json_default,
-    labelled,
     project_descriptive,
     sanitize_for_json,
     slim_polygons,
@@ -277,7 +276,7 @@ def emerge() -> str:
 @timed
 def find_anomalies(
     pattern_id: str,
-    radius: float = 1,
+    radius: float | None = None,
     top_n: int = 10,
     include_emerging: bool = False,
     offset: int = 0,
@@ -286,11 +285,9 @@ def find_anomalies(
     property_filters: dict[Any, Any] | None = None,
     fdr_alpha: float | None = None,
     fdr_method: str | None = None,
-    p_value_method: str = "chi2",
-    fdr_axis: str = "entity",
     fdr_resolution: str | None = None,
     fdr_temporal_resolution: str | None = None,
-    rank_by: str = "delta_norm",
+    rank_by: str | None = None,
     select: str = "top_norm",
     metric: str = "L2",
     min_confidence: float = 0.0,
@@ -300,32 +297,30 @@ def find_anomalies(
     summary: bool | None = None,
     rank_order: str = "desc",
 ) -> str:
-    """Find the most anomalous polygons in a pattern, ranked by delta_norm.
+    """Find the most anomalous polygons in a pattern, ranked by the pattern's own score.
 
-    metric: "L2" (default, pre-computed delta_norm) or "Linf" (max single-dimension |delta|).
-      Each result also carries bregman_divergence (distribution-aware) for comparison.
+    Calibrated patterns (non-empty score_dims in get_sphere_info): the selection is the stored is_anomaly (conformal_p <= 1 - anomaly_percentile/100, the calibrated alarm budget) and the order is conformal_p ascending, then anomaly_score descending (the same order within one calibration; rows added by incremental ingest are scored without the event axis, so only their p-values compare with built rows). ranked_by reports "anomaly_score" for this order. Each polygon carries anomaly_score, conformal_p and score_rank_pct (rank of anomaly_score in the population, 0-100). theta is not the boundary there, so radius, metric="Linf", dimension_weights, rank_by="delta_norm" / "signed_confidence", boundary_aware and min_confidence > 0 raise. Other patterns (event, GMM, discrete) rank by delta_norm against theta and accept every option.
 
-    radius: multiplier on theta_norm threshold (default 1). Higher = looser boundary.
-    include_emerging: append entities trending toward anomaly (requires temporal data).
+    radius: multiplier on the theta_norm threshold (default None = 1). Higher = looser boundary. Uncalibrated patterns only.
+    metric: "L2" (default, pre-computed delta_norm) or "Linf" (max single-dimension |delta|; uncalibrated patterns only).
+    include_emerging: append entities trending toward anomaly (requires temporal data). On calibrated patterns emerging is empty with emerging_note: the forecast tracks delta_norm against theta, which does not decide is_anomaly there.
     missing_edge_to: keep only anomalous entities with NO edge to this line.
-    rank_by_property: re-rank by a raw entity property instead of delta_norm.
+    rank_by_property: re-rank by a raw entity property instead of the score.
     rank_order: "desc" (default) or "asc" for rank_by_property — "asc" lists the lowest values first; missing values rank last.
     property_filters: filter by entity properties before ranking ({"col": {"gt": X}}, {"col": {"in": ["A", "B"]}}).
-    fdr_alpha: apply Benjamini-Hochberg FDR control at this level. Returns only entities with q_value <= alpha. Default None = legacy behavior.
-    fdr_method: "bh" (Benjamini-Hochberg assumes pi0=1) or "storey" (LSL estimator of true null proportion — shrinks q-values by pi0, typically recovers 10-15% more discoveries when combined with p_value_method="chi2" on spheres that have a genuine null mass). Default None — resolves to "bh" normally, "storey" when fdr_resolution / fdr_temporal_resolution is set on the entity axis (see fdr_resolution).
-    p_value_method: "chi2" (default and only accepted value — upper-tail chi-squared survival on ||delta||², df=dimensionality). Pair with fdr_method="storey" for power recovery.
-    fdr_axis: "entity" (default, current behaviour — flat FDR over per-entity p-values), "per_dim" (independent BH/Storey per dim using chi²(1) univariate per-cell p-values; keep entity iff any dim's q ≤ alpha), "both" (entity-level AND ≥1 dim survives per-dim FDR). Per-dim mode reduces inflation when one dim drives many anomalies; per-polygon q_values_per_dim ({dim: q}, dims with q = 1 omitted), min_q_per_dim, dominant_q_dim (dim name) attached for investigator drill-down. Warning: chi²(1) is direction-agnostic — both extreme-positive and extreme-negative deviations produce small p-values; on spheres with anti-signal dims (high |delta| correlated with non-fraud per per-dim label AUROC), per-dim mode flags both wings — combine with dimension_weights to silence anti-signal dims when labels exist.
-    fdr_resolution: optional spatial-hierarchy level name declared on the pattern's fdr_hierarchy. When set, survivors are gated to those whose cell at this level clears per-level BH/Storey FDR via hypergeom upper-tail on is_anomaly per cell. Requires fdr_alpha. Survivors gain cell_q_spatial and cell_path on the polygon entry. Use to localise anomalies to a geographic / segment region instead of a flat entity ranking. When set on the entity axis (default fdr_axis='entity'), an unspecified fdr_method (None) resolves to 'storey' instead of 'bh'; pass fdr_method='bh' explicitly to keep BH.
-    fdr_temporal_resolution: optional temporal-hierarchy level name declared on the pattern's fdr_temporal_hierarchy. Same semantics as fdr_resolution but for the temporal axis (e.g. hour / day / week). Same fdr_method default rule applies. Requires fdr_alpha. Survivors gain cell_q_temporal and cell_path. When both fdr_resolution and fdr_temporal_resolution are set, intersection-FDR applies — an entity survives iff its cell clears every named spatial level AND every named temporal level, and both cell_q_spatial and cell_q_temporal carry the conservative joint q (element-wise max across the cell's projections at each level).
-    rank_by: "delta_norm" (default), "min_q_per_dim" (sort survivors by smallest per-dim q-value ascending — requires fdr_alpha and fdr_axis in {"per_dim", "both"}; incompatible with select="diverse"), or "signed_confidence" (sort by delta_norm_signed × |lda_alignment| × (1 - reliability_penalty) descending where lda_alignment = (delta / ||delta||) · direction projects onto the Fisher LDA axis and reliability_penalty = 0.5 · single_dim_driven + 0.5 · low_confidence_bucket — requires a pattern rebuilt with sphere.yaml label_audit: enabled, fails with a structured error otherwise; incompatible with select="diverse"). Use signed_confidence to fuse delta_norm_signed, LDA direction alignment, and reliability_flags into one confidence-weighted ranking when labels are available.
+    fdr_alpha: level of the cell gate; requires fdr_resolution or fdr_temporal_resolution. There is no entity-level FDR: is_anomaly already is the calibrated alarm budget.
+    fdr_method: "storey" (default, LSL null-proportion estimator) or "bh" (Benjamini-Hochberg, pi0=1) for the cell gate.
+    fdr_resolution: spatial-hierarchy level name declared on the pattern's fdr_hierarchy. Survivors are gated to those whose cell at this level is enriched in is_anomaly (hypergeometric upper tail per cell, BH/Storey over cells). Requires fdr_alpha. Survivors gain cell_q_spatial and cell_path. Use to localise anomalies to a geographic / segment region instead of a flat entity ranking.
+    fdr_temporal_resolution: temporal-hierarchy level name declared on the pattern's fdr_temporal_hierarchy (e.g. hour / day / week). Same semantics on the temporal axis. Requires fdr_alpha. Survivors gain cell_q_temporal and cell_path. When both are set, an entity survives iff its cell clears every named spatial AND temporal level; cell_q_spatial and cell_q_temporal then carry the conservative joint q.
+    rank_by: None (default, the pattern's own score: conformal_p then anomaly_score on calibrated patterns, delta_norm otherwise), "delta_norm", or "signed_confidence" (delta_norm_signed × |lda_alignment| × (1 - reliability_penalty) descending, onto the Fisher LDA axis; requires a pattern rebuilt with sphere.yaml label_audit: enabled; incompatible with select="diverse"). Both explicit values: uncalibrated patterns only.
     select: "top_norm" (default, rank by score) or "diverse" (submodular facility location — K most diverse representatives with representativeness counts).
-    min_confidence: filter by bootstrap confidence threshold (0.0 = no filter). Requires bregman_calibration=True on the sphere.
-    dimension_weights: optional {dim_name: float} mapping to multiply each dim's contribution before computing the rank score. Default None = no weighting. Missing dims default to 1.0; explicit 0.0 silences a dim; empty {} is equivalent to None. Requires metric in ('L2', 'Linf'). Connects stratified correlation gate verdicts to runtime ranking — discount NOISE-classified dims via 0.0, down-weight HEAVY-TAIL dims via 0.5. When weights are active, only `delta_norm` on the returned polygons is the weighted rank score; `delta`, `is_anomaly`, `bregman_divergence`, and `delta_rank_pct` come from storage and reflect unweighted calibration.
+    min_confidence: filter by bootstrap confidence threshold (0.0 = no filter). Requires bregman_calibration=True on the sphere; uncalibrated patterns only.
+    dimension_weights: optional {dim_name: float} multipliers on each dim's contribution to delta_norm before ranking (missing dims 1.0, 0.0 silences a dim, {} = None). Uncalibrated patterns only. Only `delta_norm` on the returned polygons is the weighted score; `delta`, `is_anomaly`, `bregman_divergence` and `score_rank_pct` come from storage.
     sample_size: optional cap on geometry rows scanned. When set below the population size, a random sample is drawn before threshold filtering and ranking. Forces the in-process scan path. Default None = scan full population.
-    boundary_aware: when True (default False), stratified sampling allocates half the sample_size budget to entities within [0.8 * theta_norm, 1.2 * theta_norm] (boundary band), other half drawn from the rest of the population. Requires sample_size to be set. Useful for calibration audits where boundary cases are under-represented under uniform sampling.
-    summary: None (default) follows the session response_format — compact drops positional delta vectors (anomaly_dimensions and cluster labels stay) and numeric properties columns, listed in `omitted`; full keeps everything plus top-level dim_labels. False forces full. True drops delta, edges and properties entirely (smallest payload); retains primary_key, delta_norm, is_anomaly, delta_rank_pct, bregman_divergence, q_value family, reliability_flags, and anomaly_dimensions. Call get_polygon for full per-polygon detail.
+    boundary_aware: when True (default False), half the sample_size budget goes to entities within [0.8 * theta_norm, 1.2 * theta_norm], half to the rest. Requires sample_size; uncalibrated patterns only.
+    summary: None (default) follows the session response_format — compact drops positional delta vectors (anomaly_dimensions and cluster labels stay) and numeric properties columns, listed in `omitted`; full keeps everything plus top-level dim_labels. False forces full. True drops delta, edges and properties entirely (smallest payload); retains primary_key, delta_norm, anomaly_score, conformal_p, is_anomaly, score_rank_pct, bregman_divergence, cell gate fields, reliability_flags, and anomaly_dimensions. Call get_polygon for full per-polygon detail.
     The edges list (when present) is filtered to actual jumpable entity edges; degenerate dim-line edges with empty point_key are omitted for response size — call get_polygon to retrieve the full edge list including dim lines.
-    Returns: anomalous polygons with anomaly_dimensions, clusters, total_found.
+    Returns: anomalous polygons with anomaly_dimensions, clusters, total_found, found (polygons in this page), ranked_by.
     """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
@@ -357,10 +352,9 @@ def find_anomalies(
         top_n = cap
     # Delegate to navigator — handles subprocess fast path and emerging internally
     attract = nav.π5_attract_anomaly
-    r = radius if radius > 0 else None
     polygons, total_found, emerging, pi5_meta = attract(
         pattern_id,
-        radius=r,
+        radius=radius,
         top_n=top_n,
         offset=offset,
         missing_edge_to=missing_edge_to,
@@ -370,8 +364,6 @@ def find_anomalies(
         property_filters=property_filters,
         fdr_alpha=fdr_alpha,
         fdr_method=fdr_method,
-        p_value_method=p_value_method,
-        fdr_axis=fdr_axis,
         fdr_resolution=fdr_resolution,
         fdr_temporal_resolution=fdr_temporal_resolution,
         rank_by=rank_by,
@@ -387,16 +379,20 @@ def find_anomalies(
     entity_line_id = resolve_entity_line_id(sphere, pattern_id)
     enriched = enrich_polygons(serialized, reader, sphere, entity_line_id)
     labels = pattern.dim_labels
-    for ep in enriched:
+    for poly, ep in zip(polygons, enriched, strict=True):
         if ep.get("is_anomaly"):
+            # Calibrated patterns: the navigator attaches the evidence split.
+            calibrated_dims = getattr(poly, "anomaly_dimensions", None)
+            if calibrated_dims is not None:
+                ep["anomaly_dimensions"] = calibrated_dims
+                continue
             from hypertopos.engine.geometry import GDSEngine
 
             ep["anomaly_dimensions"] = GDSEngine.anomaly_dimensions(ep["delta"], labels)
-        _label_q_values(ep, labels)
 
-    # M4 additive: attach total_impact + classification per entry. Resolves
-    # to None per-entry when pattern is event-type, N<2, or storage backend
-    # lacks shape-reconstruction prerequisites.
+    # M4 additive: attach total_impact + classification per entry. Absent on
+    # event-type and calibrated patterns; None per-entry when N<2 or the storage
+    # backend lacks shape-reconstruction prerequisites.
     enriched = nav._attach_influence_fields_to_anomaly_entries(enriched, pattern_id)
 
     # F2a — trim degenerate edges (empty point_key = dim-line edges, not jumpable).
@@ -441,11 +437,13 @@ def find_anomalies(
             )
     result = {
         "pattern_id": pattern_id,
-        "radius": radius,
+        **({"radius": radius} if radius is not None else {}),
         "offset": offset,
         "total_found": total_found,
         "found": len(enriched),
-        "ranked_by": rank_by_property or rank_by,
+        "ranked_by": rank_by_property
+        or rank_by
+        or ("anomaly_score" if pattern.score_dims else "delta_norm"),
         **(pi5_meta if pi5_meta else {}),
         "polygons": enriched,
         **({"properties": properties_table} if properties_table else {}),
@@ -456,7 +454,7 @@ def find_anomalies(
             "Call anomaly_summary for population-wide cluster counts."
         ),
     }
-    if any("delta" in p or isinstance(p.get("q_values_per_dim"), list) for p in enriched):
+    if any("delta" in p for p in enriched):
         result["dim_labels"] = pattern.dim_labels
     if omitted:
         result["omitted"] = omitted
@@ -465,6 +463,11 @@ def find_anomalies(
 
     if emerging is not None:
         result["emerging"] = emerging
+        if pattern.score_dims:
+            result["emerging_note"] = (
+                "Not available on a calibrated pattern: the forecast tracks delta_norm "
+                "against theta, which does not decide is_anomaly here."
+            )
 
     _bgn = binary_geometry_note_for_pattern(pattern_id)
     if _bgn:
@@ -485,19 +488,6 @@ def find_anomalies(
             )
 
     return json.dumps(sanitize_for_json(result), indent=2, default=json_default)
-
-
-def _label_q_values(entry: dict[str, Any], labels: list[str]) -> None:
-    """Per-dim FDR fields by dim name: ``q_values_per_dim`` keeps only dims with q < 1.
-
-    Left positional when two dims share a label.
-    """
-    q_values = entry.get("q_values_per_dim")
-    by_dim = labelled(q_values, labels) if q_values is not None else None
-    if by_dim is None:
-        return
-    entry["q_values_per_dim"] = {d: q for d, q in by_dim.items() if q < 1.0}
-    entry["dominant_q_dim"] = labels[entry.pop("dominant_q_dim_idx")]
 
 
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
@@ -574,19 +564,13 @@ def attract_boundary(
     pattern_id: str,
     direction: str = "both",
     top_n: int = 10,
-    fdr_alpha: float | None = None,
-    fdr_method: str = "bh",
-    p_value_method: str = "chi2",
     select: str = "top_norm",
 ) -> str:
     """Find entities closest to an alias segment boundary (requires cutting_plane).
 
     direction: "in" (at risk of leaving), "out" (about to enter), or "both".
-    fdr_alpha: apply Benjamini-Hochberg FDR control at this level. Returns only entities with q_value <= alpha. Default None = legacy behavior.
-    fdr_method: "bh" (default, Benjamini-Hochberg assumes pi0=1) or "storey" (LSL null-proportion estimator; recovers 10-15% more discoveries when combined with p_value_method="chi2" on spheres with genuine null mass).
-    p_value_method: "chi2" (default and only accepted value — parametric χ² null on ||delta||²).
     select: "top_norm" (default, rank by score) or "diverse" (submodular facility location — K most diverse representatives with representativeness counts).
-    Returns: entities sorted by |signed_distance| ascending. Positive = inside segment.
+    Returns: entities sorted by |signed_distance| ascending (positive = inside segment), each with delta_norm, score_rank_pct and is_anomaly.
     """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
@@ -596,9 +580,6 @@ def attract_boundary(
         pattern_id,
         direction=direction,
         top_n=top_n,
-        fdr_alpha=fdr_alpha,
-        fdr_method=fdr_method,
-        p_value_method=p_value_method,
         select=select,
     )
 
@@ -609,14 +590,11 @@ def attract_boundary(
             "signed_distance": round(signed_dist, 4),
             "is_in_segment": signed_dist >= 0,
             "delta_norm": round(polygon.delta_norm, 4),
-            "delta_rank_pct": round(float(polygon.delta_rank_pct), 2)
-            if polygon.delta_rank_pct is not None
+            "score_rank_pct": round(float(polygon.score_rank_pct), 2)
+            if polygon.score_rank_pct is not None
             else None,  # noqa: E501
             "is_anomaly": polygon.is_anomaly,
         }
-        q_value = getattr(polygon, "q_value", None)
-        if q_value is not None:
-            entry["q_value"] = float(q_value)
         representativeness = getattr(polygon, "representativeness", None)
         if representativeness is not None:
             entry["representativeness"] = int(representativeness)

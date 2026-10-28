@@ -1,88 +1,67 @@
 {
   "explain_anomaly": {
-    "conformal_p": 0.008264,
-    "delta_norm": 34.3107,
-    "ratio": 1.58,
-    "repair": {
-      "repair_dims": [
-        {
-          "delta_value": 24.8196,
-          "dim": 5,
-          "label": "_d_burst_daily"
-        },
-        {
-          "delta_value": -16.278,
-          "dim": 1,
-          "label": "_d_n_distinct_banks"
-        }
-      ],
-      "repair_size": 2,
-      "residual_norm": 17.2115
+    "anomaly_score": 0.9793388,
+    "axes": {
+      "mahal": {
+        "bits": 4.9307,
+        "rank": 0.9793
+      }
     },
-    "severity": "high",
+    "bits": 4.9307,
+    "conformal_p": 0.03278688,
+    "delta_norm": 34.3107,
+    "severity": "low",
     "temporal_slices": 25,
-    "theta_norm": 21.6675,
     "top_dimensions": [
       {
-        "delta": 24.8196,
-        "dim": "_d_burst_daily",
-        "kind": "poisson",
-        "pct_of_total": 0.5233
+        "bits": 1.2484,
+        "dim": "n_distinct_banks",
+        "pct_of_total": 0.2532,
+        "z": -1.877
       },
       {
-        "delta": -16.278,
-        "dim": "_d_n_distinct_banks",
-        "kind": "poisson",
-        "pct_of_total": 0.2251
+        "bits": 1.1626,
+        "dim": "tx_count",
+        "pct_of_total": 0.2358,
+        "z": -1.1305
       },
       {
-        "delta": 16.1628,
-        "dim": "_d_burst_weekly",
-        "kind": "poisson",
-        "pct_of_total": 0.2219
+        "bits": 1.0482,
+        "dim": "burst_daily",
+        "pct_of_total": 0.2126,
+        "z": 2.0016
       },
       {
-        "delta": 5.6344,
-        "dim": "_d_burst_monthly",
-        "kind": "poisson",
-        "pct_of_total": 0.027
+        "bits": 0.5526,
+        "dim": "burst_monthly",
+        "pct_of_total": 0.1121,
+        "z": 1.6855
       },
       {
-        "delta": -1.1636,
-        "dim": "_d_tx_count",
-        "kind": "poisson",
-        "pct_of_total": 0.0012
+        "bits": 0.4982,
+        "dim": "burst_weekly",
+        "pct_of_total": 0.101,
+        "z": 1.8129
       },
       {
-        "delta": -1.125,
-        "dim": "_d_n_standing_orders_derived",
-        "kind": "poisson",
-        "pct_of_total": 0.0011
+        "bits": 0.2176,
+        "dim": "n_standing_orders_derived",
+        "pct_of_total": 0.0441,
+        "z": -0.9215
       },
       {
-        "delta": -0.6722,
-        "dim": "_d_n_categories",
-        "kind": "poisson",
-        "pct_of_total": 0.0004
+        "bits": 0.1269,
+        "dim": "n_categories",
+        "pct_of_total": 0.0257,
+        "z": -0.6175
       },
       {
-        "delta": -0.4286,
-        "dim": "_d_n_operations",
-        "kind": "poisson",
-        "pct_of_total": 0.0002
+        "bits": 0.0762,
+        "dim": "n_operations",
+        "pct_of_total": 0.0155,
+        "z": -0.2886
       }
-    ],
-    "witness": {
-      "delta_norm": 34.3107,
-      "witness_dims": [
-        {
-          "delta_value": 24.8196,
-          "dim": 5,
-          "label": "_d_burst_daily"
-        }
-      ],
-      "witness_size": 1
-    }
+    ]
   },
   "graph_geometry_tension": {
     "hidden_cluster": [
@@ -120,8 +99,8 @@
   "pattern_id": "account_behavior_pattern",
   "polygon": {
     "delta_norm": 34.31067,
-    "delta_rank_pct": 99.17355,
-    "is_anomaly": true
+    "is_anomaly": true,
+    "score_rank_pct": 97.52066
   },
   "primary_key": "85",
   "reliability_flags": {
@@ -139,33 +118,33 @@
       "children": [],
       "entity_key": "85",
       "evidence": {
-        "conformal_p": 0.008264,
+        "conformal_p": 0.03278688,
         "delta_norm": 34.3107,
         "top_dimensions": [
           {
-            "delta": 24.8196,
-            "dim": "_d_burst_daily",
-            "kind": "poisson",
-            "pct_of_total": 0.5233
+            "bits": 1.2484,
+            "dim": "n_distinct_banks",
+            "pct_of_total": 0.2532,
+            "z": -1.877
           },
           {
-            "delta": -16.278,
-            "dim": "_d_n_distinct_banks",
-            "kind": "poisson",
-            "pct_of_total": 0.2251
+            "bits": 1.1626,
+            "dim": "tx_count",
+            "pct_of_total": 0.2358,
+            "z": -1.1305
           },
           {
-            "delta": 16.1628,
-            "dim": "_d_burst_weekly",
-            "kind": "poisson",
-            "pct_of_total": 0.2219
+            "bits": 1.0482,
+            "dim": "burst_daily",
+            "pct_of_total": 0.2126,
+            "z": 2.0016
           }
         ]
       },
       "role": "root",
-      "severity": "high"
+      "severity": "low"
     },
-    "summary": "Entity 85 is high in account_behavior_pattern; primary witness: _d_burst_daily; branches found: none; 0 nodes.",
+    "summary": "Entity 85 is low in account_behavior_pattern; primary witness: n_distinct_banks; branches found: none; 0 nodes.",
     "truncated": false
   },
   "steps_status": {

@@ -1,17 +1,57 @@
 {
   "hits": [
     {
-      "primary_key": "112",
+      "interpretation_ref": "t1",
+      "primary_key": "85",
+      "score": 2,
+      "sources": {
+        "account_behavior_pattern": {
+          "anomalous_count": 1,
+          "anomaly_intensity": 1.1409,
+          "max_delta_norm": 34.3107,
+          "related_count": 1
+        },
+        "account_stress_pattern": {
+          "anomalous_count": 1,
+          "anomaly_intensity": 1.4843,
+          "max_delta_norm": 6.4546,
+          "related_count": 1
+        }
+      },
+      "weighted_score": 2.6252
+    },
+    {
+      "interpretation_ref": "t1",
+      "primary_key": "93",
+      "score": 2,
+      "sources": {
+        "account_behavior_pattern": {
+          "anomalous_count": 1,
+          "anomaly_intensity": 1.0664,
+          "max_delta_norm": 34.3011,
+          "related_count": 1
+        },
+        "account_stress_pattern": {
+          "anomalous_count": 1,
+          "anomaly_intensity": 1.3082,
+          "max_delta_norm": 4.8114,
+          "related_count": 1
+        }
+      },
+      "weighted_score": 2.3746
+    },
+    {
+      "primary_key": "16",
       "score": 1,
       "sources": {
         "account_stress_pattern": {
           "anomalous_count": 1,
-          "anomaly_intensity": 4.9312,
-          "max_delta_norm": 101.8591,
+          "anomaly_intensity": 1.7853,
+          "max_delta_norm": 20.656,
           "related_count": 1
         }
       },
-      "weighted_score": 4.9312
+      "weighted_score": 1.7853
     },
     {
       "primary_key": "15",
@@ -19,125 +59,102 @@
       "sources": {
         "account_stress_pattern": {
           "anomalous_count": 1,
-          "anomaly_intensity": 2.2739,
+          "anomaly_intensity": 1.6092,
           "max_delta_norm": 46.9703,
           "related_count": 1
         }
       },
-      "weighted_score": 2.2739
-    },
-    {
-      "primary_key": "4",
-      "score": 1,
-      "sources": {
-        "account_stress_pattern": {
-          "anomalous_count": 1,
-          "anomaly_intensity": 1.9107,
-          "max_delta_norm": 39.4679,
-          "related_count": 1
-        }
-      },
-      "weighted_score": 1.9107
-    },
-    {
-      "primary_key": "97",
-      "score": 1,
-      "sources": {
-        "account_stress_pattern": {
-          "anomalous_count": 1,
-          "anomaly_intensity": 1.8777,
-          "max_delta_norm": 38.7857,
-          "related_count": 1
-        }
-      },
-      "weighted_score": 1.8777
-    },
-    {
-      "primary_key": "32",
-      "score": 1,
-      "sources": {
-        "account_stress_pattern": {
-          "anomalous_count": 1,
-          "anomaly_intensity": 1.7847,
-          "max_delta_norm": 36.8657,
-          "related_count": 1
-        }
-      },
-      "weighted_score": 1.7847
-    },
-    {
-      "primary_key": "7",
-      "score": 1,
-      "sources": {
-        "account_stress_pattern": {
-          "anomalous_count": 1,
-          "anomaly_intensity": 1.758,
-          "max_delta_norm": 36.3126,
-          "related_count": 1
-        }
-      },
-      "weighted_score": 1.758
-    },
-    {
-      "primary_key": "27",
-      "score": 1,
-      "sources": {
-        "account_stress_pattern": {
-          "anomalous_count": 1,
-          "anomaly_intensity": 1.5863,
-          "max_delta_norm": 32.7657,
-          "related_count": 1
-        }
-      },
-      "weighted_score": 1.5863
-    },
-    {
-      "primary_key": "85",
-      "score": 1,
-      "sources": {
-        "account_behavior_pattern": {
-          "anomalous_count": 1,
-          "anomaly_intensity": 1.5835,
-          "max_delta_norm": 34.3107,
-          "related_count": 1
-        }
-      },
-      "weighted_score": 1.5835
-    },
-    {
-      "primary_key": "93",
-      "score": 1,
-      "sources": {
-        "account_behavior_pattern": {
-          "anomalous_count": 1,
-          "anomaly_intensity": 1.5831,
-          "max_delta_norm": 34.3011,
-          "related_count": 1
-        }
-      },
-      "weighted_score": 1.5831
+      "weighted_score": 1.6092
     },
     {
       "primary_key": "72",
       "score": 1,
       "sources": {
-        "account_behavior_pattern": {
+        "account_stress_pattern": {
           "anomalous_count": 1,
-          "anomaly_intensity": 1.5399,
-          "max_delta_norm": 33.3662,
+          "anomaly_intensity": 1.3874,
+          "max_delta_norm": 5.5111,
           "related_count": 1
         }
       },
-      "weighted_score": 1.5399
+      "weighted_score": 1.3874
+    },
+    {
+      "primary_key": "20",
+      "score": 1,
+      "sources": {
+        "account_behavior_pattern": {
+          "anomalous_count": 1,
+          "anomaly_intensity": 1.3722,
+          "max_delta_norm": 21.6675,
+          "related_count": 1
+        }
+      },
+      "weighted_score": 1.3722
+    },
+    {
+      "primary_key": "3",
+      "score": 1,
+      "sources": {
+        "account_stress_pattern": {
+          "anomalous_count": 1,
+          "anomaly_intensity": 1.2413,
+          "max_delta_norm": 22.9088,
+          "related_count": 1
+        }
+      },
+      "weighted_score": 1.2413
+    },
+    {
+      "primary_key": "42",
+      "score": 1,
+      "sources": {
+        "account_behavior_pattern": {
+          "anomalous_count": 1,
+          "anomaly_intensity": 1.2369,
+          "max_delta_norm": 15.6358,
+          "related_count": 1
+        }
+      },
+      "weighted_score": 1.2369
+    },
+    {
+      "primary_key": "12",
+      "score": 1,
+      "sources": {
+        "account_stress_pattern": {
+          "anomalous_count": 1,
+          "anomaly_intensity": 1.1833,
+          "max_delta_norm": 14.2547,
+          "related_count": 1
+        }
+      },
+      "weighted_score": 1.1833
+    },
+    {
+      "primary_key": "112",
+      "score": 1,
+      "sources": {
+        "account_stress_pattern": {
+          "anomalous_count": 1,
+          "anomaly_intensity": 1.1321,
+          "max_delta_norm": 101.8591,
+          "related_count": 1
+        }
+      },
+      "weighted_score": 1.1321
     }
   ],
   "home_line_id": "accounts",
+  "interpretations": {
+    "t1": "anomalous across all 2 sources \u2014 coordinated multi-pattern anomaly"
+  },
   "scoring": "count",
   "sources_summary": {
-    "account_behavior_pattern": 7,
-    "account_stress_pattern": 14
+    "account_behavior_pattern": 5,
+    "account_stress_pattern": 11
   },
   "threshold": 1,
   "total_entities": 121,
-  "total_flagged": 21
+  "total_flagged": 14
 }

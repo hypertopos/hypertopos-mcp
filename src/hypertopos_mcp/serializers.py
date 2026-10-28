@@ -43,11 +43,24 @@ def _serialize_polygon(poly: Any) -> dict[str, Any]:
         "delta": [round(float(x), 4) for x in poly.delta],
         "delta_norm": round(float(poly.delta_norm), 4),
         **(
-            {"delta_rank_pct": round(float(poly.delta_rank_pct), 2)}
-            if poly.delta_rank_pct is not None
+            {"score_rank_pct": round(float(poly.score_rank_pct), 2)}
+            if poly.score_rank_pct is not None
             else {}
         ),
         "is_anomaly": bool(poly.is_anomaly),
+        # Calibrated evidence score: the fused score (omitted when it only
+        # repeats delta_norm) and its conformal p-value, both unrounded.
+        **(
+            {"anomaly_score": float(poly.anomaly_score)}
+            if getattr(poly, "anomaly_score", None) is not None
+            and float(poly.anomaly_score) != float(poly.delta_norm)
+            else {}
+        ),
+        **(
+            {"conformal_p": float(poly.conformal_p)}
+            if getattr(poly, "conformal_p", None) is not None
+            else {}
+        ),
         **(
             {"bregman_divergence": round(float(poly.bregman_divergence), 4)}
             if getattr(poly, "bregman_divergence", None) is not None
@@ -62,16 +75,6 @@ def _serialize_polygon(poly: Any) -> dict[str, Any]:
         "alive_edges": len(alive),
         "edges": [_serialize_edge(e) for e in alive],
     }
-    # FDR q-value (set by navigator when fdr_alpha is used)
-    q_value = getattr(poly, "q_value", None)
-    if q_value is not None:
-        result["q_value"] = float(q_value)
-    # Per-dim FDR (set by navigator when fdr_axis in {"per_dim", "both"})
-    min_q_per_dim = getattr(poly, "min_q_per_dim", None)
-    if min_q_per_dim is not None:
-        result["min_q_per_dim"] = float(min_q_per_dim)
-        result["dominant_q_dim_idx"] = int(poly.dominant_q_dim_idx)
-        result["q_values_per_dim"] = [float(q) for q in poly.q_values_per_dim]
     # Representativeness count (set by navigator when select="diverse")
     representativeness = getattr(poly, "representativeness", None)
     if representativeness is not None:

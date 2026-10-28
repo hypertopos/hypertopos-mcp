@@ -25,11 +25,11 @@ All server state lives in a client session: the open sphere and its `HyperSessio
 | Request | Session key |
 |---------|-------------|
 | stdio (or an in-memory client) | `local` — the process's single session |
-| HTTP (`--transport http`) with `Mcp-Session-Id` | `http:<id>` — a request without a session id is rejected |
-| Stateless embedding (`mcp.streamable_http_app(stateless_http=True)`) with an `X-Hypertopos-Session` header | `header:<value>` |
-| Stateless embedding without that header | `anonymous` — one session shared by every such request |
+| HTTP (`--transport http`) with `Mcp-Session-Id` | `http:<id>` |
+| HTTP without `Mcp-Session-Id` (the stateless protocol, or a stateless embedding `mcp.streamable_http_app(stateless_http=True)`) with an `X-Hypertopos-Session` header | `header:<value>` |
+| HTTP without either | refused with an error naming `X-Hypertopos-Session` |
 
-The two stateless rows apply only to a host that mounts the app itself in stateless mode; `--transport http` always runs stateful. Header-keyed and anonymous sessions are not evicted by `--session-idle-timeout` or counted by `--max-sessions`.
+Clients on the stateless protocol (no session handshake, no `Mcp-Session-Id`) must name their session with `X-Hypertopos-Session`; a client that sends neither is refused at its first session request (capability discovery still answers); clients on the session (initialize) protocol keep their `http:<id>` session. Requests that carry no key are refused rather than served from one shared session, so two clients never share an open sphere. Header-keyed sessions are not counted by `--max-sessions`; they are evicted after `--session-idle-timeout` of inactivity. The `X-Hypertopos-Session` value is the session's only credential: use a random, unguessable value (for example a UUID4). It is not authentication, and two clients that send the same value share one session and its open sphere.
 
 `get_session_stats` reports the caller's `session_key` and `sessions_live` (sessions with a sphere open). Tool calls, resource reads and prompt requests of one session run one at a time; those of different sessions run concurrently. When an HTTP session ends — the client disconnects or the idle timeout passes — the server closes its sphere and forgets it; `close_sphere` also forgets the calling session. `open_sphere(force_reload=True)` reloads modules every session shares, so it is refused while another session has a sphere open.
 
@@ -304,9 +304,12 @@ When adding a new MCP tool:
 ### Anomaly counting consistency
 
 All tools that count anomalies (`sphere_overview`, `anomaly_summary`, `find_anomalies`,
-`aggregate_anomalies`, `detect_data_quality_issues`) use the same method: `delta_norm >= theta_norm`
-(live filter on geometry). This ensures consistent counts across tools, including for patterns
-with `group_by_property` where per-group thetas differ from the global theta.
+`aggregate_anomalies`, `detect_data_quality_issues`, `compare_branches`) use the same rule:
+
+- **Calibrated patterns** (non-empty `score_dims`): count entities with `is_anomaly = true` — the stored alarm-budget flag set by the conformal score at build / recalibration time. `sphere_overview` reports `anomaly_rate_source = "is_anomaly"` for these patterns.
+- **Other patterns**: live filter `delta_norm >= theta_norm` on geometry. `sphere_overview` reports `anomaly_rate_source = "delta_norm_scan"`. Patterns with `group_by_property` use the global theta here, consistent with `anomaly_summary` and `find_anomalies`.
+
+The two rules share a single implementation path that all of the tools above delegate to. Mixing them (e.g. reading `is_anomaly` on an uncalibrated pattern that uses per-group thresholds) would give inconsistent counts — the split is intentional.
 
 ### passive_scan source types
 

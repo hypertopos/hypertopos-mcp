@@ -427,10 +427,10 @@ class TestCompareEntities:
             "distance": 0.5,
             "interpretation": "similar",
             "delta_norm_a": 1.2,
-            "delta_rank_pct_a": 55.0,
+            "score_rank_pct_a": 55.0,
             "is_anomaly_a": False,
             "delta_norm_b": 0.8,
-            "delta_rank_pct_b": 30.0,
+            "score_rank_pct_b": 30.0,
             "is_anomaly_b": False,
         }
         _state["sphere"] = MagicMock()
@@ -1969,7 +1969,7 @@ class TestFindSimilarEntities:
         nav_mock.get_entity_geometry_meta.return_value = {
             "delta_norm": 1.23,
             "is_anomaly": False,
-            "delta_rank_pct": 40.0,
+            "score_rank_pct": 40.0,
         }
 
         reader_mock = MagicMock()
@@ -2023,7 +2023,7 @@ class TestFindSimilarEntities:
                 _state[k] = None
 
     def _make_similar_state(
-        self, nav_mock, similar_pairs, ref_is_anomaly=False, ref_delta_rank_pct=30.0
+        self, nav_mock, similar_pairs, ref_is_anomaly=False, ref_score_rank_pct=30.0
     ):
         from hypertopos_mcp.server import _state
 
@@ -2031,7 +2031,7 @@ class TestFindSimilarEntities:
         nav_mock.get_entity_geometry_meta.return_value = {
             "delta_norm": 1.0,
             "is_anomaly": ref_is_anomaly,
-            "delta_rank_pct": ref_delta_rank_pct,
+            "score_rank_pct": ref_score_rank_pct,
         }
 
         reader_mock = MagicMock()
@@ -2136,7 +2136,7 @@ class TestFindSimilarEntities:
         from hypertopos_mcp.tools.analysis import find_similar_entities
 
         nav_mock = MagicMock()
-        self._make_similar_state(nav_mock, [], ref_is_anomaly=False, ref_delta_rank_pct=42.5)
+        self._make_similar_state(nav_mock, [], ref_is_anomaly=False, ref_score_rank_pct=42.5)
 
         try:
             result = json.loads(
@@ -3395,18 +3395,24 @@ def test_every_tool_response_has_elapsed_ms(open_berka_sphere):
     assert result["elapsed_ms"] >= 0.0
 
 
-def test_get_polygon_includes_theta_norm(open_berka_sphere):
-    """get_polygon response must include theta_norm for the requested pattern."""
+def test_get_polygon_on_calibrated_pattern_reports_score_not_theta(open_berka_sphere):
+    """On a calibrated pattern theta is not the boundary: get_polygon reports the
+    score layer (conformal_p, score_rank_pct, score_delta by dim) and no
+    theta_norm / witness / repair."""
     import json
 
+    from hypertopos_mcp.server import _state
     from hypertopos_mcp.tools.geometry import get_polygon
     from hypertopos_mcp.tools.navigation import goto
 
+    pattern = _state["sphere"]._sphere.patterns["account_behavior_pattern"]
     goto("1", "accounts")
     result = json.loads(get_polygon("account_behavior_pattern"))
-    assert "theta_norm" in result, "theta_norm missing from get_polygon response"
-    assert isinstance(result["theta_norm"], float)
-    assert result["theta_norm"] > 0.0
+    for key in ("theta_norm", "witness", "repair"):
+        assert key not in result
+    assert 0.0 < result["conformal_p"] <= 1.0
+    assert "score_rank_pct" in result
+    assert set(result["score_delta"]) == set(pattern.score_dims)
 
 
 def test_get_solid_includes_theta_norm(open_berka_sphere):
@@ -5542,7 +5548,7 @@ class TestFindSimilarEntitiesMissingEdgeTo:
         nav_mock.get_entity_geometry_meta.return_value = {
             "delta_norm": 1.0,
             "is_anomaly": False,
-            "delta_rank_pct": 30.0,
+            "score_rank_pct": 30.0,
         }
         self._make_state_with_nav(nav_mock)
 
@@ -5577,7 +5583,7 @@ class TestFindSimilarEntitiesMissingEdgeTo:
         nav_mock.get_entity_geometry_meta.return_value = {
             "delta_norm": 1.0,
             "is_anomaly": False,
-            "delta_rank_pct": 30.0,
+            "score_rank_pct": 30.0,
         }
         self._make_state_with_nav(nav_mock)
 

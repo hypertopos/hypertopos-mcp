@@ -259,10 +259,10 @@ def test_enrichment_keeps_structural_edge_fields() -> None:
     }
 
 
-# --- q-value precision ---------------------------------------------------------------
+# --- p-value precision ---------------------------------------------------------------
 
 
-def test_small_q_values_survive_serialization() -> None:
+def test_small_p_and_q_values_survive_serialization() -> None:
     from hypertopos_mcp.serializers import _serialize_polygon
 
     poly = SimpleNamespace(
@@ -270,41 +270,40 @@ def test_small_q_values_survive_serialization() -> None:
         pattern_id="p",
         delta=np.array([0.5], dtype=np.float32),
         delta_norm=0.5,
-        delta_rank_pct=None,
+        score_rank_pct=None,
         is_anomaly=True,
         edges=[],
         alive_edges=lambda: [],
-        q_value=3e-9,
-        min_q_per_dim=2e-10,
-        dominant_q_dim_idx=0,
-        q_values_per_dim=[2e-10],
+        conformal_p=3e-9,
         cell_q_spatial=4e-8,
         cell_q_temporal=5e-8,
     )
     out = server._compact_numbers(json.loads(json.dumps(_serialize_polygon(poly))))
-    assert out["q_value"] == pytest.approx(3e-9)
-    assert out["min_q_per_dim"] == pytest.approx(2e-10)
-    assert out["q_values_per_dim"] == [pytest.approx(2e-10)]
+    assert out["conformal_p"] == pytest.approx(3e-9)
     assert out["cell_q_spatial"] == pytest.approx(4e-8)
     assert out["cell_q_temporal"] == pytest.approx(5e-8)
 
 
-def test_attract_boundary_keeps_small_q_value(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_attract_boundary_reports_score_rank_and_no_q_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from hypertopos_mcp.tools.navigation import attract_boundary
 
     nav = MagicMock()
     poly = SimpleNamespace(
         primary_key="a1",
         delta_norm=0.5,
-        delta_rank_pct=None,
+        score_rank_pct=42.0,
         is_anomaly=False,
-        q_value=3e-9,
         representativeness=None,
     )
     nav.π6_attract_boundary.return_value = [(poly, 0.1)]
     monkeypatch.setitem(_state, "navigator", nav)
     out = json.loads(attract_boundary("alias", "pat_a"))
-    assert out["results"][0]["q_value"] == pytest.approx(3e-9)
+    entry = out["results"][0]
+    assert entry["score_rank_pct"] == 42.0
+    assert "q_value" not in entry
+    assert set(nav.π6_attract_boundary.call_args.kwargs) == {"direction", "top_n", "select"}
 
 
 def test_keyword_plan_with_three_same_name_motif_steps_keeps_every_result(

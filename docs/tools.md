@@ -80,7 +80,7 @@ Returns full schema: lines, patterns, aliases, column schemas, and FTS index ava
 |-----------|------|---------|-------------|
 | _(none)_ | — | — | — |
 
-**Returns:** `lines[]` (with `columns` — a `{name: type}` map — and `total_rows`), `derived_dimension_lines` (names of the builder-derived `_d_*` dimension lines, which hold only a key column, instead of one `lines` entry each), `patterns[]` (with `relations[]`, `event_dimensions[]`), `aliases[]`, `label_aware_available`
+**Returns:** `lines[]` (with `columns` — a `{name: type}` map — and `total_rows`), `derived_dimension_lines` (names of the builder-derived `_d_*` dimension lines, which hold only a key column, instead of one `lines` entry each), `patterns[]` (with `relations[]`, `event_dimensions[]`, `anomaly_percentile`, and on calibrated patterns `score_dims` — the dimensions the calibrated score is computed on — and `score_axes`), `aliases[]`, `label_aware_available`
 
 **Notes:** `columns` per line lists all searchable entity properties. `total_rows` is the entity count. `has_fts_index` on each line indicates FTS availability. `relations[].edge_max > 0` means that relation uses continuous edges (see [Continuous Edges](#continuous-edges)). `label_aware_available` is `true` when the sphere carries a top-level `label_audit` block (format 3.1+) and `false` otherwise.
 
@@ -94,7 +94,7 @@ Returns performance and cache statistics for the current session.
 |-----------|------|---------|-------------|
 | _(none)_ | — | — | — |
 
-**Returns:** `total_tool_calls`, `total_elapsed_ms`, `wall_clock_ms`, `per_tool`, `response_format` (the active format), `session_key` (this client session: `local` on stdio, `http:<id>` / `header:<value>` / `anonymous` over HTTP), `sessions_live` (client sessions with a sphere open), plus a `points_handle_cache` block (`points_handle_cache_hits` / `points_handle_cache_misses`) that reports whether repeated entity lookups reuse the open dataset handle. With a sphere open it also returns `snapshot`: `{pinned_at, stale, metadata_changed, pinned_versions, latest_versions, hint}`. The session reads the sphere as it was when `open_sphere` ran; `stale: true` means another process changed it since (an ingest or recalibration), and `hint` says to call `open_sphere(path)` to read the newer state.
+**Returns:** `total_tool_calls`, `total_elapsed_ms`, `wall_clock_ms`, `per_tool`, `response_format` (the active format), `session_key` (this client session: `local` on stdio, `http:<id>` / `header:<value>` over HTTP), `sessions_live` (client sessions with a sphere open), plus a `points_handle_cache` block (`points_handle_cache_hits` / `points_handle_cache_misses`) that reports whether repeated entity lookups reuse the open dataset handle. With a sphere open it also returns `snapshot`: `{pinned_at, stale, metadata_changed, pinned_versions, latest_versions, hint}`. The session reads the sphere as it was when `open_sphere` ran; `stale: true` means another process changed it since (an ingest or recalibration), and `hint` says to call `open_sphere(path)` to read the newer state.
 
 ---
 
@@ -119,8 +119,9 @@ Population summary for all patterns (or one pattern). Returns anomaly rates, cal
 |-------|-------------|
 | `pattern_id` | Pattern identifier |
 | `entity_count` | Total entities in the pattern |
-| `anomaly_rate` | Fraction of entities above theta_norm |
-| `theta_norm` | Anomaly threshold in z-score space |
+| `anomaly_rate` | Fraction of entities flagged as anomalous: on calibrated patterns (non-empty `score_dims`) those with `is_anomaly = true` (the stored alarm-budget flag); on other patterns those with `delta_norm >= theta_norm`. This is the same count `find_anomalies` and `anomaly_summary` use. |
+| `anomaly_rate_source` | `"is_anomaly"` when the count is taken from the stored alarm-budget flag (calibrated pattern); `"delta_norm_scan"` when it is a live filter on `delta_norm >= theta_norm`. |
+| `theta_norm` | Shape-space radius at the anomaly percentile. The anomaly boundary only on patterns without the calibrated score; on calibrated patterns (non-empty `score_dims`) the boundary is `conformal_p ≤ 1 − anomaly_percentile/100` |
 | `mean_delta_norm` | Population mean distance from centroid |
 | `geometry_mode` | `"binary"`, `"continuous"`, or `"mixed"` — see below |
 | `calibration_health` | `"good"` (1–20% anomaly rate), `"suspect"` (<1% or >20%), `"poor"` (<0.1% or >30%) |
@@ -130,12 +131,12 @@ Population summary for all patterns (or one pattern). Returns anomaly rates, cal
 | `inactive_ratio` | Fraction of anchor entities at the dominant low-activity mode (only reported when >25% of population is below median). See below. |
 | `has_temporal` | `true` when the pattern has temporal slices |
 | `profiling_alerts[]` | Dimension-level outlier clusters detected at build time. Each entry: `{entity_line, dimension, p25, p50, p75, p99, max, ratio, alert}` where `alert` is `"extreme cluster"` (ratio > 3.0) or `"moderate cluster"` (ratio 1.5–3.0). Absent = no outlier concentration. |
-| `dim_quality_warnings[]` | Silent build-time failures of z-score / `delta_norm` semantics. Each entry: `{type, dim_label, reason}` (pattern-level auditors also carry `evidence_value` + `threshold`); the remediation text is in the top-level `advice_by_warning_type[type]` (kept inline as `advice` only when one type carries different texts). Five `type` values: `"dead_dim"` (sigma_diag below 1e-10 — zero variance, z-score undefined, the dim contributes nothing meaningful and silently dilutes other dims' signal), `"sparse_dim"` (median == 0 with p99 > 0 — mostly-zero with rare nonzero, gaussian z-score assumption is wrong; Bregman divergence with poisson / bernoulli kind tag is the correct distance), `"dominant_dim_mass"` (pattern-level: one dim accounts for ≥70% of population p99-tail variance — the pattern is effectively a one-dim detector; cross-check per-polygon `reliability_flags.single_dim_driven` incidence on top-N anomalies), `"negative_space"` (gaussian-declared dim with median == 0 — the gaussian z-score is wrong because the empirical distribution is point-mass-at-zero rather than centered on the mode; re-declare with `kind='bernoulli'` or `kind='poisson'`), and `"heteroscedasticity"` (pattern-level, fires only when the pattern carries `group_by_property`: Brown-Forsythe Levene `p < 0.01` on `delta_norm` partitioned by the grouping column — the global θ assumption is statistically violated for this pattern. `dim_label` is the grouping variable name, not a δ-dim. Per-group θ calibration is statistically warranted; consider variance-stabilizing transform `log1p` as alternative). `reason` carries the offending value; the advice text is concrete remediation. Use the pattern-level types (`dominant_dim_mass`, `negative_space`, `heteroscedasticity`) to spot sphere-level calibration problems before drilling into per-entity anomalies. Computed from cached pattern state, sub-millisecond, no storage scan. Absent = no failure mode detected. |
+| `dim_quality_warnings[]` | Silent build-time failures of z-score / `delta_norm` semantics. Each entry: `{type, dim_label, reason}` (pattern-level auditors also carry `evidence_value` + `threshold`); the remediation text is in the top-level `advice_by_warning_type[type]` (kept inline as `advice` only when one type carries different texts). Four `type` values: `"dead_dim"` (sigma_diag below 1e-10 — zero variance, z-score undefined, the dim contributes nothing meaningful and silently dilutes other dims' signal), `"sparse_dim"` (median == 0 with p99 > 0 — mostly-zero with rare nonzero, gaussian z-score assumption is wrong; Bregman divergence with poisson / bernoulli kind tag is the correct distance), `"dominant_dim_mass"` (pattern-level: one dim accounts for ≥70% of population p99-tail variance — the pattern is effectively a one-dim detector; cross-check per-polygon `reliability_flags.single_dim_driven` incidence on top-N anomalies), and `"negative_space"` (gaussian-declared dim with median == 0 — the gaussian z-score is wrong because the empirical distribution is point-mass-at-zero rather than centered on the mode; re-declare with `kind='bernoulli'` or `kind='poisson'`). `reason` carries the offending value; the advice text is concrete remediation. Use the pattern-level types (`dominant_dim_mass` and `negative_space`) to spot sphere-level calibration problems before drilling into per-entity anomalies. Computed from cached pattern state, sub-millisecond, no storage scan. Absent = no failure mode detected. |
 | `trends[]` | Per-metric population forecasts when pre-computed data exists: `{metric, current_value, forecast_value, direction, horizon, reliability}`. Metrics: `anomaly_rate`, `mean_delta_norm`, `entity_count`. Direction: `"rising"`, `"falling"`, `"stable"`. Uses Holt's double exponential smoothing (alpha=0.3). |
 | `temporal_quality` | (`detail="full"` only) `{signal_quality: "persistent"/"volatile"/"mixed"/"insufficient_data"}` (`"insufficient_data"` = no anomalous slice is followed by another slice, so persistence cannot be measured) — persistence of anomaly signals across time slices |
 | `event_rate_divergence_alerts[]` | (`detail="full"`, anchor patterns only) Entities with high event anomaly rate (>15%) but below-theta static delta_norm — invisible to `find_anomalies`. Each entry: `{pattern_id, event_pattern_id, entity_key, event_anomaly_rate, delta_norm, theta_norm, alert}`. Top 20 by rate. Absent = no divergence detected. |
 | `suggested_next_step` | (`detail="full"`, only when `event_rate_divergence_alerts` present) Actionable hint to run windowed `aggregate(time_from, time_to)` to confirm when the event burst happened. |
-| `dimension_kinds` | Compact summary of per-dimension distribution families, e.g. `"bernoulli x4, poisson x2, gaussian x8"`. Absent on pre-2.3 spheres. |
+| `dimension_kinds` | Compact summary of per-dimension distribution families, e.g. `"bernoulli x4, poisson x2, gaussian x8"`. |
 
 **Geometry mode meanings:**
 
@@ -163,13 +164,13 @@ Evaluates 6 built-in geometric health checks across all patterns and returns any
 |-----------|------|---------|-------------|
 | `pattern_id` | string | `null` | Pattern to check. When `null`, all patterns are scanned. |
 
-**Returns:** `alerts[]` sorted by severity (HIGH first). Alert types: `anomaly_rate_spike`, `population_size_shock`, `high_anomaly_rate` (>30%), `theta_miscalibration` (includes >20% detection), `regime_changepoint`, `calibration_drift`.
+**Returns:** `alerts[]` sorted by severity (HIGH first). Alert types: `anomaly_rate_spike`, `population_size_shock`, `high_anomaly_rate` (>30%), `theta_miscalibration` (includes >20% detection), `regime_changepoint`, `calibration_drift`, `calibration_age` (MEDIUM: the pattern's calibration is older than 60 days, so its p-values drift as the population moves — `recalibrate(pattern_id)` refreshes it; `details` carries `age_days`, `max_age_days`).
 
 ---
 
 ### `detect_data_quality_issues`
 
-Scans a pattern for **geometric integrity** issues: coverage gaps, degenerate polygons, high/zero anomaly rates, theta ceiling effects. Checks structural quality only — domain-level outliers (unusual values, truncated dates) are not detected here; use `find_anomalies` for those.
+Scans a pattern for **geometric integrity** issues: coverage gaps, degenerate polygons, high/zero anomaly rates, theta ceiling effects. Checks structural quality only — domain-level outliers (unusual values, truncated dates) are not detected here; use `find_anomalies` for those. On calibrated patterns (non-empty `score_dims`), the `theta_ceiling` check is skipped because θ is not their anomaly boundary.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -514,19 +515,22 @@ Reads the polygon (current geometric shape) for the entity at the current naviga
 | `delta` | Z-scored delta vector — each component is `(shape − mu) / sigma`. Full format only (and compact when two dims share a label) |
 | `delta_by_dim` | Compact format: the same delta as a `{dim: value}` map |
 | `delta_norm` | L2 norm of delta vector |
-| `delta_rank_pct` | Percentile in population delta_norm distribution (0–100) |
-| `is_anomaly` | `true` when `delta_norm > theta_norm` |
+| `score_rank_pct` | Rank of the entity's anomaly score in the population (0–100): `anomaly_score` on calibrated patterns, `delta_norm` otherwise |
+| `is_anomaly` | Calibrated patterns: `conformal_p ≤ 1 − anomaly_percentile/100` (the alarm budget). Other patterns: `delta_norm > theta_norm` |
 | `edges[]` | Alive edges: `{line_id, point_key, direction}` |
 | `related_properties` | Properties of the entities the edges point to, one `{columns: [point_key, …], rows}` table per line (event polygons) |
 | `properties` | The entity's own row; for anchor entities compact format keeps text values (dropped names in `omitted.properties`), an event keeps its whole row |
 | `dim_edges[]` | Compact format: the alive dimension-line edges (no point key, not jumpable) as a list of line ids instead of one `edges[]` entry each; `edges[]` then holds the entity edges only. The full format keeps them in `edges[]`. |
-| `anomaly_dimensions[]` | When `is_anomaly=true`: top dimensions driving the anomaly — `{dim, label, delta, contribution_pct}`. `contribution_pct` = % of `delta_norm²` from this dimension; dimensions < 5% excluded; top 3 shown. |
-| `witness` | Minimal subset of dimensions that certifies the anomaly alone: `{witness_size, witness_dims[], delta_norm}` |
-| `repair` | Minimal subset of dimensions to fix to become non-anomalous: `{repair_size, repair_dims[], residual_norm}` |
-| `conformal_p` | (precision stack) Calibrated p-value — lower = more anomalous |
+| `anomaly_dimensions[]` | When `is_anomaly=true`: top dimensions driving the anomaly — `{dim, label, delta, contribution_pct}`. `contribution_pct` = % of `delta_norm²` from this dimension; dimensions < 5% excluded; top 3 shown. On a calibrated pattern: `{dim, z, mahal_share}` — the score dimension, its rank-Gaussian coordinate and its share of the `mahal` evidence, the split `explain_anomaly.top_dimensions` reports. |
+| `witness` | Minimal subset of dimensions that certifies the anomaly alone: `{witness_size, witness_dims[], delta_norm}`. Patterns without the calibrated score only |
+| `repair` | Minimal subset of dimensions to fix to become non-anomalous: `{repair_size, repair_dims[], residual_norm}`. Patterns without the calibrated score only |
+| `anomaly_score` | Calibrated patterns: the fused evidence score (mean of the population ranks of the pattern's `score_axes`) — higher = more anomalous. Omitted when it equals `delta_norm` |
+| `conformal_p` | Split-conformal p-value of the score against the stored calibration reference — the fraction of a population like the reference that scores at least as high; lower = more anomalous |
+| `score_delta` | Calibrated patterns: `{dim: z}` over `score_dims`, the rank-Gaussian coordinates the score is computed on |
+| `theta_norm` | Patterns without the calibrated score: the anomaly threshold `delta_norm` is compared with |
 | `n_anomalous_dims` | (precision stack) Count of dimensions above p99 threshold |
-| `bregman_divergence` | Distribution-aware anomaly distance (sum of per-dimension Bregman terms). `null` on pre-2.3 spheres. |
-| `anomaly_confidence` | Bootstrap stability score (0–1). `null` when bootstrap was skipped (N > 50K, `group_by_property`, `use_mahalanobis`). |
+| `bregman_divergence` | Distribution-aware anomaly distance (sum of per-dimension Bregman terms). |
+| `anomaly_confidence` | Bootstrap stability score (0–1). Omitted when bootstrap was skipped (N > 50K, `group_by_property`) and on calibrated patterns. |
 
 ---
 
@@ -588,45 +592,48 @@ get_event_polygons("2", "tx_pattern", top_n=10, offset=10)  # page 2
 
 ### `find_anomalies`
 
-Finds the most anomalous polygons in a pattern, ranked by `delta_norm` descending.
+Finds the most anomalous polygons in a pattern, ranked by the pattern's own score.
+
+**Calibrated patterns** (non-empty `score_dims` in `get_sphere_info`; every continuous anchor pattern whose dimensions are point properties): the selection is the stored `is_anomaly` — `conformal_p ≤ 1 − anomaly_percentile/100`, the calibrated alarm budget (at the 95th percentile, 5 % of the population is flagged, and 5 % of a population like the calibration reference would be) — and the order is `conformal_p` ascending, then `anomaly_score` descending. θ is not the boundary on these patterns, so the shape-space options `radius`, `metric="Linf"`, `dimension_weights`, `rank_by="delta_norm"` / `"signed_confidence"`, `boundary_aware` and `min_confidence > 0` raise an error. **Other patterns** (event, GMM, discrete) rank by `delta_norm` against θ and accept every option.
+
+There is no entity-level FDR: the conformal p-values of the fitted population are its own ranks, so a BH / Storey cut over them cannot reject anything beyond the alarm budget. `fdr_alpha` is the level of the **cell gate** (`fdr_resolution` / `fdr_temporal_resolution`), which tests whether a region holds more anomalies than its size predicts.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `pattern_id` | string | required | Pattern to scan |
 | `top_n` | int | `10` | Max results (subject to adaptive hard cap) |
 | `offset` | int | `0` | Skip first N anomalies (pagination) |
-| `radius` | float | `1.0` | Multiplies `theta_norm` threshold. >1 = looser boundary. ≤0 treated as 1. |
+| `radius` | float | `null` | Multiplies the `theta_norm` threshold (`null` = 1). >1 = looser boundary. Patterns without the calibrated score only. |
 | `property_filters` | dict | `null` | Filter anomalous entities by property before ranking. Anchor/composite only. Syntax: `{"col": {"gt": X, "lt": Y}}`, `{"col": {"in": ["A", "B"]}}` or `{"col": "value"}`. AND semantics. |
-| `rank_by_property` | string | `null` | Re-rank by raw property value instead of delta_norm (direction set by `rank_order`; missing values last) |
+| `rank_by_property` | string | `null` | Re-rank by raw property value instead of the score (direction set by `rank_order`; missing values last) |
 | `rank_order` | string | `"desc"` | Direction of the `rank_by_property` ranking: `"desc"` (highest first) or `"asc"` (lowest first). `detect_pattern` picks `"asc"` for queries about low / lowest / few values |
-| `rank_by` | string | `"delta_norm"` | `"delta_norm"` (default, sort by `||delta||` desc), `"min_q_per_dim"` (smallest per-dim q first; requires `fdr_alpha` and `fdr_axis ∈ {"per_dim", "both"}`; incompatible with `select="diverse"`), or `"signed_confidence"` (fuse `delta_norm_signed × \|lda_alignment\| × (1 − reliability_penalty)` descending; sign-preserving — anti-aligned polygons get negative scores and land at the bottom; requires a pattern rebuilt with `label_audit:` enabled, fails with a structured `GDSNavigationError` otherwise; incompatible with `select="diverse"`). |
+| `rank_by` | string | `null` | `null` (default) = the pattern's own score: `conformal_p` ascending then `anomaly_score` descending on calibrated patterns, `delta_norm` otherwise. `"delta_norm"` (sort by `||delta||` desc) or `"signed_confidence"` (fuse `delta_norm_signed × \|lda_alignment\| × (1 − reliability_penalty)` descending; sign-preserving — anti-aligned polygons get negative scores and land at the bottom; requires a pattern rebuilt with `label_audit:` enabled, fails with a structured `GDSNavigationError` otherwise; incompatible with `select="diverse"`) — both for patterns without the calibrated score only. |
 | `missing_edge_to` | string | `null` | Keep only anomalies with NO edge to this line (orphan detection) |
-| `include_emerging` | bool | `false` | Append `emerging[]`: non-anomalous entities whose forecast crosses the threshold. Scans up to 100 entities. Only evaluated when `offset=0`. |
-| `fdr_alpha` | float | `null` | Apply Benjamini-Hochberg FDR control at this level (0-1 exclusive). Returns only entities with `q_value <= alpha`. Each retained entity carries a `q_value` field. `null` = no FDR filtering (legacy behavior). |
-| `fdr_method` | string | `"bh"` | FDR method. `"bh"` (Benjamini-Hochberg, assumes pi0=1) or `"storey"` (Storey LSL estimator of the true null proportion; shrinks q-values by pi0 and typically recovers 10–15% more discoveries when combined with `p_value_method="chi2"` on spheres that have a genuine null mass). |
-| `fdr_axis` | string | `"entity"` | FDR correction axis: `"entity"` (flat FDR over per-entity p-values, default), `"per_dim"` (independent BH/Storey per dimension — entity survives if any dim's q ≤ alpha; each polygon gains `q_values_per_dim` (`{dim: q}`, dims with q = 1 omitted), `min_q_per_dim`, `dominant_q_dim` (dim name)), or `"both"` (entity-level AND ≥1 dim must survive per-dim FDR). |
-| `fdr_resolution` | string | `null` | Spatial hierarchy level name declared on the pattern's `fdr_hierarchy`. When set, survivors are also gated by per-cell BH/Storey FDR at this level. Requires `fdr_alpha`. Survivors gain `cell_q_spatial` and `cell_path`. |
+| `include_emerging` | bool | `false` | Append `emerging[]`: non-anomalous entities whose forecast crosses the threshold. Scans up to 100 entities. Only evaluated when `offset=0`. On a calibrated pattern `emerging` is empty with an `emerging_note` (the forecast tracks `delta_norm` against θ, which does not decide `is_anomaly` there). |
+| `fdr_alpha` | float | `null` | Level of the cell gate (0–1 exclusive). Requires `fdr_resolution` or `fdr_temporal_resolution`; passing it alone raises an error. |
+| `fdr_method` | string | `null` | Cell-gate FDR method: `"storey"` (default; Storey LSL estimator of the share of null cells) or `"bh"` (Benjamini-Hochberg, assumes every cell null). |
+| `fdr_resolution` | string | `null` | Spatial hierarchy level name declared on the pattern's `fdr_hierarchy`. Survivors are gated to entities whose cell at this level is enriched in `is_anomaly` (hypergeometric upper tail per cell, BH / Storey over the cells of the level). Requires `fdr_alpha`. Survivors gain `cell_q_spatial` and `cell_path`. |
 | `fdr_temporal_resolution` | string | `null` | Temporal hierarchy level name declared on the pattern's `fdr_temporal_hierarchy`. Same semantics as `fdr_resolution` on the temporal axis. Requires `fdr_alpha`. Survivors gain `cell_q_temporal` and `cell_path`. |
-| `p_value_method` | string | `"chi2"` | p-value construction. `"chi2"` is the only accepted value: upper-tail χ²(df) survival on `||delta||²`, the parametric null assuming `delta_i ~ N(0, 1)`. Rank-derived p-values are not offered — they only encode an entity's position in the result set. Pair with `fdr_method="storey"` for power recovery on moderate-super-anomaly patterns; on over-compressed or extreme patterns the uplift collapses to zero. |
 | `select` | string | `"top_norm"` | `"top_norm"` ranks by score descending. `"diverse"` applies submodular facility location to pick the K most geometrically diverse representatives — each result includes a `representativeness` count. |
-| `metric` | string | `"L2"` | `"L2"` (pre-computed delta_norm, fast) or `"Linf"` (max single-dimension \|delta\|, runtime scan). Linf catches single-dimension spikes that L2 dilutes. Every result also carries `bregman_divergence` (per-dimension kind-aware scoring: poisson KL for counts, bernoulli KL for binary, gaussian for continuous), worth comparing with `delta_norm` on mixed-type patterns. |
-| `min_confidence` | float | `0.0` | Keep only entities with `anomaly_confidence >= min_confidence` (0–1). `0.0` = no filter. Has no effect when `anomaly_confidence` is `None` (bootstrap was skipped). |
-| `dimension_weights` | dict | `null` | Optional `{dim_name: float}` mapping. Each weight multiplies the corresponding dim's contribution to the rank score before computing `delta_norm`. Missing dims default to `1.0`; explicit `0.0` silences a dim. Requires `metric` in `"L2"` or `"Linf"` (Bregman is precomputed and cannot be reweighted). Use to discount dims that fail a stratified correlation gate (NOISE → `0.0`, HEAVY-TAIL → `0.5`). Validates dim names against the pattern's labels and rejects negative / non-finite / non-numeric weights. |
+| `metric` | string | `"L2"` | `"L2"` (pre-computed delta_norm, fast) or `"Linf"` (max single-dimension \|delta\|, runtime scan; patterns without the calibrated score only). Linf catches single-dimension spikes that L2 dilutes. Every result also carries `bregman_divergence` (per-dimension kind-aware scoring: poisson KL for counts, bernoulli KL for binary, gaussian for continuous), worth comparing with `delta_norm` on mixed-type patterns. |
+| `min_confidence` | float | `0.0` | Keep only entities with `anomaly_confidence >= min_confidence` (0–1). `0.0` = no filter. Has no effect when `anomaly_confidence` is `None` (bootstrap was skipped). Patterns without the calibrated score only. |
+| `dimension_weights` | dict | `null` | Optional `{dim_name: float}` mapping. Each weight multiplies the corresponding dim's contribution to the rank score before computing `delta_norm`. Missing dims default to `1.0`; explicit `0.0` silences a dim. Requires `metric` in `"L2"` or `"Linf"` (Bregman is precomputed and cannot be reweighted). Use to discount dims that fail a stratified correlation gate (NOISE → `0.0`, HEAVY-TAIL → `0.5`). Validates dim names against the pattern's labels and rejects negative / non-finite / non-numeric weights. Patterns without the calibrated score only. |
 | `sample_size` | int | `null` | Cap on geometry rows scanned. When set below the population size, a random sample is drawn before threshold filtering and ranking. Forces the in-process scan path. `null` = scan full population. |
-| `boundary_aware` | bool | `false` | Stratified sampling — when `true`, half of `sample_size` is drawn from entities within `[0.8 × theta_norm, 1.2 × theta_norm]` (boundary band), the rest from the complement. Requires `sample_size`. Surfaces boundary cases under-represented under uniform sampling — useful for calibration audits. |
+| `boundary_aware` | bool | `false` | Stratified sampling — when `true`, half of `sample_size` is drawn from entities within `[0.8 × theta_norm, 1.2 × theta_norm]` (boundary band), the rest from the complement. Requires `sample_size`. Surfaces boundary cases under-represented under uniform sampling — useful for calibration audits. Patterns without the calibrated score only. |
 | `summary` | bool | `null` | `null` follows the session response format: compact drops positional `delta` (polygons and clusters; `anomaly_dimensions` and labels stay) and numeric `properties` columns except the ranked / filtered ones, listed in `omitted`; full keeps everything and adds `dim_labels`. `true`: no delta (polygons and clusters), edges or properties (smallest). `false`: everything. |
 
-**Returns:** `polygons[]`, `properties` (entity properties keyed by `primary_key`, see [Properties table](#hypertopos-mcp--tool-reference); absent with `summary=true`), `related_properties` (properties of entities referenced by polygon edges, one table per line), `clusters[]`, `total_found` (total above threshold), `capped_warning` when top_n was reduced.
+**Returns:** `polygons[]`, `properties` (entity properties keyed by `primary_key`, see [Properties table](#hypertopos-mcp--tool-reference); absent with `summary=true`), `related_properties` (properties of entities referenced by polygon edges, one table per line), `clusters[]`, `total_found` (total flagged), `found` (polygons in this page), `ranked_by` (`anomaly_score`, `delta_norm`, the `rank_by` value or the `rank_by_property` name), `capped_warning` when top_n was reduced. A calibrated pattern orders by `conformal_p` ascending, then `anomaly_score` descending: the two agree within one calibration, and rows added by incremental ingest (scored without the event axis) compare with built rows only by their p-value.
 
 Each polygon in `polygons[]` includes (no per-polygon `type` or `pattern_id`; both are constant for the call):
 
 | Field | Description |
 |-------|-------------|
-| `bregman_divergence` | Distribution-aware anomaly distance (sum of per-dimension Bregman terms). `null` on pre-2.3 spheres. |
-| `anomaly_confidence` | Bootstrap stability score (0–1): fraction of bootstrap resamples in which the entity is classified as anomalous. `null` when bootstrap was skipped (N > 50K, `group_by_property`, `use_mahalanobis`). |
-| `total_impact` | M4 additive — aggregate L2 norm of leave-one-out impact on coordinate calibration. `null` when pattern is event-type, `N<2`, or storage backend lacks shape reconstruction prerequisites. Use `find_calibration_influencers` for the full per-dim breakdown + classification context. |
-| `classification` | M4 additive — one of `"hidden"` / `"distorter"` / `"standard_anomaly"` / `"normal"`. Same null rules as `total_impact`. Use `find_calibration_influencers` for ranked entries within a specific cell. |
-| `reliability_flags` | Per-polygon triage dict: `single_dim_driven` (bool — dominant dim carries >70 % of `delta_norm²`, likely a data-quality artefact rather than a multi-dim fraud signal), `dominant_dim` (string label, agrees with `explain_anomaly.top_dimensions[0].dim` on the same polygon), `dominant_dim_share` (float — the dominant dim's share of `delta_norm²`), `low_confidence_bucket` (bool — bootstrap-derived `anomaly_confidence` is below 0.5, the anomaly flag is fragile to population resampling), `confidence` (float or `null` — sanitises `NaN`/`±inf` to `null`), `flags` (list of triggered flag names). |
+| `anomaly_score`, `conformal_p`, `score_rank_pct` | Calibrated patterns: the fused evidence score, its split-conformal p-value against the stored reference, and its population rank (0–100). Patterns without the score carry `conformal_p` and `score_rank_pct` on `delta_norm`; `anomaly_score` is omitted when it equals `delta_norm`. |
+| `bregman_divergence` | Distribution-aware anomaly distance (sum of per-dimension Bregman terms). |
+| `anomaly_confidence` | Bootstrap stability score (0–1): fraction of bootstrap resamples in which the entity is classified as anomalous. Omitted when bootstrap was skipped (N > 50K, `group_by_property`) and on calibrated patterns. |
+| `total_impact` | Aggregate L2 norm of leave-one-out impact on coordinate calibration. Absent when the pattern is event-type or calibrated (the classes are flips of the θ verdict); `null` when `N<2` or the storage backend lacks shape reconstruction prerequisites. Use `find_calibration_influencers` for the full per-dim breakdown + classification context. |
+| `classification` | One of `"hidden"` / `"distorter"` / `"standard_anomaly"` / `"normal"`. Same absent / null rules as `total_impact`. Use `find_calibration_influencers` for ranked entries within a specific cell. |
+| `reliability_flags` | Per-polygon triage dict: `single_dim_driven` (bool — dominant dim carries >70 % of `delta_norm²`, likely a data-quality artefact rather than a multi-dim fraud signal), `dominant_dim` (string label, agrees with `explain_anomaly.top_dimensions[0].dim` on the same polygon), `dominant_dim_share` (float — the dominant dim's share of `delta_norm²`), `low_confidence_bucket` (bool — bootstrap-derived `anomaly_confidence` is below 0.5, the anomaly flag is fragile to population resampling), `confidence` (float or `null` — sanitises `NaN`/`±inf` to `null`), `flags` (list of triggered flag names). On a calibrated pattern the dominant dim and its share come from the `mahal` evidence split (the score dimension `explain_anomaly` ranks first), and the dict carries `single_dim_driven`, `dominant_dim`, `dominant_dim_share` and `flags` only. |
 | `signed_confidence_score`, `lda_alignment`, `reliability_penalty` | Present only when `rank_by="signed_confidence"`. `signed_confidence_score` is `delta_norm_signed × \|lda_alignment\| × (1 − reliability_penalty)` (sign-preserved); `lda_alignment` ∈ `[-1, 1]` is the cosine on the LDA direction; `reliability_penalty` ∈ `[0, 1]` is `0.5 × single_dim_driven + 0.5 × low_confidence_bucket`. Non-finite values sanitised to `null`. |
 
 **Hard cap:** Adaptive — edge-count-based, typically 15–51. Use `offset` to paginate, `anomaly_summary` for counts, or `aggregate_anomalies` for distribution analysis.
@@ -638,7 +645,7 @@ page1 = find_anomalies("tx_pattern", top_n=25, offset=25)
 # Stop when offset >= page0["total_found"]
 ```
 
-**Emerging anomalies** (`include_emerging=True`): each entry has `key`, `predicted_delta_norm`, `current_delta_norm`, `reliability`, `horizon`. Requires ≥3 temporal slices per entity.
+**Emerging anomalies** (`include_emerging=True`): each entry has `primary_key`, `current_delta_norm`, `predicted_delta_norm` (one step ahead), `reliability`. Requires ≥3 temporal slices per entity. Empty on a calibrated pattern, with `emerging_note`.
 
 ---
 
@@ -651,7 +658,7 @@ Statistical overview of the anomaly population for a pattern.
 | `pattern_id` | string | required | Pattern to summarize |
 | `max_clusters` | int | `20` | Maximum anomaly clusters to return. Continuous-dimension patterns can produce 50k+ unique cluster shapes — the default cap keeps response size manageable. Set `0` for unlimited. |
 
-**Returns:** `count`, `rate`, `clusters[]` (anomaly shape clusters; each `label` names up to three elevated and three missing dimensions, as in `find_anomalies`; compact format drops each cluster's positional `delta`), `delta_norm_percentiles` (`p50/p75/p90/p95/p99/max`), `top_driving_dimensions[]` (aggregate per-dimension contribution across all anomalies).
+**Returns:** `count`, `rate`, `clusters[]` (anomaly shape clusters; each `label` names up to three elevated and three missing dimensions, as in `find_anomalies`; compact format drops each cluster's positional `delta`), `delta_norm_percentiles` (`p50/p75/p90/p95/p99/max`), `top_driving_dimensions[]` (aggregate per-dimension contribution across all anomalies). On a calibrated pattern the anomalies are the stored `is_anomaly` set, while `clusters` and `top_driving_dimensions` describe their shape-space `delta`; for why one entity is flagged use `explain_anomaly`.
 
 ---
 
@@ -683,9 +690,11 @@ Full structured explanation combining severity, witness, repair, top dimensions,
 | `primary_key` | string | required | Entity key |
 | `pattern_id` | string | required | Pattern |
 
-**Returns:** `severity` (`"normal"` / `"low"` 1.0–1.1× / `"medium"` 1.1–1.5× / `"high"` 1.5–2.5× / `"extreme"` >2.5× theta), `ratio`, `witness`, `repair`, `conformal_p`, `reputation` (`{value, anomaly_tenure}`), `composite_risk`, `top_dimensions[]`, `reliability_flags` (per-polygon triage dict matching the `find_anomalies` field: `single_dim_driven`, `dominant_dim`, `dominant_dim_share`, `low_confidence_bucket`, `confidence`, `flags` — the `dominant_dim` value agrees with `top_dimensions[0]["dim"]` for the same polygon by construction).
+**Returns on a calibrated pattern** (non-empty `score_dims`): `severity` (`"normal"` when `conformal_p` is above the alarm budget `alpha = 1 − anomaly_percentile/100`, otherwise `"low"` / `"medium"` / `"high"` / `"extreme"` by how far below it), `conformal_p`, `anomaly_score`, `delta_norm` (shape-space, for reference only), `temporal_slices`, `reputation`; when not normal also `bits` (`−log2 conformal_p`, the evidence), `axes` (`{axis: {rank, bits}}` — each scoring axis's population rank and its share of `bits`; the shares sum to `bits`) and `top_dimensions[]` (`{dim, z, bits, pct_of_total}`: `z` is the dim's rank-Gaussian coordinate, `bits` its share of `axes.mahal.bits`, `pct_of_total` that share as a fraction of `bits`; zero-share dims omitted). No `theta_norm`, `ratio`, `witness`, `repair`, `reliability_flags` or `composite_risk` on this branch.
 
-Each entry in `top_dimensions[]` is `{dim, kind, delta, pct_of_total}`: `dim` (dimension name), `kind` (`"gaussian"`, `"poisson"`, or `"bernoulli"` — the dim's distribution family, present when the sphere has dimension kinds), `delta` (signed stored delta for the dim), and `pct_of_total` (the dim's share of `delta_norm²`, i.e. `delta²` over the sum of all dims' `delta²`, in `[0, 1]`). Entries are sorted by share, so `top_dimensions[0]` is the dim whose return to its population mean drops `delta_norm` most. This is the same metric behind `is_anomaly`, `witness`, `repair`, `find_anomalies.anomaly_dimensions` and `simulate_dimension_change`; on a pattern without Cholesky whitening, setting a dim to its mean lowers `delta_norm²` by exactly its `pct_of_total`. On a Cholesky-whitened pattern the stored delta is in whitened coordinates, so the share attributes to whitened coordinate *i*. Dimensions with a zero share are omitted.
+**Returns on other patterns:** `severity` (`"normal"` / `"low"` 1.0–1.1× / `"medium"` 1.1–1.5× / `"high"` 1.5–2.5× / `"extreme"` >2.5× theta), `ratio`, `witness`, `repair`, `conformal_p`, `reputation` (`{value, anomaly_tenure}`), `composite_risk`, `top_dimensions[]`, `reliability_flags` (per-polygon triage dict matching the `find_anomalies` field: `single_dim_driven`, `dominant_dim`, `dominant_dim_share`, `low_confidence_bucket`, `confidence`, `flags` — the `dominant_dim` value agrees with `top_dimensions[0]["dim"]` for the same polygon by construction).
+
+On other patterns, each entry in `top_dimensions[]` is `{dim, kind, delta, pct_of_total}`: `dim` (dimension name), `kind` (`"gaussian"`, `"poisson"`, or `"bernoulli"` — the dim's distribution family, present when the sphere has dimension kinds), `delta` (signed stored delta for the dim), and `pct_of_total` (the dim's share of `delta_norm²`, i.e. `delta²` over the sum of all dims' `delta²`, in `[0, 1]`). Entries are sorted by share, so `top_dimensions[0]` is the dim whose return to its population mean drops `delta_norm` most. This is the same metric behind `is_anomaly`, `witness`, `repair`, `find_anomalies.anomaly_dimensions` and `simulate_dimension_change`; on a pattern without Cholesky whitening, setting a dim to its mean lowers `delta_norm²` by exactly its `pct_of_total`. On a Cholesky-whitened pattern the stored delta is in whitened coordinates, so the share attributes to whitened coordinate *i*. Dimensions with a zero share are omitted.
 
 ---
 
@@ -699,7 +708,7 @@ K diverse hypotheses for why an entity is anomalous. Greedy selection over per-d
 | `pattern_id` | string | required | Pattern the entity belongs to |
 | `n_hypotheses` | int | `3` | Requested K diverse hypotheses |
 | `min_contribution_pct` | float | `0.10` | Per-hypothesis joint share floor (0.0-1.0). Hypotheses below this floor are dropped, which drives the graceful degradation |
-| `validate` | bool | `false` | When `true`, each hypothesis is validated by `simulate_dimension_change` (override its dims to mu, check `delta_norm_after < theta_norm`) |
+| `validate` | bool | `false` | When `true`, each hypothesis is validated by `simulate_dimension_change` (override its dims to population mu; on a calibrated pattern each score dimension is instead set to its reference median, and the `validation` block adds `conformal_p_after_override`) |
 
 **Returns:**
 
@@ -715,13 +724,13 @@ K diverse hypotheses for why an entity is anomalous. Greedy selection over per-d
 | `diversity_score` | Mean pairwise `(1 - Jaccard)` over hypothesis dim sets, or `null` when fewer than two hypotheses are returned (no pair to compare) |
 | `degraded_reason` | `null` when K hypotheses returned, `"insufficient_diverse_mass"` when graceful degradation kicked in |
 
-**Notes:** Pure recomputation over the stored polygon; no storage scan. Hypotheses are strict disjoint — each dim appears in at most one hypothesis. When remaining mass can't meet the `min_contribution_pct` floor, fewer hypotheses are emitted with `degraded_reason="insufficient_diverse_mass"` — the correct semantic for single-dim-driven entities (no alternative diverse explanation exists). Routes through the same per-dim contribution primitive that `explain_anomaly.top_dimensions` and `reliability_flags.dominant_dim` use, so the multi-hypothesis ranking stays semantically aligned with the single-explanation surface. `validate=true` adds a `validation` sub-block per hypothesis (`{delta_norm_after_override, neutralizes_anomaly}`); on a pattern without Cholesky whitening a hypothesis with joint share `s` leaves `delta_norm_after_override² = (1 − s) · delta_norm²`, so whether it neutralizes the anomaly follows from its share. Non-finite floats sanitised to `null` on the wire. Invalid input returned as `{"error": ..., "primary_key": ...}` JSON.
+**Notes:** Pure recomputation over the stored polygon; no storage scan. Hypotheses are strict disjoint — each dim appears in at most one hypothesis. When remaining mass can't meet the `min_contribution_pct` floor, fewer hypotheses are emitted with `degraded_reason="insufficient_diverse_mass"` — the correct semantic for single-dim-driven entities (no alternative diverse explanation exists). Routes through the same per-dim contribution primitive that `explain_anomaly.top_dimensions` and `reliability_flags.dominant_dim` use, so the multi-hypothesis ranking stays semantically aligned with the single-explanation surface. `validate=true` adds a `validation` sub-block per hypothesis (`{delta_norm_after_override, neutralizes_anomaly}`); on a calibrated pattern each score dimension is set to its reference median (not μ) and the block also carries `conformal_p_after_override`. On a pattern without Cholesky whitening a hypothesis with joint share `s` leaves `delta_norm_after_override² = (1 − s) · delta_norm²`, so whether it neutralizes the anomaly follows from its share. Non-finite floats sanitised to `null` on the wire. Invalid input returned as `{"error": ..., "primary_key": ...}` JSON.
 
 ---
 
 ### `assess_anomaly_certainty`
 
-Agent-correctness composer — how confident should an investigator be in an entity's anomaly classification. Composes `explain_anomaly` (conformal_p, signed_confidence, single-dim driver), `get_entity_geometry_meta` (delta_norm vs theta_norm boundary band), the focal entity's stored `conformal_p` thresholded against each of `perturbation_alphas` (sample-free FDR-alpha stability), `sphere_overview` (calibration staleness), and `cross_pattern_profile` (cross-pattern consistency) into one verdict.
+Agent-correctness composer — how confident should an investigator be in an entity's anomaly classification. Composes `explain_anomaly` (conformal_p, signed_confidence, single-dim driver), `get_entity_geometry_meta` (boundary band: `conformal_p` within `[alpha/2, 2·alpha]` of the alarm budget on calibrated patterns, `delta_norm` within `[0.8, 1.2] × theta_norm` otherwise), the focal entity's stored `conformal_p` thresholded against each of `perturbation_alphas` (sample-free FDR-alpha stability), `sphere_overview` (calibration staleness), and `cross_pattern_profile` (cross-pattern consistency) into one verdict.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -760,7 +769,7 @@ If `is_anomalous == False`:
 - `near_data_boundary` → `"low"`
 - else → `"moderate"`
 
-**Notes:** `near_data_boundary` reuses the same `[0.8·theta_norm, 1.2·theta_norm]` band that `find_anomalies(boundary_aware=True)` uses for stratified sampling, so verdicts align with the calibration-audit surface. Sub-composition failures (e.g. cross-pattern profile unavailable on event patterns) surface in `steps_status` rather than aborting — the verdict degrades gracefully on partial information. Strict-JSON sanitised (`±inf` / `NaN` → `null`). Returns `{"error": ..., "primary_key": ..., "pattern_id": ...}` JSON when the entity is not found in the pattern's geometry.
+**Notes:** `near_data_boundary` is `conformal_p` within `[alpha/2, 2·alpha]` of the alarm budget `alpha = 1 − anomaly_percentile/100` on a calibrated pattern; on other patterns it reuses the `[0.8·theta_norm, 1.2·theta_norm]` band that `find_anomalies(boundary_aware=True)` uses for stratified sampling. Sub-composition failures (e.g. cross-pattern profile unavailable on event patterns) surface in `steps_status` rather than aborting — the verdict degrades gracefully on partial information. Strict-JSON sanitised (`±inf` / `NaN` → `null`). Returns `{"error": ..., "primary_key": ..., "pattern_id": ...}` JSON when the entity is not found in the pattern's geometry.
 
 ---
 
@@ -930,7 +939,7 @@ Checks anomaly status for a batch of entity keys.
 | `pattern_id` | string | required | Pattern |
 | `line_id` | string | `null` | Entity line — optional, used for geometry resolution |
 
-**Returns:** `results[]` — one entry per key with `is_anomaly`, `delta_rank_pct`.
+**Returns:** `results[]` — one entry per key with `is_anomaly`, `score_rank_pct`.
 
 ---
 
@@ -1063,7 +1072,7 @@ Detect entities with high influence on the population-relative coordinate system
 
 Classification: `high_impact = total_impact ≥ percentile(total_impact, high_threshold_pct)`; `high_anomaly = ‖δ(E)‖ ≥ θ_norm`.
 
-**Errors:** `ValueError` on event pattern, `N<2`, `high_threshold_pct ∉ (0, 100)`, invalid `classify`, or `top_n ∉ [1, 50]`.
+**Errors:** `ValueError` on event pattern, calibrated pattern (non-empty `score_dims` — the leave-one-out μ/σ refit is not the anomaly boundary; use `explain_anomaly` instead), `N<2`, `high_threshold_pct ∉ (0, 100)`, invalid `classify`, or `top_n ∉ [1, 50]`.
 
 **Use after** running `find_anomalies` to ask "which of these are calibration distorters that should be excluded vs hidden influencers that quietly define what 'normal' means?". Common operational triggers: data-quality audit, adversarial AML population manipulation detection.
 
@@ -1183,7 +1192,7 @@ Cross-pattern temporal lead-lag in population-relative coordinates. Population-a
 | `centroid_drift_series_a/b`, `volatility_series_a/b`, `correlation_by_lag` | Raw arrays for downstream agent analysis |
 | `n_epochs_used`, `n_dropped_a/b`, `cohort_size`, `cohort_dropped`, `coverage_warning` | Window + cohort diagnostic |
 
-**Use cases:** "behavior leads stress" workflows on shared-entity-space patterns (e.g. Berka `account_behavior_pattern` × `account_stress_pattern`); cross-pattern monitoring when both patterns flag drift simultaneously; per-entity timelines via `primary_key`.
+**Use cases:** "behavior leads stress" workflows on shared-entity-space patterns (e.g. an `account_behavior_pattern` × `account_stress_pattern` pair); cross-pattern monitoring when both patterns flag drift simultaneously; per-entity timelines via `primary_key`.
 
 **Limits:** Cross-pattern lead-lag is well-defined only when both patterns share entity population (same account PKs etc.). On completely disjoint entity spaces (e.g. AML accounts vs chain entities) `cohort="fixed"` raises "empty cohort — no entities present at every epoch in both patterns" and `cohort="all"` raises "tensor budget exceeded". Use `primary_key=<id>` for per-entity drill-down if a specific entity appears in both patterns' temporal histories.
 
@@ -1214,7 +1223,7 @@ Aggregates event polygon data. Equivalent to SQL `SELECT metric FROM pattern GRO
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `event_pattern_id` | string | required | Event pattern to aggregate |
-| `group_by_line` | string | required (unless `group_by_property`) | Line to group by (one row per entity on this line) |
+| `group_by_line` | string | required | Line to group by (one row per entity on this line) |
 | `group_by_relation` | string | `null` | Display name of the relation to group by when the event pattern relates to `group_by_line` more than once (e.g. `"sender"` / `"receiver"`); required in that case |
 | `group_by_line_2` | string | `null` | Second grouping line — two-dimensional aggregation |
 | `group_by_property` | string | `null` | `"line_id:column"` — group by entity property value instead of entity key |
@@ -1332,7 +1341,7 @@ Reveals how entity groups are distributed in delta-space.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `pattern_id` | string | required | Pattern |
-| `group_by_line` | string | required | Line to group entities by |
+| `group_by_line` | string | `null` | Line to group entities by — one of `group_by_line` / `group_by_property` is required |
 | `group_by_property` | string | `null` | `"line_id:column"` — group by property value instead of entity key |
 | `include_distances` | bool | `true` | Include `inter_centroid_distances` (set `false` for quick overview, avoids O(k²) output) |
 | `top_n_distances` | int | `20` | Limit to N closest pairs (sorted ascending by distance). Set `null` to return all pairs (O(k²) — avoid for high-cardinality lines). |
@@ -1386,12 +1395,9 @@ Finds entities nearest to a geometric cutting plane defined on an alias (π6).
 | `pattern_id` | string | required | Pattern |
 | `direction` | string | `"both"` | `"in"` = inside segment, `"out"` = outside, `"both"` = both sides |
 | `top_n` | int | `10` | Number of results |
-| `fdr_alpha` | float | `null` | Apply Benjamini-Hochberg FDR control at this level (0-1 exclusive). Returns only entities with `q_value <= alpha`. Each retained entity carries a `q_value` field. `null` = no FDR filtering (legacy behavior). |
-| `fdr_method` | string | `"bh"` | FDR method. `"bh"` (Benjamini-Hochberg, assumes pi0=1) or `"storey"` (Storey LSL estimator of the true null proportion; shrinks q-values by pi0 and typically recovers 10–15% more discoveries when combined with `p_value_method="chi2"` on spheres that have a genuine null mass). |
-| `p_value_method` | string | `"chi2"` | p-value construction. `"chi2"` is the only accepted value: upper-tail χ²(df) survival on `||delta||²`, the parametric null assuming `delta_i ~ N(0, 1)`. Rank-derived p-values are not offered — they only encode an entity's position in the result set. Pair with `fdr_method="storey"` for power recovery on moderate-super-anomaly patterns; on over-compressed or extreme patterns the uplift collapses to zero. |
 | `select` | string | `"top_norm"` | `"top_norm"` ranks by boundary distance ascending. `"diverse"` applies submodular facility location to pick the K most geometrically diverse representatives — each result includes a `representativeness` count. |
 
-**Returns per entity:** `primary_key`, `signed_distance` (>0 = inside, <0 = outside, ≈0 = at boundary), `is_in_segment`, `delta_norm`, `is_anomaly`.
+**Returns per entity:** `primary_key`, `signed_distance` (>0 = inside, <0 = outside, ≈0 = at boundary), `is_in_segment`, `delta_norm`, `score_rank_pct`, `is_anomaly` (and `representativeness` with `select="diverse"`).
 
 **Note:** Cutting planes operate on z-scored delta vectors, not raw shape values.
 
@@ -1445,12 +1451,12 @@ Finds counterparty entities via an event line (outgoing targets and incoming sou
 | `line_id` | string | required | Event line containing from/to columns |
 | `from_col` | string | required | Column naming the sender |
 | `to_col` | string | required | Column naming the receiver |
-| `pattern_id` | string | `null` | When set, enriches results with `is_anomaly` + `delta_rank_pct`. Enables edge table fast path |
+| `pattern_id` | string | `null` | When set, enriches results with `is_anomaly` + `score_rank_pct`. Enables edge table fast path |
 | `top_n` | int | `20` | Max counterparties to return per direction (outgoing/incoming) |
 | `use_edge_table` | bool | `true` | Set `false` to force full points scan instead of edge table |
 | `timestamp_cutoff` | float | `null` | Unix seconds. Edge-table fast path only — consider only edges with `timestamp <= cutoff`. As-of reconstruction. **Raises** `GDSNavigationError` when supplied with the points-scan fallback (no `pattern_id` or `use_edge_table=False`). |
 
-**Returns:** `outgoing[]` (entity sends TO), `incoming[]` (entity receives FROM), each with `key`, `tx_count`, and optionally `is_anomaly`, `delta_rank_pct`. Edge table fast path adds `amount_sum`, `amount_max` per entry. Plus `summary` (`{total_outgoing, anomalous_outgoing, ...}`). Each direction is sorted by `tx_count` descending; ties are broken by `amount_sum` descending (edge table fast path) and then by `key` ascending, so a `top_n` cut inside a tie is deterministic.
+**Returns:** `outgoing[]` (entity sends TO), `incoming[]` (entity receives FROM), each with `key`, `tx_count`, and optionally `is_anomaly`, `score_rank_pct`. Edge table fast path adds `amount_sum`, `amount_max` per entry. Plus `summary` (`{total_outgoing, anomalous_outgoing, ...}`). Each direction is sorted by `tx_count` descending; ties are broken by `amount_sum` descending (edge table fast path) and then by `key` ascending, so a `top_n` cut inside a tie is deterministic.
 
 ---
 
@@ -1493,7 +1499,7 @@ Finds which chains involve a specific entity — reverse lookup via chain keys.
 | `pattern_id` | string | required | Chain pattern (entity line must have `chain_keys` column) |
 | `top_n` | int | `20` | Maximum number of chains to return |
 
-**Returns:** `chains[]` (`{chain_id, is_anomaly, delta_norm, delta_rank_pct}`), `summary` (`{total, anomalous}`).
+**Returns:** `chains[]` (`{chain_id, is_anomaly, delta_norm, score_rank_pct}`), `summary` (`{total, anomalous}`).
 
 ---
 
@@ -1524,7 +1530,7 @@ Per-hop anomaly progression for a single chain. Inspector primitive complementar
 | `pattern_id` | string | required | Chain anchor pattern id |
 | `anchor_pattern_id` | string | required | Entity anchor pattern whose primary_keys match the chain hops |
 
-**Returns:** `hops[]` (per-hop progression with `hop_idx, primary_key, is_anomaly, delta_norm, top_dim, delta_rank_pct`), `summary` (`n_hops, n_anomalous, max_run_length_same_top_dim, dominant_top_dim`).
+**Returns:** `hops[]` (per-hop progression with `hop_idx, primary_key, is_anomaly, delta_norm, top_dim, score_rank_pct`), `summary` (`n_hops, n_anomalous, max_run_length_same_top_dim, dominant_top_dim`).
 
 **Notes:** Raises `GDSNavigationError` when the chain_id resolves to multiple rows in the points table (defensive raise against the chain extraction's pre-fix id collision regression). Affected spheres need a chain pattern rebuild to restore primary_key uniqueness.
 
@@ -1558,7 +1564,7 @@ Suggest candidate extension entities at the boundary of a chain's anomalous run.
 | `direction` | string | `"forward"` | `"forward"` (extend past run-end) or `"backward"` (extend before run-start) |
 | `top_n` | int | `20` | Cap on returned candidates |
 
-**Returns:** `boundary_key`, `boundary_position` (`run-start` / `run-end`), `candidates[]` (`{entity_key, is_anomaly, delta_norm, delta_rank_pct, n_source_chains, source_chain_ids}`), `summary` (`{n_candidates, n_anomalous_candidates, n_unique_keys}`). Sorting: `(is_anomaly DESC, delta_norm DESC, n_source_chains DESC)`.
+**Returns:** `boundary_key`, `boundary_position` (`run-start` / `run-end`), `candidates[]` (`{entity_key, is_anomaly, delta_norm, score_rank_pct, n_source_chains, source_chain_ids}`), `summary` (`{n_candidates, n_anomalous_candidates, n_unique_keys}`). Sorting: `(is_anomaly DESC, delta_norm DESC, n_source_chains DESC)`.
 
 **Notes:** Inherits the defensive raise. Reads the full chain points table for the reverse index on each call — for repeated extension queries in one session, expect ~700 ms warm; one-shot use is sub-1.5 s on a 290 k chain pattern.
 
@@ -1646,7 +1652,7 @@ One-shot orchestrator for the full R9 investigative loop on a single chain. Runs
 **Returns:**
 - `trace` — `{ok, data}` wrapper around `anomaly_propagation_in_chain` output (per-hop progression + run summary)
 - `typology` — `{ok, data}` wrapper around `classify_chain_typology` output (five-axis tag)
-- `shape_anomaly` — `{ok, data}` with `{chain_id, is_anomaly, delta_norm, delta_rank_pct}` for the chain in the chain pattern's geometry
+- `shape_anomaly` — `{ok, data}` with `{chain_id, is_anomaly, delta_norm, score_rank_pct}` for the chain in the chain pattern's geometry
 - `extension_forward` — `{ok, data}` wrapper around `extend_chain(direction='forward')`
 - `extension_backward` — `{ok, data}` wrapper around `extend_chain(direction='backward')`
 - `summary` — `{investigation_strength, recommended_action, score, rationale}`. Strength buckets: `score >= 3` → `strong` → `recommended_action="escalate to SAR"`; `score == 2` → `moderate` → `continue investigation`; `score 0-1` → `weak` → `false-positive candidate`. When scored steps failed and their missing points could change the bucket, strength is `inconclusive` (`recommended_action="resolve the failed steps before deciding"`) and `failed_steps` names them. The four 0/1 chain-composition signals: coherent run length >= 3, typology position not "no-run", forward extension surfaces an anomalous candidate, backward extension surfaces an anomalous candidate. `chain_shape_anomaly` is intentionally NOT in the score — R9's value proposition is catching what `find_anomalies(<chain_pattern>)` misses, so composition-anomalous-but-shape-normal is the textbook R9 sweet spot; the shape block stays in the report as evidence and surfaces in the rationale when it agrees, but does not drive the verdict. Rationale concatenates the firing signals as a single paragraph for paste into investigator notes.
@@ -1823,7 +1829,7 @@ Agent guidance: how much of an entity's edge neighborhood has been explored. Pas
 | `pattern_id` | string | required | Event pattern with edge table |
 | `explored_keys` | list[string] | `null` | Entity PKs already investigated |
 
-**Returns:** `total_edges`, `explored`, `unexplored`, `unexplored_anomalous[]` (with `is_anomaly`, `delta_rank_pct`), `coverage_pct`, `summary`.
+**Returns:** `total_edges`, `explored`, `unexplored`, `unexplored_anomalous[]` (with `is_anomaly`, `score_rank_pct`), `coverage_pct`, `summary`.
 
 ---
 
@@ -1870,7 +1876,7 @@ Find edges between two entities enriched with event-level anomaly scores. Unlike
 | `pattern_id` | string | required | Event pattern with edge table |
 | `top_n` | int | `10` | Max edges to return |
 
-**Returns:** `edges[]` sorted by `delta_norm` desc (each with `event_key`, `from_key`, `to_key`, `amount`, `timestamp`, `delta_norm`, `is_anomaly`, `delta_rank_pct`), `summary` with `total_edges`, `anomalous`, `max_delta_norm`.
+**Returns:** `edges[]` sorted by `delta_norm` desc (each with `event_key`, `from_key`, `to_key`, `amount`, `timestamp`, `delta_norm`, `is_anomaly`, `score_rank_pct`), `summary` with `total_edges`, `anomalous`, `max_delta_norm`.
 
 ---
 
@@ -2019,7 +2025,7 @@ Combines four signals into a composite score in [0, 1]:
 - delta similarity: `exp(-distance / theta_norm)`, absolute and pool-independent
 - witness overlap: Jaccard on witness dimension labels
 - trajectory alignment: cosine on trajectory vectors (optional, [0, 1])
-- anomaly bonus: graded by `delta_rank_pct / 100`
+- anomaly bonus: graded by `score_rank_pct / 100`
 
 Excludes entities already connected via the resolved event pattern's edge table — this is the function's main contribution over plain ANN, removing legitimate counterparties so the cohort is denser in unknown peers worth investigating.
 
@@ -2039,7 +2045,7 @@ Excludes entities already connected via the resolved event pattern's edge table 
 | `bidirectional_check` | bool | `true` | When false, only outgoing edges count as existing connections |
 | `edge_pattern_id` | string | `null` | Override the auto-resolved event pattern with edge table |
 
-**Returns:** `members[]` sorted by `score` desc (each with `primary_key`, `score`, `delta_similarity`, `witness_overlap`, `trajectory_alignment`, `is_anomaly`, `delta_rank_pct`, `explanation`, `component_scores`), `excluded_existing_edges`, `excluded_low_score`, `candidate_pool_size`, `weights_used`, `summary` (`max_score`, `mean_score`, `anomaly_count`, `trajectory_used`, `target_witness_size`, `target_is_anomaly`).
+**Returns:** `members[]` sorted by `score` desc (each with `primary_key`, `score`, `delta_similarity`, `witness_overlap`, `trajectory_alignment`, `is_anomaly`, `score_rank_pct`, `explanation`, `component_scores`), `excluded_existing_edges`, `excluded_low_score`, `candidate_pool_size`, `weights_used`, `summary` (`max_score`, `mean_score`, `anomaly_count`, `trajectory_used`, `target_witness_size`, `target_is_anomaly`).
 
 **When weights are not 1.0:** they should sum to 1.0 for the final score to stay in `[0, 1]`. Defaults satisfy this.
 
@@ -2090,7 +2096,7 @@ One-call entity investigation orchestrator — entity-side analog of `investigat
 | `pattern_id` | string | required | Anchor pattern for polygon / witness / root cause |
 | `line_id` | string | required | Edge-bearing pattern for graph-geometry tension |
 | `chain_pattern_id` | string | `null` | Chain pattern for membership lookup; when omitted the chains block reports skipped |
-| `include_polygon` | bool | `true` | Polygon shape lookup (`delta_norm`, `is_anomaly`, `delta_rank_pct`) |
+| `include_polygon` | bool | `true` | Polygon shape lookup (`delta_norm`, `is_anomaly`, `score_rank_pct`) |
 | `include_explain` | bool | `true` | `explain_anomaly` top witness dims |
 | `include_witness_cohort` | bool | `true` | `find_witness_cohort` peers |
 | `include_chains` | bool | `true` | `find_chains_for_entity` (requires `chain_pattern_id`) |
@@ -2129,7 +2135,7 @@ Per-edge counterfactual for one entity. For each candidate edge in the entity's 
 
 ### `simulate_dimension_change`
 
-What-if dimension override for one entity. Reconstructs the entity's stored shape vector, applies the requested raw-shape-vector value(s) to the named dim_label(s), recomputes delta and `delta_norm` under the pattern's calibration (cholesky path or diagonal), and reports the before/after norms, the anomaly-flag flip, the new top witness dims, and an audit trail of every overridden dim. Companion to `simulate_edge_removal` for non-edge dimensions. Pure recomputation over the stored polygon — no storage scan, sub-millisecond per call.
+What-if dimension override for one entity. Reconstructs the entity's stored shape vector, applies the requested raw-shape-vector value(s) to the named dim_label(s), recomputes delta and `delta_norm` under the pattern's calibration (diagonal z-scores), and reports the before/after norms, the anomaly-flag flip, the new top witness dims, and an audit trail of every overridden dim. Companion to `simulate_edge_removal` for non-edge dimensions. Pure recomputation over the stored polygon — no storage scan, sub-millisecond per call.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -2137,9 +2143,11 @@ What-if dimension override for one entity. Reconstructs the entity's stored shap
 | `pattern_id` | string | required | Pattern owning the entity |
 | `line_id` | string | required | Kept for signature parity with `simulate_edge_removal`; not consumed |
 | `set_dimension` | object `{dim_label: float}` | required | One or more dim_labels (as listed in `pattern.dim_labels`) mapped to the hypothetical raw-shape-vector value to substitute |
-| `top_n` | int | `5` | Cap on `top_witness_dims_after` entries |
+| `top_n` | int | `5` | Cap on `top_witness_dims_after` (`top_dimensions_after` on a calibrated pattern) entries |
 
 **Returns:** `primary_key`, `pattern_id`, `set_dimension` (echo of the input), `delta_norm_before`, `delta_norm_after`, `delta_norm_pct_change` (may be `null` when `delta_norm_before` is 0), `is_anomaly_before`, `is_anomaly_after`, `is_anomaly_change`, `top_witness_dims_after` (list of `{dim_label, dim_index, contribution_pct, delta}` ranked by attribution after the override), `dimensions_overridden` (list of `{dim_label, dim_index, old_value, new_value, old_delta, new_delta}` for every dim the override touched). Non-finite floats sanitised to `null` on the wire. Invalid input (unknown entity, unknown pattern, dim_label not in `pattern.dim_labels`) returned as `{"error": ..., "primary_key": ...}` JSON.
+
+On a calibrated pattern the override values are natural (raw property) values of score dimensions — a `_d_`-prefixed dim label names the same dimension, and a dimension outside `score_dims` returns an error listing them. They are rescored on the `mahal` axis against the stored reference; the other axes keep their stored ranks. The response is then one unit system: `is_anomaly_before/after/change`, `anomaly_score_before/after`, `conformal_p_before/after`, `held_axes` (axes whose stored rank was kept), `top_dimensions_after` (`{dim, z, bits}`, the evidence split `explain_anomaly` reports) and `dimensions_overridden` (`{dim, old_value, new_value, old_z, new_z}`, natural values); no shape-space `delta_norm_*` or `top_witness_dims_after` fields.
 
 **Units:** `set_dimension` values are raw shape-vector units — post-edge-normalisation for `relations` dims, raw aggregation output for `edge_dim_aggregations` dims. Call `explain_anomaly` first to identify candidate dim_labels and see the entity's current per-dim shape values.
 
@@ -2262,9 +2270,9 @@ Finds entities with the highest temporal drift — geometric velocity over recor
 | `first_timestamp` / `last_timestamp` | First and last active window |
 | `delta_norm_first` / `delta_norm_last` | Anomaly signal at start and end of recorded history |
 | `reputation` | `{value: Bayesian posterior, anomaly_tenure}` |
-| `intrinsic_displacement` | M3 additive — L2 norm of the entity-driven (σ_v1-normalised) component of drift between the oldest retained and current calibration epoch. `null` when storage backend lacks multi-epoch retention, sphere has `<2` retained epochs, schema_hash mismatch, or `<2` slices for this entity. |
-| `extrinsic_displacement` | M3 additive — L2 norm of the population-recalibration-driven (residual) component. Same null rules. |
-| `intrinsic_fraction` | M3 additive — sum-of-squares ratio `‖I‖² / (‖I‖² + ‖E‖²)` bounded `[0, 1]`. Same null rules. Use `decompose_drift` for the full per-dimension breakdown. |
+| `intrinsic_displacement` | L2 norm of the entity-driven (σ_v1-normalised) component of drift between the oldest retained and current calibration epoch. `null` when storage backend lacks multi-epoch retention, sphere has `<2` retained epochs, schema_hash mismatch, or `<2` slices for this entity. |
+| `extrinsic_displacement` | L2 norm of the population-recalibration-driven (residual) component. Same null rules. |
+| `intrinsic_fraction` | Sum-of-squares ratio `‖I‖² / (‖I‖² + ‖E‖²)` bounded `[0, 1]`. Same null rules. Use `decompose_drift` for the full per-dimension breakdown. |
 | `drift_forecast` | (when `forecast_horizon` set) `{predicted_delta_norm, forecast_is_anomaly, current_is_anomaly, reliability, horizon}` |
 
 Entity properties are in the top-level `properties` table keyed by `primary_key`. `filters` and `forecast_horizon` are echoed only when set.
@@ -2339,7 +2347,7 @@ Gathers anomaly signals from all patterns an entity participates in — one call
 |-------|-------------|
 | `source_count` | Number of patterns flagging anomaly. ≥2 = multi-source risk signal (reduces FP rate). |
 | `risk_score` | Weighted anomaly density across patterns (continuous 0.0–N). Each pattern contributes `anomalous_count / related_count`. |
-| `connected_risk` | Mean `delta_rank_pct` of anomalous counterparties (0–100). `null` when no composite pattern signal. |
+| `connected_risk` | Mean `score_rank_pct` of anomalous counterparties (0–100). `null` when no composite pattern signal. |
 | `signals{}` | Per-pattern signals: `{pattern_id: {type, is_anomaly, delta_norm, ...}}`. Types: `direct`, `composite`, `chain`. |
 
 **Signal types:**
@@ -2381,19 +2389,19 @@ Multi-detector anomaly consensus. Calibrates each enabled detector to a per-enti
 
 Available detectors:
 
-- `delta_norm` — population-relative geometry deviation (always available)
+- `delta_norm` — the pattern's own anomaly p-value (`conformal_p`; on a calibrated pattern, the p-value of its evidence score) (always available)
 - `neighbor_contamination` — graph-neighbour anomaly density
 - `segment_shift` — categorical-segment anomaly rate (Fisher exact, back-projected per entity)
 - `trajectory_continuous` — DTW distance vs population-median trajectory. Opt-in: not in the default set; pass it in `detectors`. It reads the temporal history of the sampled entities.
 - `density_gap` — local density-gap detector (currently aggregate-only — findings describe missing population, not per-entity attribution; contributes no per-entity p-value and is silently skipped)
 
-Detectors that fail to produce a value for a given entity are silently skipped — HMP is then computed from the remaining detectors that fired. `delta_norm` is the always-available primary path.
+Every entity is combined over the same family — the detectors that produced a value for any entity in the call. A family detector that cannot score an entity (an account without graph neighbours) counts as no evidence (p = 1), so missing coverage neither rewards nor penalises it; `p_per_detector` lists only the detectors that produced a value. Each p is floored at the population's resolution `1/(N+1)`, so a segment-level test cannot tie a whole segment. `delta_norm` is the always-available primary path.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `pattern_id` | string | required | Pattern to score |
 | `detectors` | list[string] | `null` (all five) | Subset of detector names to include |
-| `weights` | dict[string, float] | `null` (uniform) | Per-detector weight; uniform across detectors that produced a p-value for the entity |
+| `weights` | dict[string, float] | `null` (uniform) | Per-detector weight; uniform over the call's detector family |
 | `sample_size` | int | `10000` | Cap on geometry rows used per detector |
 | `top_n` | int | `50` | Maximum entries returned |
 
@@ -2426,7 +2434,7 @@ Screens an entire entity population across all geometric patterns in one call. F
 |-----------|------|---------|-------------|
 | `home_line_id` | string | required | Entity line to screen |
 | `threshold` | int | `2` | Minimum source count to include in results |
-| `scoring` | string | `"count"` | `"count"` = binary source count; `"weighted"` = density-based (direct patterns use `delta_norm / theta_norm`); any other value returns an error |
+| `scoring` | string | `"count"` | `"count"` = binary source count; `"weighted"` = density-based (direct patterns use `delta_norm / theta_norm`, or `log(conformal_p) / log(alpha)` on a calibrated pattern); any other value returns an error |
 | `sources` | string | `null` | JSON array of source specs; null = auto-discover all patterns |
 | `include_borderline` | bool | `false` | When `sources` is null (auto-discover), also register borderline sources for each pattern |
 | `borderline_rank_threshold` | int | `80` | Rank percentile threshold for borderline sources (used with `include_borderline`) |
@@ -2452,7 +2460,7 @@ Screens an entire entity population across all geometric patterns in one call. F
 - `compound` — geometry ∩ points intersection
 - `graph` — graph contagion: flags entities whose anomalous counterparty ratio exceeds `contagion_threshold`. Requires event pattern with edge table. Auto-discovered by `auto_discover()`
 
-Each source hit carries `anomaly_intensity`, its contribution to `weighted_score`: `delta_norm / theta_norm` for geometry sources, `anomalous_count / related_count` for chain, composite and graph sources, `1.0` for points sources. For chain and composite sources, `related_count` in each hit reflects the entity-specific related count (not the total pattern population).
+Each source hit carries `anomaly_intensity`, its contribution to `weighted_score`: `delta_norm / theta_norm` for geometry sources (`log(conformal_p) / log(alpha)` on a calibrated pattern, where `alpha = 1 − anomaly_percentile/100` is the alarm budget; either way 1 marks the anomaly boundary), `anomalous_count / related_count` for chain, composite and graph sources, `1.0` for points sources. For chain and composite sources, `related_count` in each hit reflects the entity-specific related count (not the total pattern population).
 
 ---
 
@@ -2460,7 +2468,7 @@ Each source hit carries `anomaly_intensity`, its contribution to `weighted_score
 
 ### `recalibrate`
 
-Full recalibration: reads all shape vectors, recomputes population statistics (mu/sigma/theta), rebuilds delta vectors, and replaces the calibration-dependent geometry columns (`delta`, `delta_norm`, `is_anomaly`, `delta_rank_pct`, `delta_dim_*`, `conformal_p`, `bregman_divergence`, `n_anomalous_dims`) in one Lance commit. `anomaly_confidence` (bootstrap stability of the previous fit) and `delta_norm_signed` (label-aware projection) cannot be recomputed from the new fit and become null — tools then fall back to `delta_norm`; rebuild the sphere to restore them. Key and relation columns and their indexes are not rewritten; only the indexes on the replaced columns are rebuilt. The current session and every tool see the new calibration immediately; other sessions keep their snapshot until they reopen the sphere.
+Full recalibration: reads all shape vectors, recomputes population statistics (mu/sigma/theta), rebuilds delta vectors, and replaces the calibration-dependent geometry columns (`delta`, `delta_norm`, `is_anomaly`, `score_rank_pct`, `delta_dim_*`, `conformal_p`, `bregman_divergence`, `n_anomalous_dims`) in one Lance commit. On a calibrated pattern it also refits the score reference — stored as a new calibration epoch — and rewrites `anomaly_score`, `axis_ranks` and `score_delta`; this also clears the `calibration_age` alert. `anomaly_confidence` (bootstrap stability of the previous fit) and `delta_norm_signed` (label-aware projection) cannot be recomputed from the new fit and become null — tools then fall back to `delta_norm`; rebuild the sphere to restore them. Key and relation columns and their indexes are not rewritten; only the indexes on the replaced columns are rebuilt. The current session and every tool see the new calibration immediately; other sessions keep their snapshot until they reopen the sphere.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -2480,7 +2488,7 @@ Full recalibration: reads all shape vectors, recomputes population statistics (m
 
 Compares one pattern between a branch and main (or between two branches). Returns anomaly counts, entities that flipped in or out of the anomaly set, Jaccard overlap of the two anomaly sets, top movers by relative `delta_norm` change, keys present on one side only, calibration drift between the two fits, and the branch's recipe log. Read-only; does not modify any ref.
 
-Anomaly membership uses each side's own global threshold — the same rule as `anomaly_summary` and `find_anomalies`.
+Anomaly membership uses the same rule as `anomaly_summary` and `find_anomalies`: on a calibrated pattern (non-empty `score_dims`), the stored `is_anomaly` flag; on other patterns, `delta_norm` at or above that side's global threshold. On a calibrated pattern `theta_from` / `theta_to` hold the lowest flagged `anomaly_score` on each side (just above the highest score when nothing is flagged), flipped-entity ordering uses `anomaly_score`, and `cause` is derived from `anomaly_score` vs the threshold. For entities scored without the motion axis (calibrated against the reference with no temporal component), the score boundary is approximate and `cause` may mislabel the flip; counts are exact.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -2499,11 +2507,11 @@ Anomaly membership uses each side's own global threshold — the same rule as `a
 | `anomalies_to` | Count of entities at or above the to-side threshold |
 | `flipped_in` | Among entities on both sides, those anomalous on the branch but not on the from side |
 | `flipped_out` | Among entities on both sides, those anomalous on the from side but not on the branch |
-| `theta_from` / `theta_to` | The two global thresholds |
+| `theta_from` / `theta_to` | The two thresholds: `delta_norm` at the anomaly percentile on uncalibrated patterns; on a calibrated pattern the lowest flagged `anomaly_score` on that side (or just above the highest score when nothing is flagged) |
 | `flipped_in_top` | Flipped-in entities furthest past the branch's threshold, up to `top_n`; each has `cause`: `threshold` (the threshold moved past its unchanged score), `score` (its score crossed the unchanged threshold) or `both` |
 | `flipped_out_top` | Flipped-out entities furthest past the from side's threshold, up to `top_n`, with `cause` |
 | `jaccard` | Intersection-over-union of the two anomaly sets |
-| `top_movers` | Entities with the largest relative `delta_norm` change, up to `top_n` |
+| `top_movers` | Entities that moved most, up to `top_n`: by the change of evidence bits (`−log2 conformal_p`) on a calibrated pattern, by relative `delta_norm` change otherwise. Rows of `top_movers`, `flipped_in_top` and `flipped_out_top` carry `delta_norm_from/to`, `relative_change`, `is_anomaly_from/to`, `rank_pct_from/to` (the `score_rank_pct` of each side) and, on a calibrated pattern, `anomaly_score_from/to` and `evidence_change` (bits on the branch minus bits on the from side) |
 | `only_in_from` | Keys present on the from side only (not on the to side) |
 | `only_in_to` | Keys present on the to side only |
 | `calibration_drift` | `CalibrationDriftReport` for the two fits; `null` when the schemas differ |
@@ -2551,7 +2559,7 @@ Detect entities anomalous in one pattern but normal in another (cross-pattern sp
 | `entity_line` | string | required | Anchor line to screen (e.g. "customers") |
 | `top_n` | integer | 50 | Max results, sorted by delta_norm descending |
 
-**Returns:** `entity_line`, `total_found`, `results[]` where each result has: `entity_key`, `anomalous_pattern`, `normal_patterns`, `delta_norm_anomalous`, `delta_rank_pct_anomalous`, `interpretation`.
+**Returns:** `entity_line`, `total_found`, `results[]` where each result has: `entity_key`, `anomalous_pattern`, `normal_patterns`, `delta_norm_anomalous`, `score_rank_pct_anomalous`, `interpretation`.
 
 Returns `{"diagnostic": "..."}` (instead of silent empty) if entity_line is covered by fewer than 2 patterns.
 
@@ -2684,16 +2692,27 @@ Delta vectors are z-scored: each dimension is normalized by population standard 
 
 - A component of `2.0` means 2 standard deviations from the class mean on that dimension
 - `delta_norm` is the L2 norm of the z-scored vector — scale-invariant across dimensions
-- `is_anomaly = (delta_norm > theta_norm)` where theta is also stored in z-score space
+- `delta` and `delta_norm` describe the entity's shape (how far it sits from the centroid, per named dimension). On patterns without the calibrated score `is_anomaly = (delta_norm > theta_norm)`, theta stored in z-score space
+
+### Calibrated anomaly score
+
+Continuous anchor patterns whose dimensions are point properties carry a second layer, the calibrated evidence score (`score_dims` and `score_axes` in `get_sphere_info`):
+
+- `anomaly_score` — the mean of the population ranks of the scoring axes: `mahal` (Ledoit–Wolf Mahalanobis distance on rank-Gaussian coordinates of `score_dims`), `current` (the entity's motion against the population's velocity field, from the event pattern with an edge table on its line — requested by default, fitted only when such an event line exists) and, when the pattern opts in, `knn` (distance to its nearest peers)
+- `conformal_p` — split-conformal p-value of the score against the calibration reference stored with the sphere
+- `is_anomaly = conformal_p ≤ 1 − anomaly_percentile/100` — the alarm budget: at the 95th percentile 5 % of the population is flagged, and 5 % of a population like the reference would be. θ is not the boundary on these patterns
+- `score_delta` — the rank-Gaussian coordinates the score is computed on (`{dim: z}` in `get_polygon`)
+
+`explain_anomaly` splits the evidence `−log2 conformal_p` into bits per axis and per dimension. New entities (incremental ingest, hypothetical-entity tools) are scored against the stored reference without a refit; `check_alerts` raises `calibration_age` when the reference is older than 60 days.
 
 ### Continuous anomaly signal
 
-Every polygon exposes `delta_rank_pct` (0–100): percentile in the population's `delta_norm` distribution.
+Every polygon exposes `score_rank_pct` (0–100): the rank of its anomaly score in the population — `anomaly_score` on calibrated patterns, `delta_norm` otherwise.
 
 - `95+` = top 5% most anomalous; `50` = median entity
-- `is_anomaly=true` typically corresponds to `delta_rank_pct > ~90–99` depending on calibration
+- On calibrated patterns `is_anomaly` follows `conformal_p`, so `is_anomaly=true` corresponds to `score_rank_pct` above the anomaly percentile; on other patterns it typically sits at `score_rank_pct > ~90–99` depending on calibration
 
-**Ties in binary patterns:** Many entities may share identical `delta_norm`, resulting in identical `delta_rank_pct`. Use `delta_norm` directly and cross-reference `is_anomaly` within tied groups.
+**Ties in binary patterns:** Many entities may share identical `delta_norm`, resulting in identical `score_rank_pct`. Use `delta_norm` directly and cross-reference `is_anomaly` within tied groups.
 
 ### Hard caps
 
@@ -2750,16 +2769,16 @@ Filters by geometry columns before aggregation or result return.
 
 ```python
 {"is_anomaly": True}
-{"delta_rank_pct": {"gt": 95}}
+{"score_rank_pct": {"gt": 95}}
 {"delta_dim": {"accounts": {"gt": 0.5}}}
 {"alias_inside": "alias_id"}        # requires cutting_plane on alias
 ```
 
 Supported keys and operators:
 - `is_anomaly` (bool): equality only
-- `delta_rank_pct` (comparison): `gt`, `gte`, `lt`, `lte`, `eq`
+- `score_rank_pct` (comparison): `gt`, `gte`, `lt`, `lte`, `eq`
 - `delta_dim` (per-dimension): dimension name + comparison ops; AND across multiple dimensions
-- `alias_inside` (string alias ID): full geometry scan required (~500ms on 1M-event patterns); combine with `is_anomaly` or `delta_rank_pct` to narrow scan first
+- `alias_inside` (string alias ID): full geometry scan required (~500ms on 1M-event patterns); combine with `is_anomaly` or `score_rank_pct` to narrow scan first
 
 Unknown keys raise an error. Combines with edge filters (AND): geometry pre-filter runs first.
 

@@ -46,7 +46,7 @@ def _make_edge(
 
 
 def _make_polygon(
-    bk: str = "CUST-0001", is_anomaly: bool = False, delta_rank_pct: float | None = 75.0
+    bk: str = "CUST-0001", is_anomaly: bool = False, score_rank_pct: float | None = 75.0
 ) -> Polygon:
     edges = [
         _make_edge("products", "PROD-001", "alive", "out"),
@@ -66,7 +66,7 @@ def _make_polygon(
         edges=edges,
         last_refresh_at=datetime(2024, 1, 1, tzinfo=UTC),
         updated_at=datetime(2024, 1, 1, tzinfo=UTC),
-        delta_rank_pct=delta_rank_pct,
+        score_rank_pct=score_rank_pct,
     )
 
 
@@ -179,33 +179,42 @@ class TestSerializePolygon:
         assert isinstance(result["delta_norm"], float)
         assert len(str(result["delta_norm"]).split(".")[-1]) <= 4
 
-    def test_delta_rank_pct_included(self) -> None:
-        poly = _make_polygon(delta_rank_pct=75.0)
+    def test_score_rank_pct_included(self) -> None:
+        poly = _make_polygon(score_rank_pct=75.0)
         result = _serialize_polygon(poly)
-        assert "delta_rank_pct" in result
-        assert result["delta_rank_pct"] == 75.0
-
-    def test_delta_rank_pct_omitted_when_none(self) -> None:
-        poly = _make_polygon(delta_rank_pct=None)
-        result = _serialize_polygon(poly)
+        assert result["score_rank_pct"] == 75.0
         assert "delta_rank_pct" not in result
 
-    def test_per_dim_fdr_fields_emitted_when_attached(self) -> None:
+    def test_score_rank_pct_omitted_when_none(self) -> None:
+        poly = _make_polygon(score_rank_pct=None)
+        result = _serialize_polygon(poly)
+        assert "score_rank_pct" not in result
+
+    def test_calibrated_score_fields_emitted_unrounded(self) -> None:
+        poly = _make_polygon(is_anomaly=True)
+        poly.anomaly_score = 2.718281828
+        poly.conformal_p = 3.1e-07
+        result = _serialize_polygon(poly)
+        assert result["anomaly_score"] == 2.718281828
+        assert result["conformal_p"] == 3.1e-07
+
+    def test_anomaly_score_omitted_when_it_repeats_delta_norm(self) -> None:
         poly = _make_polygon()
+        poly.anomaly_score = poly.delta_norm
+        poly.conformal_p = 0.25
+        result = _serialize_polygon(poly)
+        assert "anomaly_score" not in result
+        assert result["conformal_p"] == 0.25
+
+    def test_entity_fdr_fields_never_emitted(self) -> None:
+        poly = _make_polygon()
+        poly.q_value = 0.01
         poly.q_values_per_dim = [0.001234, 0.500000]
         poly.min_q_per_dim = 0.001234
         poly.dominant_q_dim_idx = 0
         result = _serialize_polygon(poly)
-        assert result["min_q_per_dim"] == 0.001234
-        assert result["dominant_q_dim_idx"] == 0
-        assert result["q_values_per_dim"] == [0.001234, 0.5]
-
-    def test_per_dim_fdr_fields_absent_when_not_set(self) -> None:
-        poly = _make_polygon()
-        result = _serialize_polygon(poly)
-        assert "min_q_per_dim" not in result
-        assert "dominant_q_dim_idx" not in result
-        assert "q_values_per_dim" not in result
+        for key in ("q_value", "min_q_per_dim", "dominant_q_dim_idx", "q_values_per_dim"):
+            assert key not in result
 
 
 class TestSerializeSlice:
@@ -261,7 +270,6 @@ class _MockPattern:
             sigma_diag if sigma_diag is not None else np.ones(n_total, dtype=np.float32)
         )
         self.dimension_weights = None
-        self.cholesky_inv = None
 
 
 class TestSerializeSolid:

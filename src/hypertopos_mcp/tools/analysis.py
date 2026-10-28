@@ -95,15 +95,15 @@ def compare_entities(
             "distance": round(float(dist), 4),
             "polygon_a": {
                 "delta_norm": round(geo["delta_norm_a"], 4),
-                "delta_rank_pct": round(geo["delta_rank_pct_a"], 2)
-                if geo["delta_rank_pct_a"] is not None
+                "score_rank_pct": round(geo["score_rank_pct_a"], 2)
+                if geo["score_rank_pct_a"] is not None
                 else None,
                 "is_anomaly": geo["is_anomaly_a"],
             },  # noqa: E501
             "polygon_b": {
                 "delta_norm": round(geo["delta_norm_b"], 4),
-                "delta_rank_pct": round(geo["delta_rank_pct_b"], 2)
-                if geo["delta_rank_pct_b"] is not None
+                "score_rank_pct": round(geo["score_rank_pct_b"], 2)
+                if geo["score_rank_pct_b"] is not None
                 else None,
                 "is_anomaly": geo["is_anomaly_b"],
             },  # noqa: E501
@@ -195,9 +195,20 @@ def compare_branches(
     Use after recalibrate(pattern_id, branch=..., exclude_keys=...) to see what
     a counterfactual calibration changes before keeping or deleting the branch.
 
+    Anomaly membership follows the same rule as anomaly_summary and find_anomalies:
+    stored is_anomaly flag on calibrated patterns (score_dims set); delta_norm at
+    or above the global theta on other patterns. On a calibrated pattern
+    theta_from / theta_to hold the lowest flagged anomaly_score on each side,
+    flipped-entity ordering uses anomaly_score, and cause is derived from
+    anomaly_score vs the threshold. For entities scored without the motion axis
+    the score boundary is approximate and cause may mislabel the flip; counts
+    are exact.
+
     Returns: anomaly counts per side, flipped_in / flipped_out (entities that
     became / stopped being anomalous on the branch), jaccard of the anomaly
-    sets, top_movers by delta_norm change, keys on one side only,
+    sets, top_movers (by the change of evidence bits, -log2 conformal_p, on a
+    calibrated pattern, with anomaly_score_from/to and evidence_change; by
+    relative delta_norm change otherwise), keys on one side only,
     calibration_drift between the two fits, and the branch's recipe log
     (compact format: recipe lists longer than 10, such as exclude_keys, are cut
     to their first 10; `omitted.recipe` gives each full length).
@@ -423,7 +434,10 @@ def find_calibration_influencers(
     Returns: JSON-encoded InfluenceReport with cell_counts + entries (fields that do
     not apply to the call, e.g. cluster_size without auto_discover, are omitted).
 
-    Raises ValueError on event pattern, N<2, invalid threshold/classify/top_n/auto_k.
+    Raises ValueError on event pattern, calibrated pattern (score_dims set — the
+    leave-one-out μ/σ refit is not the anomaly boundary on these patterns; use
+    explain_anomaly to understand why a specific entity is flagged), N<2,
+    invalid threshold/classify/top_n/auto_k.
     """
     from dataclasses import asdict
 
@@ -765,7 +779,7 @@ def find_similar_entities(
 ) -> str:
     """Find top-N entities geometrically most similar to the given entity.
 
-    filter_expr: Lance SQL predicate (e.g. "is_anomaly = true", "delta_rank_pct > 95").
+    filter_expr: Lance SQL predicate (e.g. "is_anomaly = true", "score_rank_pct > 95").
     missing_edge_to: keep only similar entities with NO edge to this line.
     dim_mask: compute distance only on named dimensions (e.g. ["_d_amount_out_std", "_d_sum_in"]).
     metric: "L2" (Euclidean, default) or "cosine" (shape similarity ignoring magnitude).
@@ -830,13 +844,13 @@ def find_similar_entities(
         for bk, dist in similar_pairs
     ]
     similar_properties = tabulate_properties(similar_list, "primary_key")
-    pct = ref_meta["delta_rank_pct"]
+    pct = ref_meta["score_rank_pct"]
     result: dict[str, Any] = {
         "reference": {
             "primary_key": primary_key,
             **({} if not _props(primary_key) else {"properties": _props(primary_key)}),
             "delta_norm": round(float(ref_meta["delta_norm"]), 4),
-            "delta_rank_pct": round(float(pct), 2) if pct is not None else None,
+            "score_rank_pct": round(float(pct), 2) if pct is not None else None,
             "is_anomaly": ref_meta["is_anomaly"],
         },
         "similar": similar_list,
@@ -861,7 +875,7 @@ def find_similar_entities(
         note = f"No entities matching filter_expr='{filter_expr}' found near this entity. "
         if not ref_meta["is_anomaly"] and "is_anomaly" in filter_expr.lower():
             note += (
-                f"Reference entity is not anomalous (delta_rank_pct={pct:.1f}) "
+                f"Reference entity is not anomalous (score_rank_pct={pct:.1f}) "
                 "— anomalous entities form a separate geometric cluster. "
             )
         note += "Try a broader filter or call find_anomalies() for global anomaly discovery."
@@ -1325,7 +1339,7 @@ def find_witness_cohort(
     - delta similarity: exp(-distance / theta_norm), absolute and pool-independent
     - witness overlap: Jaccard on witness dimension labels
     - trajectory alignment: cosine on trajectory vectors (optional, [0, 1])
-    - anomaly bonus: graded by delta_rank_pct / 100
+    - anomaly bonus: graded by score_rank_pct / 100
 
     Excludes entities already connected via the resolved event pattern's edge
     table — this is the function's main contribution over plain ANN, removing
@@ -1383,7 +1397,7 @@ def find_chains_for_entity(
 ) -> str:
     """Find transaction chains involving a specific entity (requires chain pattern with chain_keys column).
 
-    Returns: chains enriched with is_anomaly, delta_norm, delta_rank_pct.
+    Returns: chains enriched with is_anomaly, delta_norm, score_rank_pct.
     """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
@@ -1455,7 +1469,7 @@ def anomaly_propagation_in_chain(
     the latter sweeps the population of chains; this primitive takes one
     chain_id and returns its hop-by-hop anomaly trace — for each entity in
     the chain's keys sequence, returns is_anomaly + delta_norm + top
-    dominant dim + delta_rank_pct. Use after a population sweep to
+    dominant dim + score_rank_pct. Use after a population sweep to
     drill into a specific flagged chain.
 
     Args:
@@ -1466,7 +1480,7 @@ def anomaly_propagation_in_chain(
             accounts).
 
     Returns: hops[] (per-hop progression with hop_idx, primary_key,
-    is_anomaly, delta_norm, top_dim, delta_rank_pct), plus summary
+    is_anomaly, delta_norm, top_dim, score_rank_pct), plus summary
     (n_hops, n_anomalous, max_run_length_same_top_dim, dominant_top_dim).
     """
     _require_navigator()
@@ -1803,7 +1817,7 @@ def extend_chain(
     next / previous hop is never a candidate (it is already in the trace).
 
     Returns: boundary_key, boundary_position, candidates[] (entity_key,
-    is_anomaly, delta_norm, delta_rank_pct, n_source_chains,
+    is_anomaly, delta_norm, score_rank_pct, n_source_chains,
     source_chain_ids), summary (n_candidates, n_anomalous_candidates,
     n_unique_keys).
     """
@@ -2117,11 +2131,21 @@ def simulate_dimension_change(
     for non-edge dimensions. Pure recomputation over the stored polygon — no
     storage scan, sub-millisecond per call.
 
+    On a calibrated pattern (score_dims set) values are natural (raw property)
+    values of score dimensions (a "_d_" label names the same dim; other dims
+    return an error); they are rescored on the mahal axis against the stored
+    reference, other axes keep their stored ranks (held_axes). The response is
+    then anomaly_score/conformal_p before/after, is_anomaly before/after/change,
+    held_axes, top_dimensions_after ({dim, z, bits}, as explain_anomaly) and
+    dimensions_overridden ({dim, old_value, new_value, old_z, new_z}); no
+    shape-space delta_norm fields.
+
     Args:
         primary_key: entity id whose polygon to perturb.
         pattern_id: pattern owning the entity.
         line_id: kept for signature parity with simulate_edge_removal; not consumed.
-        set_dimension: {dim_label: new_value} — raw shape-vector units.
+        set_dimension: {dim_label: new_value} — raw shape-vector units
+            (natural values on a calibrated pattern).
         top_n: per-call cap on top_witness_dims_after entries. Default 5.
 
     Returns: primary_key, pattern_id, set_dimension (echo), delta_norm_before,
@@ -2129,6 +2153,8 @@ def simulate_dimension_change(
     is_anomaly_before, is_anomaly_after, is_anomaly_change, top_witness_dims_after
     (list of {dim_label, dim_index, contribution_pct, delta}), dimensions_overridden
     (list of {dim_label, dim_index, old_value, new_value, old_delta, new_delta}).
+    On a calibrated pattern: also anomaly_score_before, anomaly_score_after,
+    conformal_p_before, conformal_p_after, held_axes.
     Invalid input returned as {"error": ..., "primary_key": ...} JSON.
     """
     _require_navigator()
@@ -3176,7 +3202,7 @@ def combine_anomaly_pvalues(
 
     Available detectors:
 
-    * ``delta_norm`` — population-relative geometry deviation (always available)
+    * ``delta_norm`` — the pattern's own anomaly p-value (``conformal_p``) (always available)
     * ``neighbor_contamination`` — graph-neighbour anomaly density
     * ``segment_shift`` — categorical-segment anomaly rate shift (Fisher exact)
     * ``trajectory_continuous`` — DTW distance vs population-median trajectory;
@@ -3188,15 +3214,16 @@ def combine_anomaly_pvalues(
 
     Detectors that fail to produce a p-value for a given entity (no temporal
     solid for ``trajectory_continuous``, no string columns for
-    ``segment_shift``, structurally aggregate ``density_gap``) are silently
-    skipped per entity — HMP is computed across the detectors that did fire.
+    ``segment_shift``, structurally aggregate ``density_gap``) count as no
+    evidence (p = 1) for that entity: every entity is combined over the same
+    family of detectors that produced a value in the call.
 
     Args:
         pattern_id: Pattern to score.
         detectors: Subset of detector names to include. ``None`` enables the
             default set (every detector except the opt-in ``trajectory_continuous``).
-        weights: Per-detector weight; defaults to uniform across detectors
-            that produced a p-value for the given entity.
+        weights: Per-detector weight; defaults to uniform over the call's
+            detector family.
         sample_size: Cap on geometry rows used per detector. Default 10_000.
         top_n: Maximum entries returned in the ranked list. Default 50.
 
@@ -3304,7 +3331,7 @@ def check_anomaly_batch(
 ) -> str:
     """Check anomaly status for multiple entities in one call (stateless read). Hard cap 500 keys.
 
-    Returns: is_anomaly and delta_rank_pct per key, anomalous_count, recall_if_all_bad.
+    Returns: is_anomaly and score_rank_pct per key, anomalous_count, recall_if_all_bad.
     """
     _require_navigator()
     if len(primary_keys) > 500:
@@ -3321,7 +3348,7 @@ def check_anomaly_batch(
         pattern_id,
         version,
         point_keys=primary_keys,
-        columns=["primary_key", "is_anomaly", "delta_rank_pct"],
+        columns=["primary_key", "is_anomaly", "score_rank_pct"],
     )
 
     # Build result map
@@ -3334,7 +3361,9 @@ def check_anomaly_batch(
             {
                 "primary_key": pk,
                 "is_anomaly": bool(geo["is_anomaly"][i].as_py()),
-                "delta_rank_pct": round(float(geo["delta_rank_pct"][i].as_py()), 2),
+                "score_rank_pct": (
+                    None if (pct := geo["score_rank_pct"][i].as_py()) is None else round(pct, 2)
+                ),
             }
         )
 
@@ -3364,7 +3393,8 @@ def explain_anomaly(
 ) -> str:
     """Full structured explanation of why an entity is anomalous.
 
-    Returns: severity, witness set, repair set, top dimensions (`{dim, kind, delta, pct_of_total}`, `pct_of_total` = the dim's share of `delta_norm²`, the metric behind `is_anomaly`; dims with a zero share omitted), p-value, temporal context, reputation, composite risk.
+    Calibrated patterns (non-empty score_dims): severity (normal|low|medium|high|extreme from conformal_p against the alarm budget alpha = 1 - anomaly_percentile/100; normal above alpha), conformal_p, anomaly_score, delta_norm (shape-space, reference only); when not normal also bits (= -log2 conformal_p), axes ({axis: {rank, bits}}, bits sum to bits) and top_dimensions (`{dim, z, bits, pct_of_total}`, z = rank-Gaussian coordinate, bits sum to axes.mahal.bits; zero-share dims omitted); plus temporal_slices and reputation.
+    Other patterns: severity, witness set, repair set, top dimensions (`{dim, kind, delta, pct_of_total}`, `pct_of_total` = the dim's share of `delta_norm²`, the metric behind `is_anomaly`; dims with a zero share omitted), p-value, temporal context, reputation, composite risk.
     """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
@@ -3410,8 +3440,9 @@ def find_diverse_explanations(
             (0.0-1.0). Hypotheses below this floor are dropped, which
             drives the graceful degradation. Default 0.10.
         validate: when True, each hypothesis is validated by
-            `simulate_dimension_change` (override dims to mu, check
-            delta_norm_after < theta_norm). Default False.
+            `simulate_dimension_change` (override dims to mu; on a calibrated
+            pattern each score dimension is set to its reference median instead,
+            and the validation block adds conformal_p_after_override). Default False.
 
     Returns: `{primary_key, pattern_id, delta_norm, theta_norm,
     n_hypotheses_requested, n_hypotheses_returned, hypotheses (list of
@@ -3462,7 +3493,7 @@ def assess_anomaly_certainty(
 
     Composes five existing primitives — explain_anomaly (driving dims,
     conformal_p, signed_confidence, reliability flags), get_entity_geometry_meta
-    (delta_norm + theta_norm boundary check), find_anomalies for each alpha
+    (delta_norm + boundary check), find_anomalies for each alpha
     (FDR-gated stability), sphere_overview (calibration staleness), and
     cross_pattern_profile (cross-pattern consistency) — into a single verdict
     on classification certainty. ``certainty_verdict`` is certainty about
@@ -3485,10 +3516,11 @@ def assess_anomaly_certainty(
         - near_data_boundary → "low"
         - else → "moderate"
 
-    ``near_data_boundary`` fires when delta_norm sits in [0.8·theta_norm,
-    1.2·theta_norm] — the same band ``find_anomalies(boundary_aware=True)``
-    uses for stratified sampling, so verdicts here align with the
-    calibration-audit surface.
+    ``near_data_boundary`` fires, on a calibrated pattern (non-empty
+    ``score_dims``), when conformal_p sits in [alpha/2, 2·alpha] of the alarm
+    budget alpha = 1 - anomaly_percentile/100; on other patterns when
+    delta_norm sits in [0.8·theta_norm, 1.2·theta_norm] — the band
+    ``find_anomalies(boundary_aware=True)`` uses for stratified sampling.
 
     ``calibration_stale`` mirrors ``sphere_overview.calibration_health`` —
     True when the focal pattern's health is ``"suspect"`` or ``"poor"``.
@@ -3521,7 +3553,7 @@ def assess_anomaly_certainty(
         "pattern_id": pattern_id,
     }
 
-    # Step 1: stored geometry meta (delta_norm + is_anomaly + delta_rank_pct)
+    # Step 1: stored geometry meta (delta_norm + is_anomaly + score_rank_pct)
     try:
         geo_meta = nav.get_entity_geometry_meta(primary_key, pattern_id)
         is_anomalous = bool(geo_meta["is_anomaly"])
@@ -3567,14 +3599,20 @@ def assess_anomaly_certainty(
     except (GDSNavigationError, ValueError, KeyError) as exc:
         steps_status["explain_anomaly"] = {"ok": False, "error": str(exc)}
 
-    # Step 3: near_data_boundary via theta_norm band
+    # Step 3: near_data_boundary — conformal_p near the alarm budget on a
+    # calibrated pattern (theta is not its boundary), theta_norm band otherwise
     near_data_boundary = False
     try:
         sphere = _state["sphere"]._sphere
         pattern = sphere.patterns[pattern_id]
-        theta_norm = float(np.linalg.norm(pattern.theta))
-        if theta_norm > 0.0:
-            near_data_boundary = bool(0.8 * theta_norm <= delta_norm <= 1.2 * theta_norm)
+        if getattr(pattern, "score_dims", None):
+            alpha = 1.0 - float(pattern.anomaly_percentile) / 100.0
+            if conformal_p is not None:
+                near_data_boundary = bool(0.5 * alpha <= conformal_p <= 2.0 * alpha)
+        else:
+            theta_norm = float(np.linalg.norm(pattern.theta))
+            if theta_norm > 0.0:
+                near_data_boundary = bool(0.8 * theta_norm <= delta_norm <= 1.2 * theta_norm)
         steps_status["boundary_band"] = {"ok": True}
     except (KeyError, AttributeError, ValueError) as exc:
         steps_status["boundary_band"] = {"ok": False, "error": str(exc)}

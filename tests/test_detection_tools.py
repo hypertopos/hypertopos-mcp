@@ -48,7 +48,7 @@ class TestDetectCrossPatternDiscrepancy:
                 "anomalous_pattern": "pat_a",
                 "normal_patterns": ["pat_b"],
                 "delta_norm_anomalous": 1.23,
-                "delta_rank_pct_anomalous": 97.5,
+                "score_rank_pct_anomalous": 97.5,
                 "interpretation": "C001 is anomalous in pat_a but normal in pat_b",
             }
         ]

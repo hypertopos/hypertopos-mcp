@@ -14,6 +14,13 @@ from typing import Any
 import anyio
 
 
+def _leaves(exc: BaseException) -> list[BaseException]:
+    """The innermost exceptions of a (nested) exception group."""
+    if isinstance(exc, BaseExceptionGroup):
+        return [leaf for sub in exc.exceptions for leaf in _leaves(sub)]
+    return [exc]
+
+
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -330,7 +337,6 @@ def test_idle_header_sessions_are_evicted() -> None:
     server.set_header_session_idle_timeout(60.0)
     try:
         add("header:stale", 120.0)
-        add("anonymous", 120.0)
         add("header:fresh", 5.0)
         busy = add("header:busy", 120.0)
         add("http:abc", 120.0)
@@ -341,8 +347,7 @@ def test_idle_header_sessions_are_evicted() -> None:
 
         anyio.run(sweep_while_busy)
         assert "header:stale" not in server._sessions
-        assert "anonymous" not in server._sessions
-        assert sorted(closed) == ["anonymous", "header:stale"]
+        assert sorted(closed) == ["header:stale"]
         assert "header:fresh" in server._sessions
         assert "header:busy" in server._sessions  # a running call keeps its session
         assert "http:abc" in server._sessions  # ended by the SDK, not by this sweep
@@ -351,3 +356,71 @@ def test_idle_header_sessions_are_evicted() -> None:
         server.set_header_session_idle_timeout(old)
         for key in ("header:fresh", "header:busy", "http:abc"):
             server._sessions.pop(key, None)
+
+
+def test_stateless_protocol_clients_without_a_key_are_refused(open_berka_sphere: str) -> None:
+    """A client on the stateless protocol sends no Mcp-Session-Id; without
+    X-Hypertopos-Session two such clients would share one open sphere. Their
+    first session request is refused with the header named."""
+    import uvicorn
+    from mcp.client.client import Client
+    from mcp.shared.exceptions import MCPError
+
+    from hypertopos_mcp.server import mcp
+
+    outcome: dict[str, object] = {}
+
+    async def main() -> None:
+        port = _free_port()
+        server = uvicorn.Server(
+            uvicorn.Config(
+                mcp.streamable_http_app(), host="127.0.0.1", port=port, log_level="error"
+            )
+        )
+        url = f"http://127.0.0.1:{port}/mcp"
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(server.serve)
+            while not server.started:
+                await anyio.sleep(0.05)
+            try:
+                async with Client(url) as client:
+                    outcome["auto_protocol"] = client.protocol_version
+                    stats = await client.call_tool("get_session_stats", {})
+                    outcome["auto_key"] = json.loads(stats.content[0].text)["session_key"]
+            except* MCPError as group:
+                outcome["auto_error"] = " ".join(str(e) for e in _leaves(group))
+            try:
+                async with Client(url, mode="2026-07-28") as client:
+                    await client.call_tool("get_session_stats", {})
+            except* MCPError as group:
+                outcome["pinned_error"] = " ".join(str(e) for e in _leaves(group))
+            server.should_exit = True
+
+    anyio.run(main)
+
+    # Never a shared session: both are refused with the header named.
+    assert "auto_key" not in outcome
+    assert "X-Hypertopos-Session" in str(outcome["auto_error"])
+    assert "X-Hypertopos-Session" in str(outcome.get("pinned_error"))
+
+
+def test_stateless_protocol_in_memory_client_uses_the_local_session(
+    open_berka_sphere: str,
+) -> None:
+    """stdio-like duplex clients on the stateless protocol keep the process's session."""
+    from mcp.client.client import Client
+
+    from hypertopos_mcp.server import mcp
+
+    seen: dict[str, object] = {}
+
+    async def main() -> None:
+        async with Client(mcp) as client:
+            seen["protocol"] = client.protocol_version
+            stats = await client.call_tool("get_session_stats", {})
+            seen["key"] = json.loads(stats.content[0].text)["session_key"]
+
+    anyio.run(main)
+
+    assert seen["protocol"] == "2026-07-28"
+    assert seen["key"] == "local"

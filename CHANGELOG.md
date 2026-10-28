@@ -6,6 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-10-28
+
+### Changed
+
+- `find_anomalies` ranks a calibrated pattern by its calibrated evidence score: the selection is the stored `is_anomaly` (`conformal_p <= 1 - anomaly_percentile/100`, the alarm budget) and the order is `conformal_p` ascending, then `anomaly_score` descending (rows added by incremental ingest are scored without the event axis, so only their p-values compare with built rows). `radius` and `rank_by` now default to `null` (the pattern's own score); `ranked_by` reports `anomaly_score` or `delta_norm`. `radius`, `metric="Linf"`, `dimension_weights`, `rank_by="delta_norm"` / `"signed_confidence"`, `boundary_aware` and `min_confidence > 0` return an error on calibrated patterns. `fdr_alpha` is the level of the cell gate and requires `fdr_resolution` or `fdr_temporal_resolution` (`fdr_method` defaults to `"storey"`).
+- Polygons in `find_anomalies`, `get_polygon`, `attract_boundary`, `compare_entities`, `find_similar_entities` and `check_anomaly_batch` carry `score_rank_pct` in place of `delta_rank_pct`; polygons add `anomaly_score` (when it differs from `delta_norm`) and `conformal_p`. `geometry_filters` / `filter_expr` use `score_rank_pct`.
+- `get_polygon` on a calibrated pattern returns `score_delta` (`{dim: rank-Gaussian value}` over `score_dims`) and no `theta_norm`, `witness` or `repair`.
+- `explain_anomaly` on a calibrated pattern returns `severity` from `conformal_p` against the alarm budget, `conformal_p`, `anomaly_score`, `bits`, `axes` (`{axis: {rank, bits}}`) and `top_dimensions[]` as `{dim, z, bits, pct_of_total}`; no `theta_norm`, `ratio`, `witness`, `repair`, `reliability_flags` or `composite_risk` there.
+- `assess_anomaly_certainty` reads `near_data_boundary` from `conformal_p` near the alarm budget on calibrated patterns.
+- `get_sphere_info` lists `anomaly_percentile` per pattern and `score_dims` / `score_axes` on calibrated patterns.
+- `check_alerts` reports a `calibration_age` alert when a pattern's calibration is older than 60 days.
+- `sphere_overview`, `anomaly_summary`, `aggregate_anomalies`, `detect_data_quality_issues` and `compare_branches` count a calibrated pattern's anomalies by its stored `is_anomaly`, matching `find_anomalies`.
+- `simulate_dimension_change` on a calibrated pattern takes natural values of score dimensions and returns the calibrated layer only: `anomaly_score_before/after`, `conformal_p_before/after`, `held_axes`, `top_dimensions_after` (`{dim, z, bits}`) and `dimensions_overridden` (`{dim, old_value, new_value, old_z, new_z}`); other dimensions return an error. `find_diverse_explanations(validate=True)` there reports `conformal_p_after_override`.
+- `find_anomalies` on a calibrated pattern reports `anomaly_dimensions` as `{dim, z, mahal_share}` and `reliability_flags.dominant_dim` from the evidence split, so they name the same dimension as `explain_anomaly`.
+- `find_calibration_influencers` returns an error on calibrated patterns; use `explain_anomaly` there.
+- `find_anomalies` entries on event and calibrated patterns no longer carry `total_impact` and `classification` (they were always null there).
+- `find_anomalies(include_emerging=True)` on a calibrated pattern returns an empty `emerging` list with `emerging_note`.
+- `passive_scan` weighted scores on calibrated patterns follow the alarm budget: `anomaly_intensity = log(conformal_p) / log(alpha)`, at least 1 for every flagged entity.
+- `compare_branches` on a calibrated pattern ranks `top_movers` by the change of evidence bits (`−log2 conformal_p`) and adds `anomaly_score_from` / `anomaly_score_to` and `evidence_change` to mover and flip rows; `theta_from` / `theta_to` are the lowest flagged score on each side.
+
+### Removed
+
+- `find_anomalies` parameters `p_value_method` and `fdr_axis` and `rank_by="min_q_per_dim"`; output fields `q_value`, `q_values_per_dim`, `min_q_per_dim` and `dominant_q_dim`.
+- `attract_boundary` parameters `fdr_alpha`, `fdr_method` and `p_value_method`, and its `q_value` field.
+
+### Fixed
+
+- `combine_anomaly_pvalues` rankings no longer favour entities that a detector could not score; `composite_risk` reports `combined_p` unrounded.
+- `find_anomalies` documents its `found` field (polygons in the page).
+- The `X-Hypertopos-Session` header value is documented as the session's only credential: use a random, unguessable value; two clients sending the same value share one session.
+
+### Security
+
+- Over HTTP, a request with neither `Mcp-Session-Id` nor `X-Hypertopos-Session` is refused instead of being served from one session shared by every such client. Clients on the stateless MCP protocol send no session id, so two of them could open, read and replace each other's sphere; they now name their session with `X-Hypertopos-Session`, or connect with the session (initialize) protocol.
+
 ## [0.9.3] — 2026-10-26
 
 ### Fixed

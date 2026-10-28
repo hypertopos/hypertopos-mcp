@@ -6,7 +6,7 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-compatible-green.svg)](https://modelcontextprotocol.io)
-[![Version](https://img.shields.io/badge/version-0.9.3-%235500FF.svg)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-0.10.0-%235500FF.svg)](pyproject.toml)
 
 Point the server at a sphere built with [hypertopos](https://github.com/hypertopos/hypertopos-py), connect an MCP client, and the agent navigates the data instead of querying it: rank what is out of place, explain one entity, jump along a relationship, test a what-if on a branch.
 
@@ -101,15 +101,15 @@ detect_pattern(query="accounts with anomalously high transaction counts")
     "rationale": "keyword-based fallback (sampling unavailable)"
   },
   "results": {
-    "find_anomalies": {"total_anomalies": 7, "returned": 7,
-      "top_entities": [{"key": "85", "delta_norm": 34.311}, {"key": "93", "delta_norm": 34.301},
-                       {"key": "72", "delta_norm": 33.366}, …]},
+    "find_anomalies": {"total_anomalies": 5, "returned": 5,
+      "top_entities": [{"key": "20", "delta_norm": 21.667}, {"key": "42", "delta_norm": 15.636},
+                       {"key": "85", "delta_norm": 34.311}, …]},
     "find_regime_changes": {"total": 1, "results": [{"magnitude": 19.23633,
       "top_changed_dimensions": [{"dimension": "_d_burst_daily", "diff": -14.19476}, …],
       "description": "Population centroid shifted 19.236 (threshold 8.135)", "near_data_boundary": true}]},
     …
   },
-  "summaries": {"find_anomalies": "7 found, top: 85, 93, 72", "find_regime_changes": "1 found",
+  "summaries": {"find_anomalies": "5 found, top: 20, 42, 85", "find_regime_changes": "1 found",
                 "compare_time_windows": "1 found", "attract_boundary": "10 found, top: 76, 7, 94"},
   "follow_up": ["Regime change detected! Try: detect_pattern('find entities that drifted the most') to identify which entities drove the shift",
                 "Try: detect_pattern('what archetypes exist') for population clustering", …],
@@ -118,45 +118,43 @@ detect_pattern(query="accounts with anomalously high transaction counts")
 }
 ```
 
-`find_anomalies` ranks entities by `delta_norm`, their distance from the population centre, and says per entity which dimensions carry it:
+`find_anomalies` ranks entities by the pattern's calibrated score: `conformal_p` is the share of a population like the calibration reference that would score as high, `is_anomaly` is the alarm budget (`conformal_p` at most 5 % at the 95th percentile), and each entity still says which dimensions carry it:
 
 ```text
 find_anomalies(pattern_id="account_behavior_pattern", top_n=3)
 {
-  "total_found": 7, "found": 3, "ranked_by": "delta_norm",
+  "total_found": 5, "found": 3, "ranked_by": "anomaly_score",
   "polygons": [
-    {"primary_key": "85", "delta_norm": 34.3107, "delta_rank_pct": 99.17, "is_anomaly": true, "anomaly_confidence": 0.92,
-     "reliability_flags": {"single_dim_driven": false, "dominant_dim": "_d_burst_daily", "dominant_dim_share": 0.5233, …},
-     "anomaly_dimensions": [{"label": "_d_burst_daily", "delta": 24.8196, "contribution_pct": 52.3},
-                            {"label": "_d_n_distinct_banks", "delta": -16.278, "contribution_pct": 22.5},
-                            {"label": "_d_burst_weekly", "delta": 16.1628, "contribution_pct": 22.2}]},
-    {"primary_key": "93", "delta_norm": 34.3011, …},
-    {"primary_key": "72", "delta_norm": 33.3662, …}
+    {"primary_key": "20", "delta_norm": 21.6675, "score_rank_pct": 99.17, "is_anomaly": true,
+     "anomaly_score": 0.9958678, "conformal_p": 0.01639344,
+     "reliability_flags": {"single_dim_driven": false, "dominant_dim": "n_distinct_banks", "dominant_dim_share": 0.5311, "flags": []},
+     "anomaly_dimensions": [{"dim": "n_distinct_banks", "z": -3.5857, "mahal_share": 0.5310657},
+                            {"dim": "tx_count", "z": -3.6683, "mahal_share": 0.2030314}, …]},
+    {"primary_key": "42", "anomaly_score": 0.9876033, "conformal_p": 0.02459016, …},
+    {"primary_key": "85", "anomaly_score": 0.9793388, "conformal_p": 0.03278688, …}
   ],
-  "properties": {"columns": ["primary_key", "account_id", "frequency", "district_id", "region", …], "rows": [["85", …], ["93", …], ["72", …]]},
-  "clusters": [{"label": "elevated: _d_burst_daily, _d_burst_weekly, _d_burst_monthly; missing: _d_n_operations", "count": 2, "examples": ["93", "72"]}, …],
+  "properties": {"columns": ["primary_key", "account_id", "frequency", "district_id", "region", …], "rows": [["20", …], ["42", …], ["85", …]]},
+  "clusters": [{"label": "missing: _d_n_distinct_banks, _d_burst_daily, _d_burst_monthly; elevated: _d_n_operations", "count": 1, "examples": ["20"]}, …],
   "omitted": {"delta": "polygons and clusters (anomaly_dimensions / labels kept)",
               "properties": ["owner_birth_year", "n_clients", …],
               "full_response": "repeat with summary=false, or get_polygon('account_behavior_pattern') after goto(<key>)"}
 }
 ```
 
-`explain_anomaly` splits the distance into each dimension's share of `delta_norm²`, names the smallest set of dimensions that alone makes the entity anomalous (`witness`) and the set that would bring it back inside θ (`repair`):
+`explain_anomaly` turns the p-value into bits of evidence (`−log2 conformal_p`) and splits them over the scoring axes and then over the dimensions, so the shares add up to the whole:
 
 ```text
 explain_anomaly(primary_key="85", pattern_id="account_behavior_pattern")
 {
-  "severity": "high", "delta_norm": 34.3107, "theta_norm": 21.6675, "ratio": 1.58,
-  "witness": {"witness_size": 1, "witness_dims": [{"label": "_d_burst_daily", "delta_value": 24.8196}]},
-  "repair": {"repair_size": 2, "repair_dims": [{"label": "_d_burst_daily", …}, {"label": "_d_n_distinct_banks", …}], "residual_norm": 17.2115},
+  "severity": "low", "conformal_p": 0.032787, "anomaly_score": 0.979339, "bits": 4.9307,
+  "axes": {"mahal": {"rank": 0.9793, "bits": 4.9307}},
   "top_dimensions": [
-    {"dim": "_d_burst_daily", "kind": "poisson", "delta": 24.8196, "pct_of_total": 0.5233},
-    {"dim": "_d_n_distinct_banks", "kind": "poisson", "delta": -16.278, "pct_of_total": 0.2251},
-    {"dim": "_d_burst_weekly", "kind": "poisson", "delta": 16.1628, "pct_of_total": 0.2219},
+    {"dim": "n_distinct_banks", "z": -1.877, "bits": 1.2484, "pct_of_total": 0.2532},
+    {"dim": "tx_count", "z": -1.1305, "bits": 1.1626, "pct_of_total": 0.2358},
+    {"dim": "burst_daily", "z": 2.0016, "bits": 1.0482, "pct_of_total": 0.2126},
     …
   ],
-  "conformal_p": 0.008264, "temporal_slices": 25,
-  "reliability_flags": {"single_dim_driven": false, "dominant_dim": "_d_burst_daily", …}
+  "delta_norm": 34.3107, "temporal_slices": 25
 }
 ```
 
@@ -173,7 +171,7 @@ goto(primary_key="TX-0027039", line_id="transactions")
 {"type": "Point", "primary_key": "TX-0027039", "line_id": "transactions", "status": "active", "properties": {"account_id": "114", …}}
 
 get_polygon(pattern_id="tx_pattern")
-{"primary_key": "TX-0027039", "delta_norm": 47.5265, "delta_rank_pct": 100.0, "is_anomaly": true, "theta_norm": 11.8281,
+{"primary_key": "TX-0027039", "delta_norm": 47.5265, "score_rank_pct": 100.0, "is_anomaly": true, "theta_norm": 11.8281,
  "total_edges": 4, "alive_edges": 3,
  "edges": [{"line_id": "accounts", "point_key": "114", "status": "alive", "direction": "in", "is_jumpable": true}, …],
  "anomaly_dimensions": [{"label": "amount", "delta": 41.4031, "contribution_pct": 75.9},
@@ -229,30 +227,28 @@ A sphere branch is a what-if workspace created without copying data; writes on a
   <img src="docs/images/demo-branch-whatif.svg" width="900"
        alt="An agent recalibrates on a branch without seven accounts, compares the branch with main, then deletes it.">
 </p>
-<p align="center"><sub><i>Main never moved; the branch tightened θ and more accounts crossed it.</i></sub></p>
+<p align="center"><sub><i>Main never moved; the branch refit the calibration without the top anomaly.</i></sub></p>
 
 Recalibrate without the top anomaly in the baseline, compare, then keep or drop the result — real output, continuing the session above:
 
 ```text
-recalibrate(pattern_id="account_behavior_pattern", branch="trial", exclude_keys=["85"])
-{"pattern_id": "account_behavior_pattern", "old_theta_norm": 21.6675, "new_theta_norm": 19.0743,
- "records_recalibrated": 121, "n_excluded": 1, "branch": "trial", "mu_sha256": "sha256:a4700dc0…"}
+recalibrate(pattern_id="account_behavior_pattern", branch="trial", exclude_keys=["20"])
+{"pattern_id": "account_behavior_pattern", "records_recalibrated": 121, "n_excluded": 1, "branch": "trial",
+ "mu_sha256": "sha256:788c2903…", …}
 
 compare_branches(pattern_id="account_behavior_pattern", branch="trial")
-{"from_ref": "main", "to_ref": "trial", "n_from": 121, "n_to": 121, "theta_from": 21.6675, "theta_to": 19.07429,
- "anomalies_from": 7, "anomalies_to": 7, "flipped_in": 0, "flipped_out": 0, "jaccard": 1.0,
- "top_movers": [{"primary_key": "110", "delta_norm_from": 26.80348, "delta_norm_to": 29.0328, "relative_change": 0.0831731,
-                 "is_anomaly_from": true, "is_anomaly_to": true, …}, …],
- "calibration_drift": {"v_from": 1, "v_to": 2, "overall_drift_rms": 0.01949088,
-                       "top_drifted": [{"dim_index": 5, "dim_kind": "poisson", "mu_from": 0.1833678, "mu_to": 0.1770833, …}, …]},
- "recipe": [{"seq": 1, "op": "recalibrate", "pattern_id": "account_behavior_pattern", "exclude_keys": ["85"], …}]}
+{"from_ref": "main", "to_ref": "trial", "n_from": 121, "n_to": 121, "theta_from": 0.9628099, "theta_to": 0.9625,
+ "anomalies_from": 5, "anomalies_to": 6, "flipped_in": 1, "flipped_out": 0, "jaccard": 0.8333333,
+ "flipped_in_top": [{"primary_key": "119", "is_anomaly_from": false, "is_anomaly_to": true, …}],
+ "calibration_drift": {"v_from": 1, "v_to": 2, "overall_drift_rms": 0.01551632, …},
+ "recipe": [{"seq": 1, "op": "recalibrate", "pattern_id": "account_behavior_pattern", "exclude_keys": ["20"], …}]}
 
 manage_branch(action="promote", name="trial")
 {"promoted": {"name": "trial", "recipes_replayed": 1,
               "versions_before": {"account_behavior_pattern": 7, …}, "versions_after": {"account_behavior_pattern": 9, …}}}
 ```
 
-Reading it: excluding entity `85` from the fit lowered θ from 21.7 to 19.1, every entity was rescored, and no verdict changed (`flipped_in` and `flipped_out` are 0, the anomaly sets overlap completely). The calibration itself moved by 0.02 σ RMS. That is a safe promotion; `promote` replays the branch's recalibrations and ingests on main, verifies that the replayed fit matches, then deletes the branch.
+Reading it: excluding entity `20` from the fit refit the calibration reference and rescored every entity. On a calibrated pattern `theta_from` / `theta_to` are the lowest flagged anomaly score on each side. One account (`119`) entered the alarm budget and none left it (`flipped_in` 1, `flipped_out` 0); the calibration itself moved by 0.02 σ RMS. The run above promoted once `119` checked out; `promote` replays the branch's recalibrations and ingests on main, verifies that the replayed fit matches, then deletes the branch.
 
 `open_sphere(branch="trial")` reads a branch directly, and `manage_branch(action="list")` shows what exists, with each branch's recipe count and whether main has moved past it (`stale`).
 
@@ -269,7 +265,7 @@ hypertopos-mcp --transport http --port 8080                                    #
 hypertopos-mcp --transport http --session-idle-timeout 600 --max-sessions 200  # close idle sessions after 10 min, cap concurrency
 ```
 
-The server speaks the MCP streamable-HTTP transport on `127.0.0.1`. Each client session — keyed by the `Mcp-Session-Id` the server assigns at `initialize` — keeps its own open sphere, tool phase, response format and call statistics; a request without a session id is rejected. Calls from different sessions run concurrently, while one session's calls run one at a time. stdio, the default transport, serves a single session.
+The server speaks the MCP streamable-HTTP transport on `127.0.0.1`. Each client session — keyed by the `Mcp-Session-Id` the server assigns at `initialize` — keeps its own open sphere, tool phase, response format and call statistics. A client on the stateless protocol names its session with an `X-Hypertopos-Session` header instead; that value is the session's only credential, so use a random, unguessable value (for example a UUID4). It is not authentication, and two clients that send the same value share one session. A request with neither is rejected. Calls from different sessions run concurrently, while one session's calls run one at a time. stdio, the default transport, serves a single session.
 
 > [!WARNING]
 > The HTTP transport is for local use on one machine. It binds to the loopback interface, has no authentication, and any session can open any sphere path the server process can read. Do not expose it to a network. `--session-idle-timeout` and `--max-sessions` are the only resource limits it enforces.
@@ -286,9 +282,9 @@ open_sphere(path="my_sphere", response_format="full")                          #
 detect_pattern(query="transactions with unusually large amounts")             # plan + run + results, no manual drill-down
 sphere_overview()                                                              # population health per pattern; unlocks the manual toolset
 
-find_anomalies(pattern_id="account_behavior_pattern", top_n=10)               # ranked by delta_norm
+find_anomalies(pattern_id="account_behavior_pattern", top_n=10)               # ranked by the calibrated score (conformal_p, then anomaly_score)
 find_anomalies(pattern_id="tx_pattern", rank_by_property="amount", rank_order="asc")   # "lowest / fewest" questions
-explain_anomaly(primary_key="85", pattern_id="account_behavior_pattern")      # shares of delta_norm², witness, repair
+explain_anomaly(primary_key="85", pattern_id="account_behavior_pattern")      # evidence bits per axis and per dimension
 find_diverse_explanations(primary_key="85", pattern_id="account_behavior_pattern")     # disjoint alternative hypotheses
 trace_root_cause(primary_key="85", pattern_id="account_behavior_pattern")     # witnesses, counterparties, contagion, hubs in one DAG
 find_witness_cohort(primary_key="85", pattern_id="account_behavior_pattern")  # similar but unconnected entities that confirm the pattern
@@ -302,7 +298,7 @@ find_regime_changes(pattern_id="account_behavior_pattern")                    # 
 compare_calibrations(pattern_id="account_behavior_pattern")                   # μ / σ / θ drift between the last two epochs
 check_alerts()                                                                 # anomaly-rate spikes, miscalibration, drift
 
-recalibrate(pattern_id="account_behavior_pattern", branch="trial", exclude_keys=["85"])
+recalibrate(pattern_id="account_behavior_pattern", branch="trial", exclude_keys=["20"])
 compare_branches(pattern_id="account_behavior_pattern", branch="trial")
 manage_branch(action="promote", name="trial")                                  # or action="delete"
 get_session_stats()                                                            # call counts and the snapshot block

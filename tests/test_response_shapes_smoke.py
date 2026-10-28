@@ -130,17 +130,29 @@ def test_walk_line_from_a_solid_says_how_to_continue(compact) -> None:
 # ---------------------------------------------------------------- anomaly tools
 
 
-def test_find_anomalies_per_dim_q_values_are_labelled(compact) -> None:
-    out = json.loads(navigation.find_anomalies(_A, top_n=2, fdr_alpha=0.05, fdr_axis="per_dim"))
-    labels = set(compact.patterns[_A].dim_labels)
-    assert out["polygons"]
+def test_find_anomalies_default_ranks_a_calibrated_pattern_by_its_score(compact) -> None:
+    assert compact.patterns[_A].score_dims
+    out = json.loads(navigation.find_anomalies(_A, top_n=3))
+    assert out["ranked_by"] == "anomaly_score"
+    assert "radius" not in out
     for poly in out["polygons"]:
-        assert "dominant_q_dim_idx" not in poly
-        assert poly["dominant_q_dim"] in labels
-        assert isinstance(poly["q_values_per_dim"], dict)
-        assert set(poly["q_values_per_dim"]) <= labels
-        assert all(q < 1.0 for q in poly["q_values_per_dim"].values())
-        assert poly["dominant_q_dim"] in poly["q_values_per_dim"]
+        assert "score_rank_pct" in poly
+        assert "conformal_p" in poly
+        for key in ("delta_rank_pct", "q_value", "min_q_per_dim", "q_values_per_dim"):
+            assert key not in poly
+
+
+def test_find_anomalies_and_attract_boundary_drop_entity_fdr_parameters() -> None:
+    import inspect
+
+    fa = inspect.signature(navigation.find_anomalies).parameters
+    for removed in ("p_value_method", "fdr_axis"):
+        assert removed not in fa
+    assert fa["radius"].default is None
+    assert fa["rank_by"].default is None
+    ab = inspect.signature(navigation.attract_boundary).parameters
+    for removed in ("fdr_alpha", "fdr_method", "p_value_method"):
+        assert removed not in ab
 
 
 def test_explain_anomaly_drops_zero_share_dimensions(compact) -> None:
@@ -233,7 +245,11 @@ def test_find_hubs_echoes_nothing_unset_or_twice(compact) -> None:
 
 
 def test_find_calibration_influencers_entries_have_no_null_fields(compact) -> None:
-    out = json.loads(analysis.find_calibration_influencers(_A, top_n=3, sample_size=500))
+    out = json.loads(
+        analysis.find_calibration_influencers(
+            "account_bank_pairs_pattern", top_n=3, sample_size=500
+        )
+    )
     assert out["entries"]
     assert all(v is not None for e in out["entries"] for v in e.values())
 
@@ -317,13 +333,12 @@ def test_aggregate_forwards_group_by_relation(fake_nav) -> None:
     assert fake_nav.aggregate.call_args.kwargs["group_by_relation"] == "sender"
 
 
-def test_find_anomalies_names_positional_q_values_when_labels_repeat(compact, monkeypatch) -> None:
-    pattern = compact.patterns[_A]
-    labels = list(pattern.dim_labels)
-    monkeypatch.setattr(
-        type(pattern), "dim_labels", property(lambda self: [labels[0]] * len(labels))
-    )
-    out = json.loads(navigation.find_anomalies(_A, top_n=2, fdr_alpha=0.05, fdr_axis="per_dim"))
-    assert out["polygons"]
-    assert all(isinstance(p["q_values_per_dim"], list) for p in out["polygons"])
-    assert out["dim_labels"] == [labels[0]] * len(labels)
+def test_get_sphere_info_names_the_calibrated_score_per_pattern(compact) -> None:
+    from hypertopos_mcp.tools.session import get_sphere_info
+
+    out = json.loads(get_sphere_info())
+    calibrated = out["patterns"][_A]
+    assert calibrated["score_dims"] == list(compact.patterns[_A].score_dims)
+    assert calibrated["score_axes"] == list(compact.patterns[_A].score_axes)
+    assert calibrated["anomaly_percentile"] == compact.patterns[_A].anomaly_percentile
+    assert "score_dims" not in out["patterns"]["tx_pattern"]

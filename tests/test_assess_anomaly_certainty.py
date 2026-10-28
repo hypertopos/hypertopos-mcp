@@ -112,7 +112,7 @@ def _stub_default_navigator(
     nav.get_entity_geometry_meta.return_value = {
         "delta_norm": delta_norm,
         "is_anomaly": is_anomaly,
-        "delta_rank_pct": 99.5 if is_anomaly else 50.0,
+        "score_rank_pct": 99.5 if is_anomaly else 50.0,
     }
     nav.explain_anomaly.return_value = {
         "severity": "high" if is_anomaly else "normal",
@@ -408,3 +408,20 @@ def test_returns_json_error_on_entity_not_found(fake_state):
     assert "error" in parsed
     assert parsed["primary_key"] == "ghost"
     assert parsed["pattern_id"] == "account_pattern"
+
+
+@pytest.mark.parametrize(("conformal_p", "near"), [(0.04, True), (0.002, False), (0.3, False)])
+def test_calibrated_pattern_boundary_band_reads_conformal_p(fake_state, conformal_p, near):
+    """On a calibrated pattern theta is not the boundary: the band is
+    conformal_p within [alpha/2, 2*alpha] of the alarm budget
+    alpha = 1 - anomaly_percentile/100 (here 0.05), whatever delta_norm is."""
+    pattern = fake_state_pattern()
+    pattern.score_dims = ("a", "b")
+    pattern.anomaly_percentile = 95.0
+    _stub_default_navigator(fake_state, delta_norm=2.6, conformal_p=conformal_p)
+    parsed = json.loads(assess_anomaly_certainty("E1", "account_pattern"))
+    assert parsed["reliability_flags"]["near_data_boundary"] is near
+
+
+def fake_state_pattern():
+    return _state["sphere"]._sphere.patterns["account_pattern"]
