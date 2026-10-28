@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Requires `hypertopos` 0.10.0 or later: the tools read the calibrated-score fields of the core library.
 - `find_anomalies` ranks a calibrated pattern by its calibrated evidence score: the selection is the stored `is_anomaly` (`conformal_p <= 1 - anomaly_percentile/100`, the alarm budget) and the order is `conformal_p` ascending, then `anomaly_score` descending (rows added by incremental ingest are scored without the event axis, so only their p-values compare with built rows). `radius` and `rank_by` now default to `null` (the pattern's own score); `ranked_by` reports `anomaly_score` or `delta_norm`. `radius`, `metric="Linf"`, `dimension_weights`, `rank_by="delta_norm"` / `"signed_confidence"`, `boundary_aware` and `min_confidence > 0` return an error on calibrated patterns. `fdr_alpha` is the level of the cell gate and requires `fdr_resolution` or `fdr_temporal_resolution` (`fdr_method` defaults to `"storey"`).
 - Polygons in `find_anomalies`, `get_polygon`, `attract_boundary`, `compare_entities`, `find_similar_entities` and `check_anomaly_batch` carry `score_rank_pct` in place of `delta_rank_pct`; polygons add `anomaly_score` (when it differs from `delta_norm`) and `conformal_p`. `geometry_filters` / `filter_expr` use `score_rank_pct`.
 - `get_polygon` on a calibrated pattern returns `score_delta` (`{dim: rank-Gaussian value}` over `score_dims`) and no `theta_norm`, `witness` or `repair`.
