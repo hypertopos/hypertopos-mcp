@@ -568,6 +568,9 @@ def recalibrate(
     branch: run on that branch (created when absent) and leave main untouched —
       the safe what-if; inspect with compare_branches. On a session opened on a
       branch, writes go to that branch.
+    Patterns with group_by_property are recalibrated per group, as a build does
+      (and each group's score reference with score_per_group). Patterns with
+      gmm_n_components are refused: rebuild the sphere instead.
     Returns: recalibration result with updated statistics, n_excluded, branch.
     """
     _require_sphere()

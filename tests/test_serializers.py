@@ -206,6 +206,18 @@ class TestSerializePolygon:
         assert "anomaly_score" not in result
         assert result["conformal_p"] == 0.25
 
+    def test_score_group_emitted_when_set(self) -> None:
+        poly = _make_polygon()
+        poly.score_group = "retail"
+        result = _serialize_polygon(poly)
+        assert result["score_group"] == "retail"
+
+    def test_score_group_omitted_when_none(self) -> None:
+        poly = _make_polygon()
+        # no score_group attribute at all
+        result = _serialize_polygon(poly)
+        assert "score_group" not in result
+
     def test_entity_fdr_fields_never_emitted(self) -> None:
         poly = _make_polygon()
         poly.q_value = 0.01

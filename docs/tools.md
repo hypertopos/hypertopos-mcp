@@ -158,13 +158,13 @@ Population summary for all patterns (or one pattern). Returns anomaly rates, cal
 
 ### `check_alerts`
 
-Evaluates 6 built-in geometric health checks across all patterns and returns any triggered alerts.
+Evaluates the built-in geometric health checks across all patterns and returns any triggered alerts.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `pattern_id` | string | `null` | Pattern to check. When `null`, all patterns are scanned. |
 
-**Returns:** `alerts[]` sorted by severity (HIGH first). Alert types: `anomaly_rate_spike`, `population_size_shock`, `high_anomaly_rate` (>30%), `theta_miscalibration` (includes >20% detection), `regime_changepoint`, `calibration_drift`, `calibration_age` (MEDIUM: the pattern's calibration is older than 60 days, so its p-values drift as the population moves — `recalibrate(pattern_id)` refreshes it; `details` carries `age_days`, `max_age_days`).
+**Returns:** `alerts[]` sorted by severity (HIGH first). Alert types: `anomaly_rate_spike`, `population_size_shock`, `high_anomaly_rate` (>30%), `theta_miscalibration` (includes >20% detection), `regime_changepoint`, `calibration_drift`, `calibration_age` (MEDIUM: the pattern's calibration is older than 60 days, so its p-values drift as the population moves — `recalibrate(pattern_id)` refreshes it — `details` carries `age_days`, `max_age_days`), `alarm_rate_drift` (MEDIUM: among rows written since the last calibration, the flagged count exceeds the alarm budget at a one-sided p < 0.01 (beta-binomial: the rows share one calibration) — the population has moved; `recalibrate(pattern_id)`, ideally on a branch first — `details` carries `n_new`, `flagged`, `expected`, `p_value`; not emitted for per-group calibrated patterns, which do not support incremental ingest, nor on spheres built before new rows were calibrated out of fold, whose new rows over-flag).
 
 ---
 
@@ -525,7 +525,7 @@ Reads the polygon (current geometric shape) for the entity at the current naviga
 | `witness` | Minimal subset of dimensions that certifies the anomaly alone: `{witness_size, witness_dims[], delta_norm}`. Patterns without the calibrated score only |
 | `repair` | Minimal subset of dimensions to fix to become non-anomalous: `{repair_size, repair_dims[], residual_norm}`. Patterns without the calibrated score only |
 | `anomaly_score` | Calibrated patterns: the fused evidence score (mean of the population ranks of the pattern's `score_axes`) — higher = more anomalous. Omitted when it equals `delta_norm` |
-| `conformal_p` | Split-conformal p-value of the score against the stored calibration reference — the fraction of a population like the reference that scores at least as high; lower = more anomalous |
+| `conformal_p` | Conformal p-value against the fitted population — the fraction of the calibration reference scoring at least as high; lower = more anomalous |
 | `score_delta` | Calibrated patterns: `{dim: z}` over `score_dims`, the rank-Gaussian coordinates the score is computed on |
 | `theta_norm` | Patterns without the calibrated score: the anomaly threshold `delta_norm` is compared with |
 | `n_anomalous_dims` | (precision stack) Count of dimensions above p99 threshold |
@@ -594,7 +594,7 @@ get_event_polygons("2", "tx_pattern", top_n=10, offset=10)  # page 2
 
 Finds the most anomalous polygons in a pattern, ranked by the pattern's own score.
 
-**Calibrated patterns** (non-empty `score_dims` in `get_sphere_info`; every continuous anchor pattern whose dimensions are point properties): the selection is the stored `is_anomaly` — `conformal_p ≤ 1 − anomaly_percentile/100`, the calibrated alarm budget (at the 95th percentile, 5 % of the population is flagged, and 5 % of a population like the calibration reference would be) — and the order is `conformal_p` ascending, then `anomaly_score` descending. θ is not the boundary on these patterns, so the shape-space options `radius`, `metric="Linf"`, `dimension_weights`, `rank_by="delta_norm"` / `"signed_confidence"`, `boundary_aware` and `min_confidence > 0` raise an error. **Other patterns** (event, GMM, discrete) rank by `delta_norm` against θ and accept every option.
+**Calibrated patterns** (non-empty `score_dims` in `get_sphere_info`; every continuous anchor pattern whose dimensions are point properties): the selection is the stored `is_anomaly` — `conformal_p ≤ 1 − anomaly_percentile/100`, the calibrated alarm budget (at the 95th percentile, at most 5 % of the population is flagged; entities scored later keep that budget while the population does not move) — and the order is `conformal_p` ascending, then `anomaly_score` descending. θ is not the boundary on these patterns, so the shape-space options `radius`, `metric="Linf"`, `dimension_weights`, `rank_by="delta_norm"` / `"signed_confidence"`, `boundary_aware` and `min_confidence > 0` raise an error. **Other patterns** (event, GMM, discrete) rank by `delta_norm` against θ and accept every option.
 
 There is no entity-level FDR: the conformal p-values of the fitted population are its own ranks, so a BH / Storey cut over them cannot reject anything beyond the alarm budget. `fdr_alpha` is the level of the **cell gate** (`fdr_resolution` / `fdr_temporal_resolution`), which tests whether a region holds more anomalies than its size predicts.
 
@@ -628,7 +628,8 @@ Each polygon in `polygons[]` includes (no per-polygon `type` or `pattern_id`; bo
 
 | Field | Description |
 |-------|-------------|
-| `anomaly_score`, `conformal_p`, `score_rank_pct` | Calibrated patterns: the fused evidence score, its split-conformal p-value against the stored reference, and its population rank (0–100). Patterns without the score carry `conformal_p` and `score_rank_pct` on `delta_norm`; `anomaly_score` is omitted when it equals `delta_norm`. |
+| `anomaly_score`, `conformal_p`, `score_rank_pct` | Calibrated patterns: the fused evidence score, its conformal p-value against the fitted population, and its population rank (0–100). Patterns without the score carry `conformal_p` and `score_rank_pct` on `delta_norm`; `anomaly_score` is omitted when it equals `delta_norm`. |
+| `score_group` | Present on per-group calibrated patterns (`score_per_group: true`): the key of the reference that scored this entity — the group name, `"(small groups)"` for the pool, or `null` when the entity was scored against the whole population (unseen group or undersized pool). Omitted on patterns without per-group references. |
 | `bregman_divergence` | Distribution-aware anomaly distance (sum of per-dimension Bregman terms). |
 | `anomaly_confidence` | Bootstrap stability score (0–1): fraction of bootstrap resamples in which the entity is classified as anomalous. Omitted when bootstrap was skipped (N > 50K, `group_by_property`) and on calibrated patterns. |
 | `total_impact` | Aggregate L2 norm of leave-one-out impact on coordinate calibration. Absent when the pattern is event-type or calibrated (the classes are flips of the θ verdict); `null` when `N<2` or the storage backend lacks shape reconstruction prerequisites. Use `find_calibration_influencers` for the full per-dim breakdown + classification context. |
@@ -690,7 +691,7 @@ Full structured explanation combining severity, witness, repair, top dimensions,
 | `primary_key` | string | required | Entity key |
 | `pattern_id` | string | required | Pattern |
 
-**Returns on a calibrated pattern** (non-empty `score_dims`): `severity` (`"normal"` when `conformal_p` is above the alarm budget `alpha = 1 − anomaly_percentile/100`, otherwise `"low"` / `"medium"` / `"high"` / `"extreme"` by how far below it), `conformal_p`, `anomaly_score`, `delta_norm` (shape-space, for reference only), `temporal_slices`, `reputation`; when not normal also `bits` (`−log2 conformal_p`, the evidence), `axes` (`{axis: {rank, bits}}` — each scoring axis's population rank and its share of `bits`; the shares sum to `bits`) and `top_dimensions[]` (`{dim, z, bits, pct_of_total}`: `z` is the dim's rank-Gaussian coordinate, `bits` its share of `axes.mahal.bits`, `pct_of_total` that share as a fraction of `bits`; zero-share dims omitted). No `theta_norm`, `ratio`, `witness`, `repair`, `reliability_flags` or `composite_risk` on this branch.
+**Returns on a calibrated pattern** (non-empty `score_dims`): `severity` (`"normal"` when `conformal_p` is above the alarm budget `alpha = 1 − anomaly_percentile/100`, otherwise `"low"` / `"medium"` / `"high"` / `"extreme"` by how far below it), `conformal_p`, `anomaly_score`, `delta_norm` (shape-space, for reference only), `temporal_slices`, `reputation`; when not normal also `bits` (`−log2 conformal_p`, the evidence), `axes` (`{axis: {rank, bits}}` — each scoring axis's population rank and its share of `bits`; the shares sum to `bits`) and `top_dimensions[]` (`{dim, z, bits, pct_of_total}`: `z` is the dim's rank-Gaussian coordinate, `bits` its share of `axes.mahal.bits`, `pct_of_total` that share as a fraction of `bits`; zero-share dims omitted). On a per-group calibrated pattern (`score_per_group: true`) the response also carries `score_group`: the key of the reference that scored this entity (same as in `find_anomalies`). No `theta_norm`, `ratio`, `witness`, `repair`, `reliability_flags` or `composite_risk` on this branch.
 
 **Returns on other patterns:** `severity` (`"normal"` / `"low"` 1.0–1.1× / `"medium"` 1.1–1.5× / `"high"` 1.5–2.5× / `"extreme"` >2.5× theta), `ratio`, `witness`, `repair`, `conformal_p`, `reputation` (`{value, anomaly_tenure}`), `composite_risk`, `top_dimensions[]`, `reliability_flags` (per-polygon triage dict matching the `find_anomalies` field: `single_dim_driven`, `dominant_dim`, `dominant_dim_share`, `low_confidence_bucket`, `confidence`, `flags` — the `dominant_dim` value agrees with `top_dimensions[0]["dim"]` for the same polygon by construction).
 
@@ -2480,6 +2481,10 @@ Full recalibration: reads all shape vectors, recomputes population statistics (m
 
 **Returns:** `pattern_id`, `previous_drift_pct`, `new_theta_norm`, `old_theta_norm`, `records_recalibrated`, `n_excluded` (count of entities omitted from the fit, 0 when `exclude_keys` is null), `branch` (branch name written to, null when main), `mu_sha256` (hex fingerprint of the resulting mu vector, for promotion verification).
 
+**Patterns with `group_by_property`** are recalibrated per group, as a build calibrates them: each group's μ/σ/θ is refitted on its own members (in `group_stats`), deviations stay relative to the entity's group, and each entity is flagged against its group's θ. With `score_per_group` every group's score reference is refitted with the same pooling of small groups and `score_group` is rewritten. With `exclude_keys` the excluded entities are left out of their group's fit and scored as new rows of their group; excluding every member of a group raises an error.
+
+**Patterns with `gmm_n_components`** are refused with an error: their statistics are fitted per mixture component, which `recalibrate` does not refit. Rebuild the sphere to recalibrate them.
+
 **When to use:** When `sphere_overview` reports `calibration_stale: true` or `calibration_blocked: true`. Check `check_alerts` first for `calibration_drift` alert type. Use `branch=` to test a recalibration in isolation before applying it to main.
 
 ---
@@ -2488,7 +2493,7 @@ Full recalibration: reads all shape vectors, recomputes population statistics (m
 
 Compares one pattern between a branch and main (or between two branches). Returns anomaly counts, entities that flipped in or out of the anomaly set, Jaccard overlap of the two anomaly sets, top movers by relative `delta_norm` change, keys present on one side only, calibration drift between the two fits, and the branch's recipe log. Read-only; does not modify any ref.
 
-Anomaly membership uses the same rule as `anomaly_summary` and `find_anomalies`: on a calibrated pattern (non-empty `score_dims`), the stored `is_anomaly` flag; on other patterns, `delta_norm` at or above that side's global threshold. On a calibrated pattern `theta_from` / `theta_to` hold the lowest flagged `anomaly_score` on each side (just above the highest score when nothing is flagged), flipped-entity ordering uses `anomaly_score`, and `cause` is derived from `anomaly_score` vs the threshold. For entities scored without the motion axis (calibrated against the reference with no temporal component), the score boundary is approximate and `cause` may mislabel the flip; counts are exact.
+Anomaly membership uses the same rule as `anomaly_summary` and `find_anomalies`: on a calibrated pattern (non-empty `score_dims`), the stored `is_anomaly` flag; on other patterns, `delta_norm` at or above that side's global threshold. On a calibrated pattern `theta_from` / `theta_to` hold the lowest flagged `anomaly_score` on each side (just above the highest score when nothing is flagged), flipped-entity ordering uses `anomaly_score`, and `cause` is derived from `anomaly_score` vs the threshold. On a per-group calibrated pattern (`score_per_group: true`) each entity is flagged within its own group's reference, so there is no single population-wide threshold: `theta_from` and `theta_to` are `null`. For entities scored without the motion axis (calibrated against the reference with no temporal component), the score boundary is approximate and `cause` may mislabel the flip; counts are exact.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -2507,7 +2512,7 @@ Anomaly membership uses the same rule as `anomaly_summary` and `find_anomalies`:
 | `anomalies_to` | Count of entities at or above the to-side threshold |
 | `flipped_in` | Among entities on both sides, those anomalous on the branch but not on the from side |
 | `flipped_out` | Among entities on both sides, those anomalous on the from side but not on the branch |
-| `theta_from` / `theta_to` | The two thresholds: `delta_norm` at the anomaly percentile on uncalibrated patterns; on a calibrated pattern the lowest flagged `anomaly_score` on that side (or just above the highest score when nothing is flagged) |
+| `theta_from` / `theta_to` | The two thresholds: `delta_norm` at the anomaly percentile on uncalibrated patterns; on a calibrated pattern the lowest flagged `anomaly_score` on that side (or just above the highest score when nothing is flagged); `null` on per-group calibrated patterns, where each group has its own threshold |
 | `flipped_in_top` | Flipped-in entities furthest past the branch's threshold, up to `top_n`; each has `cause`: `threshold` (the threshold moved past its unchanged score), `score` (its score crossed the unchanged threshold) or `both` |
 | `flipped_out_top` | Flipped-out entities furthest past the from side's threshold, up to `top_n`, with `cause` |
 | `jaccard` | Intersection-over-union of the two anomaly sets |
@@ -2699,11 +2704,11 @@ Delta vectors are z-scored: each dimension is normalized by population standard 
 Continuous anchor patterns whose dimensions are point properties carry a second layer, the calibrated evidence score (`score_dims` and `score_axes` in `get_sphere_info`):
 
 - `anomaly_score` — the mean of the population ranks of the scoring axes: `mahal` (Ledoit–Wolf Mahalanobis distance on rank-Gaussian coordinates of `score_dims`), `current` (the entity's motion against the population's velocity field, from the event pattern with an edge table on its line — requested by default, fitted only when such an event line exists) and, when the pattern opts in, `knn` (distance to its nearest peers)
-- `conformal_p` — split-conformal p-value of the score against the calibration reference stored with the sphere
-- `is_anomaly = conformal_p ≤ 1 − anomaly_percentile/100` — the alarm budget: at the 95th percentile 5 % of the population is flagged, and 5 % of a population like the reference would be. θ is not the boundary on these patterns
+- `conformal_p` — conformal p-value against the fitted population — the fraction of the calibration reference scoring at least as high as the entity
+- `is_anomaly = conformal_p ≤ 1 − anomaly_percentile/100` — the alarm budget: at the 95th percentile at most 5 % of the population is flagged; entities scored later keep that budget while the population does not move. θ is not the boundary on these patterns
 - `score_delta` — the rank-Gaussian coordinates the score is computed on (`{dim: z}` in `get_polygon`)
 
-`explain_anomaly` splits the evidence `−log2 conformal_p` into bits per axis and per dimension. New entities (incremental ingest, hypothetical-entity tools) are scored against the stored reference without a refit; `check_alerts` raises `calibration_age` when the reference is older than 60 days.
+`explain_anomaly` splits the evidence `−log2 conformal_p` into bits per axis and per dimension. New entities (incremental ingest, hypothetical-entity tools) are scored against the stored reference, keeping the alarm budget while the population does not move (on smaller calibrations via out-of-fold scores; on larger ones the difference is within noise); `check_alerts` raises `calibration_age` when the reference is older than 60 days, and `alarm_rate_drift` (MEDIUM) when rows written since the calibration exceed that budget.
 
 ### Continuous anomaly signal
 

@@ -6,7 +6,7 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-compatible-green.svg)](https://modelcontextprotocol.io)
-[![Version](https://img.shields.io/badge/version-0.10.0-%235500FF.svg)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-0.10.1-%235500FF.svg)](pyproject.toml)
 
 Point the server at a sphere built with [hypertopos](https://github.com/hypertopos/hypertopos-py), connect an MCP client, and the agent navigates the data instead of querying it: rank what is out of place, explain one entity, jump along a relationship, test a what-if on a branch.
 
@@ -118,7 +118,7 @@ detect_pattern(query="accounts with anomalously high transaction counts")
 }
 ```
 
-`find_anomalies` ranks entities by the pattern's calibrated score: `conformal_p` is the share of a population like the calibration reference that would score as high, `is_anomaly` is the alarm budget (`conformal_p` at most 5 % at the 95th percentile), and each entity still says which dimensions carry it:
+`find_anomalies` ranks entities by the pattern's calibrated score: `conformal_p` is the fraction of the calibration reference scoring at least as high, `is_anomaly` is the alarm budget (`conformal_p` at most 5 % at the 95th percentile), and each entity still says which dimensions carry it:
 
 ```text
 find_anomalies(pattern_id="account_behavior_pattern", top_n=3)

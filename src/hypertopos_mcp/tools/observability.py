@@ -344,9 +344,12 @@ def line_geometry_stats(
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def check_alerts(pattern_id: str | None = None) -> str:
-    """Evaluate geometric health checks and return alerts (6 built-in checks).
+    """Evaluate geometric health checks and return alerts.
 
     Use without pattern_id to scan all patterns. Returns alerts sorted by severity (HIGH first).
+    On a calibrated pattern, calibration_age reports an old calibration and alarm_rate_drift
+    reports rows written since the calibration flagged above the alarm budget (the population
+    moved; recalibrate, ideally on a branch, and compare first).
     """
     _require_navigator()
     result = _state["navigator"].check_alerts(pattern_id)

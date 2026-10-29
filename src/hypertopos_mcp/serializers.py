@@ -62,6 +62,11 @@ def _serialize_polygon(poly: Any) -> dict[str, Any]:
             else {}
         ),
         **(
+            {"score_group": str(poly.score_group)}
+            if getattr(poly, "score_group", None) is not None
+            else {}
+        ),
+        **(
             {"bregman_divergence": round(float(poly.bregman_divergence), 4)}
             if getattr(poly, "bregman_divergence", None) is not None
             else {}

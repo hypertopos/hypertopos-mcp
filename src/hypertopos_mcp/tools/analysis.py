@@ -200,9 +200,10 @@ def compare_branches(
     or above the global theta on other patterns. On a calibrated pattern
     theta_from / theta_to hold the lowest flagged anomaly_score on each side,
     flipped-entity ordering uses anomaly_score, and cause is derived from
-    anomaly_score vs the threshold. For entities scored without the motion axis
-    the score boundary is approximate and cause may mislabel the flip; counts
-    are exact.
+    anomaly_score vs the threshold. On a per-group calibrated pattern
+    (score_per_group: true) the threshold is per group, so theta_from and theta_to
+    are null. For entities scored without the motion axis the score boundary is
+    approximate and cause may mislabel the flip; counts are exact.
 
     Returns: anomaly counts per side, flipped_in / flipped_out (entities that
     became / stopped being anomalous on the branch), jaccard of the anomaly

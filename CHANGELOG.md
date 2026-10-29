@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.10.1] — 2026-10-29
+
+### Added
+
+- `check_alerts` reports `alarm_rate_drift` when the rows written since a calibrated pattern's calibration are flagged above its alarm budget (not on spheres built before new rows were calibrated out of fold — rebuild them to get it).
+- `find_anomalies` results now include `score_group` when the sphere was built with per-group calibrated references (`score_per_group: true`): the field names the reference that scored each entity.
+- `compare_branches` returns `null` for `theta_from` / `theta_to` on patterns with per-group calibrated references, because each group holds its own threshold.
+
+### Changed
+
+- Requires `hypertopos>=0.10.1`.
+
+### Fixed
+
+- `recalibrate` recalibrates patterns with `group_by_property` per group, as a build does, and refits each group's score reference on patterns with per-group calibrated references. Before, it measured their group-relative deviations against population-wide statistics and wrote wrong scores.
+- `recalibrate` refuses patterns with `gmm_n_components` with an error that says to rebuild the sphere, instead of overwriting their per-component calibration with wrong scores.
+
 ## [0.10.0] — 2026-10-28
 
 ### Changed

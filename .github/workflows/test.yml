@@ -36,5 +36,14 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install "hypertopos[dev]" -e .
 
+      - name: ruff check
+        run: python -m ruff check .
+
+      - name: ruff format check
+        run: python -m ruff format --check .
+
+      - name: mypy
+        run: python -m mypy src
+
       - name: Run pytest
         run: python -m pytest tests/ -n auto --dist loadscope -q
