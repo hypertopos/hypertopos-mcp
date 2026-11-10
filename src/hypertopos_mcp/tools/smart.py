@@ -754,11 +754,11 @@ def _available_steps() -> list[str]:
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 async def detect_pattern(query: str, ctx: Context) -> str:  # the server injects ctx
-    """Detect patterns in sphere data using natural language.
+    """What in this sphere matches a plain-language question? Detects patterns from a natural-language query.
 
     Automatically selects detection steps based on sphere capabilities.
-    Executes server-side (no round-trips). For manual drill-down, use
-    individual tools after sphere_overview().
+    Executes server-side (no round-trips). For manual drill-down, call
+    the individual tools directly.
 
     query: describe WHAT to find as a full sentence. Include entity type
       and dimension name when possible. The more specific, the better.
@@ -768,7 +768,7 @@ async def detect_pattern(query: str, ctx: Context) -> str:  # the server injects
       Bad: "anomalies" (too broad — specify what kind)
 
     Returns: plan, results per step, follow_up suggestions, interpretation.
-    """
+    """  # noqa: E501
     _require_navigator()
     caps = _srv.sphere_capabilities() or {}
     available = _available_steps()

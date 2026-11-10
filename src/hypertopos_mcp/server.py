@@ -13,6 +13,7 @@ import importlib
 import json as _json
 import math
 import os
+import re
 import sys
 import time
 from collections.abc import Callable, Iterator, MutableMapping
@@ -188,8 +189,8 @@ _SESSIONLESS_METHODS = frozenset({"server/discover"})
 
 async def _serialize_tool_calls(ctx: Any, call_next: Callable[[Any], Any]) -> Any:
     """Server middleware: bind the request to its client session; show and allow
-    only the tools of the session's phase; run a session's requests that read its
-    state one at a time."""
+    only the tools of the server's profile that the session's sphere can serve;
+    run a session's requests that read its state one at a time."""
     if ctx.method in _SESSIONLESS_METHODS:
         # Capability discovery reads no session state; refusing it would break
         # the client's connect instead of answering its first real request.
@@ -208,16 +209,28 @@ async def _serialize_tool_calls(ctx: Any, call_next: Callable[[Any], Any]) -> An
             result = await call_next(ctx)
             if isinstance(result, dict) and isinstance(result.get("tools"), list):
                 shown = visible_tools()
-                result["tools"] = [t for t in result["tools"] if t.get("name") in shown]
+                order = {name: i for i, name in enumerate(selected_profile())}
+                result["tools"] = sorted(
+                    (t for t in result["tools"] if t.get("name") in shown),
+                    key=lambda t: order[t["name"]],
+                )
             return result
         if ctx.method == "tools/call":
             name = (getattr(ctx, "params", None) or {}).get("name")
-            if name is not None and name not in visible_tools():
-                raise MCPError(
-                    INVALID_PARAMS,
-                    f"Tool {name!r} is not available yet: call open_sphere(path), "
-                    "then sphere_overview() to unlock the full toolset.",
-                )
+            # A name the server does not register is the SDK's to answer (unknown tool).
+            if name is not None and name in _TOOL_TIERS and name not in visible_tools():
+                if name in selected_profile():
+                    message = (
+                        f"Tool {name!r} needs {_TOOL_TIERS.get(name, 'base')} data "
+                        "this sphere does not have."
+                    )
+                else:
+                    message = (
+                        f"Tool {name!r} is not in this server's tool profile "
+                        f"({', '.join(selected_profile_names())}); start the server with "
+                        "--profile full (or add it to HYPERTOPOS_MCP_PROFILE)."
+                    )
+                raise MCPError(INVALID_PARAMS, message)
         if ctx.method not in _SERIALIZED_METHODS:
             return await call_next(ctx)
         async with state.lock:
@@ -232,7 +245,7 @@ mcp = MCPServer(
         "descriptive sentences — include entity type and dimension name. "
         "After each result, check follow_up suggestions before moving on. "
         "When 0 results, rephrase with different dimensions not same words. "
-        "For manual drill-down: call sphere_overview() to unlock all tools."
+        "sphere_overview() shows the population and what each pattern holds."
     ),
     middleware=[_serialize_tool_calls],
 )
@@ -347,9 +360,7 @@ def _new_state() -> dict[str, Any]:
         "engine": None,
         "manifest": None,
         "path": None,
-        "manual_mode": False,
         "response_format": None,
-        "phase": 1,
         "capabilities": None,
     }
 
@@ -629,7 +640,6 @@ def _do_open_sphere(path: str, branch: str | None = None) -> None:
     _state["branch"] = branch
     _state.pop("explored_steps", None)
     _state.pop("investigation_hints", None)
-    _state["manual_mode"] = False
     _reset_call_stats()
 
 
@@ -642,18 +652,16 @@ def _refresh_state() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Dynamic tool loading — capability-aware tool registration
+# Tool profiles and capability-aware listing
 # ---------------------------------------------------------------------------
 
 _TOOL_TIERS: dict[str, str] = {
-    # always — visible without open_sphere (Phase 1)
-    "open_sphere": "always",
-    "close_sphere": "always",
-    "get_session_stats": "always",
-    # gateway — visible after open_sphere (Phase 2: simple binary choice)
-    "detect_pattern": "gateway",
-    "sphere_overview": "gateway",
-    # base — visible after sphere_overview (Phase 3: full manual mode)
+    # base — any open sphere can serve these; the tool profile decides which are listed
+    "open_sphere": "base",
+    "close_sphere": "base",
+    "get_session_stats": "base",
+    "detect_pattern": "base",
+    "sphere_overview": "base",
     "get_sphere_info": "base",
     "get_line_schema": "base",
     "get_line_profile": "base",
@@ -724,36 +732,33 @@ _TOOL_TIERS: dict[str, str] = {
     "detect_neighbor_contamination": "base",
     "detect_segment_shift": "base",
     "get_centroid_map": "base",
-    # edge — visible after open_sphere (Phase 2), alongside gateway tools
-    # These require a navigator but NOT sphere_overview — they appear immediately
-    # after open_sphere so agents can traverse edges without manual mode unlock.
-    "find_geometric_path": "edge",
-    "edge_stats": "edge",
-    "entity_flow": "edge",
-    "contagion_score": "edge",
-    "contagion_score_batch": "edge",
-    "degree_velocity": "edge",
-    "investigation_coverage": "edge",
-    "propagate_influence": "edge",
-    "cluster_bridges": "edge",
-    "anomalous_edges": "edge",
-    "find_witness_cohort": "edge",
-    "find_novel_entities": "edge",
+    "find_geometric_path": "base",
+    "edge_stats": "base",
+    "entity_flow": "base",
+    "contagion_score": "base",
+    "contagion_score_batch": "base",
+    "degree_velocity": "base",
+    "investigation_coverage": "base",
+    "propagate_influence": "base",
+    "cluster_bridges": "base",
+    "anomalous_edges": "base",
+    "find_witness_cohort": "base",
+    "find_novel_entities": "base",
     "find_topological_anomalies": "base",
-    "find_graph_geometry_tension": "edge",
-    "simulate_edge_removal": "edge",
-    "simulate_dimension_change": "edge",
-    "simulate_counterparty_removal": "edge",
-    "select_minimal_joint_edge_removal": "edge",
+    "find_graph_geometry_tension": "base",
+    "simulate_edge_removal": "base",
+    "simulate_dimension_change": "base",
+    "simulate_counterparty_removal": "base",
+    "select_minimal_joint_edge_removal": "base",
     "investigate_entity": "base",
-    # temporal — visible after sphere_overview IF sphere has temporal data
+    # temporal — listed only if sphere has temporal data
     "dive_solid": "temporal",
     "get_solid": "temporal",
     "hub_history": "temporal",
     "find_drifting_entities": "temporal",
     "compare_time_windows": "temporal",
     "find_regime_changes": "temporal",
-    # multi_pattern — visible after sphere_overview IF 2+ patterns cover same entity line
+    # multi_pattern — listed only if 2+ patterns cover same entity line
     "cross_pattern_profile": "multi_pattern",
     "passive_scan": "multi_pattern",
     "composite_risk": "multi_pattern",
@@ -762,11 +767,138 @@ _TOOL_TIERS: dict[str, str] = {
     "classify_detector_consensus": "multi_pattern",
     "consensus_classification": "multi_pattern",
     "detect_cross_pattern_discrepancy": "multi_pattern",
-    # trajectory_index — visible after sphere_overview IF trajectory ANN index exists
+    # trajectory_index — listed only if trajectory ANN index exists
     "find_drifting_similar": "trajectory_index",
     "detect_trajectory_anomaly": "trajectory_index",
     "classify_trajectory": "trajectory_index",
 }
+
+
+# Tool profiles: the server lists exactly one selection for its lifetime
+# (``--profile`` / ``HYPERTOPOS_MCP_PROFILE``, comma-separated names are combined).
+_SESSION_TOOLS: tuple[str, ...] = (
+    "open_sphere",
+    "close_sphere",
+    "get_session_stats",
+    "sphere_overview",
+)
+
+_PROFILES: dict[str, tuple[str, ...]] = {
+    "minimal": (*_SESSION_TOOLS, "detect_pattern"),
+    "investigator": (
+        *_SESSION_TOOLS,
+        "get_sphere_info",
+        "detect_pattern",
+        # screening and explanation
+        "find_anomalies",
+        "explain_anomaly",
+        "check_alerts",
+        "compare_calibrations",
+        # money flow and edges
+        "entity_flow",
+        "degree_velocity",
+        "anomalous_edges",
+        "edge_stats",
+        "contagion_score",
+        "contagion_score_batch",
+        "propagate_influence",
+        "find_geometric_path",
+        "find_witness_cohort",
+        "investigation_coverage",
+        "find_novel_entities",
+        "find_graph_geometry_tension",
+        # ring members and scheme typology
+        "find_counterparties",
+        "find_chains_for_entity",
+        "extract_chains",
+        "score_motif",
+        "find_high_potential_motifs",
+        # read by the fraud skill's typology recipes and its mandatory steps
+        "get_polygon",
+        "goto",
+        "cross_pattern_profile",
+        "passive_scan",
+        "assess_anomaly_certainty",
+        "consensus_classification",
+        "find_similar_entities",
+    ),
+    # Developer and data inspection: a permanent part of the surface.
+    "inspector": (
+        *_SESSION_TOOLS,
+        "get_sphere_info",
+        "get_line_schema",
+        "get_line_profile",
+        "search_entities",
+        "search_entities_fts",
+        "goto",
+        "get_position",
+        "walk_line",
+        "jump_polygon",
+        "emerge",
+        "get_polygon",
+        "get_event_polygons",
+        "get_solid",
+        "dive_solid",
+        "aggregate",
+        "aggregate_anomalies",
+        "find_anomalies",
+        "line_geometry_stats",
+        "detect_data_quality_issues",
+    ),
+}
+_DEFAULT_PROFILE = "investigator"
+
+
+def name_profiles(text: str) -> str:
+    """Append its profile to each call of a tool outside the default profile.
+
+    For advice text built below the tool layer (navigator messages), which
+    cannot know which tools the server lists.
+    """
+    default = _PROFILES[_DEFAULT_PROFILE]
+    names = sorted((n for n in _TOOL_TIERS if n not in default), key=len, reverse=True)
+    # arguments without quotes or parentheses: a match never leaves its JSON string
+    pattern = rf"\b({'|'.join(names)})\([^()\"]*\)(?! \(\w+ profile\))"
+
+    def tag(hit: re.Match[str]) -> str:
+        profile = "inspector" if hit.group(1) in _PROFILES["inspector"] else "full"
+        return f"{hit.group(0)} ({profile} profile)"
+
+    return re.sub(pattern, tag, text)
+
+
+_selected: tuple[tuple[str, ...], tuple[str, ...]] = ((), ())  # (names, tools)
+
+
+def profile_names() -> tuple[str, ...]:
+    return (*_PROFILES, "full")
+
+
+def select_profile(spec: str | None) -> tuple[str, ...]:
+    """Resolve a comma-separated profile spec to the ordered tool list the server lists."""
+    global _selected
+    names = [n.strip() for n in (spec or _DEFAULT_PROFILE).split(",") if n.strip()]
+    if not names:
+        names = [_DEFAULT_PROFILE]
+    unknown = [n for n in names if n not in profile_names()]
+    if unknown:
+        raise ValueError(f"unknown tool profile {unknown}; valid: {list(profile_names())}")
+    ordered: dict[str, None] = {}
+    for n in names:
+        for tool in tuple(_TOOL_TIERS) if n == "full" else _PROFILES[n]:
+            ordered[tool] = None
+    _selected = (tuple(names), tuple(ordered))
+    return _selected[1]
+
+
+def selected_profile() -> tuple[str, ...]:
+    """The tools of the server's profile, in listing order."""
+    return _selected[1] or select_profile(None)
+
+
+def selected_profile_names() -> tuple[str, ...]:
+    selected_profile()
+    return _selected[0]
 
 
 def sphere_capabilities() -> dict[str, bool] | None:
@@ -776,24 +908,14 @@ def sphere_capabilities() -> dict[str, bool] | None:
 
 
 def visible_tools() -> set[str]:
-    """Tools the current session sees: its phase and its sphere's capabilities.
-
-    Phase 1 (no sphere): ``always``. Phase 2 (after open_sphere): plus
-    ``gateway`` and ``edge``. Phase 3 (after sphere_overview): every tier the
-    sphere can serve. Tools without a tier are always visible.
-    """
-    phase = _state.get("phase") or 1
+    """Tools the current session sees: the server's profile, minus the tiers its
+    open sphere cannot serve. Before ``open_sphere`` the whole profile is listed."""
     caps = sphere_capabilities()
-    visible = set()
-    for tool in mcp._tool_manager.list_tools():
-        tier = _TOOL_TIERS.get(tool.name, "always")
-        if (
-            tier == "always"
-            or (phase >= 2 and tier in ("gateway", "edge"))
-            or (phase >= 3 and _tier_available(tier, caps))
-        ):
-            visible.add(tool.name)
-    return visible
+    return {
+        t
+        for t in selected_profile()
+        if caps is None or _tier_available(_TOOL_TIERS.get(t, "base"), caps)
+    }
 
 
 def _detect_capabilities() -> dict[str, bool]:
@@ -836,14 +958,8 @@ def _detect_capabilities() -> dict[str, bool]:
     }
 
 
-def _tier_available(tier: str, caps: dict[str, bool] | None) -> bool:
-    """Check if a capability tier is available given current sphere capabilities."""
-    if tier in ("always", "gateway", "edge"):
-        return True
-    if caps is None:
-        return False
-    if tier == "base":
-        return True
+def _tier_available(tier: str, caps: dict[str, bool]) -> bool:
+    """Whether an open sphere with ``caps`` can serve a tool of ``tier``."""
     if tier == "temporal":
         return caps.get("has_temporal", False)
     if tier == "multi_pattern":
@@ -874,35 +990,15 @@ def _notify_tools_changed(ctx: Context | None = None) -> None:
                 asyncio.get_running_loop().create_task(send())
 
 
-def _unregister_phase2_tools(ctx: Context | None = None) -> None:
-    """Back to Phase 1 for this session. Called at startup and after close_sphere."""
-    _state["phase"] = 1
-    _state["capabilities"] = None
-    _notify_tools_changed(ctx)
-
-
-def _register_phase2_tools(ctx: Context | None = None) -> None:
-    """Phase 2 for this session: gateway + edge tools. Called after open_sphere.
-
-    Exposes detect_pattern + sphere_overview + edge table tools — agent can
-    traverse edges immediately without manual mode unlock.
-    Full manual toolset is unlocked by _register_manual_tools() after sphere_overview.
-    """
+def _apply_sphere_capabilities(ctx: Context | None = None) -> None:
+    """After open_sphere: hide the profile's tools this sphere cannot serve."""
     _state["capabilities"] = _detect_capabilities()
-    _state["manual_mode"] = False
-    _state["phase"] = 2
     _notify_tools_changed(ctx)
 
 
-def _register_manual_tools(ctx: Context | None = None) -> None:
-    """Phase 3 for this session: every capability-matched tool. Called after sphere_overview.
-
-    No-op if already in manual mode.
-    """
-    if _state.get("manual_mode"):
-        return
-    _state["manual_mode"] = True
-    _state["phase"] = 3
+def _reset_session_tools(ctx: Context | None = None) -> None:
+    """After close_sphere: the whole profile is listed again."""
+    _state["capabilities"] = None
     _notify_tools_changed(ctx)
 
 
@@ -978,7 +1074,7 @@ def investigate(entity_key: str, line_id: str) -> str:
         f"3. get_polygon for each pattern the entity participates in\n"
         f"4. If anomalous in any pattern: explain_anomaly\n"
         f"5. find_similar_entities to check if neighbors are also anomalous\n"
-        f"6. If temporal data: dive_solid to check trajectory\n"
+        f"6. If temporal data and the inspector or full profile: dive_solid for its trajectory\n"
         f"7. Summarize: is this entity genuinely anomalous or a false positive?"
     )
 
@@ -991,10 +1087,10 @@ def scan(pattern_id: str = "") -> str:
         f"Run a full population scan on {target}:\n"
         f"1. sphere_overview for population health\n"
         f"2. find_anomalies (top 20) for each pattern\n"
-        f"3. detect_segment_shift to find over-represented segments\n"
-        f"4. find_hubs to identify most connected entities\n"
-        f"5. If temporal: find_regime_changes for structural shifts\n"
-        f"6. Report: anomaly rate, top findings, segment insights, temporal events"
+        f"3. check_alerts for drift and calibration problems\n"
+        f"4. On several patterns: passive_scan for entities flagged by more than one source\n"
+        f"5. With the full profile: detect_segment_shift, find_hubs, find_regime_changes\n"
+        f"6. Report: anomaly rate, top findings, alerts, multi-source entities"
     )
 
 
@@ -1004,9 +1100,9 @@ def compare(key_a: str, key_b: str, pattern_id: str) -> str:
     return (
         f"Compare entities '{key_a}' and '{key_b}' in pattern '{pattern_id}':\n"
         f"1. goto each entity and get_polygon\n"
-        f"2. compare_entities('{key_a}', '{key_b}', '{pattern_id}')\n"
-        f"3. find_common_relations to see shared connections\n"
-        f"4. contrast_populations between the two (if both anomalous)\n"
+        f"2. explain_anomaly for each in '{pattern_id}'\n"
+        f"3. find_counterparties for each to see shared connections\n"
+        f"4. With the full profile: compare_entities and find_common_relations\n"
         f"5. Report: which dimensions differ most, shared relations, risk assessment"
     )
 

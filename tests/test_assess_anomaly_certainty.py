@@ -425,3 +425,44 @@ def test_calibrated_pattern_boundary_band_reads_conformal_p(fake_state, conforma
 
 def fake_state_pattern():
     return _state["sphere"]._sphere.patterns["account_pattern"]
+
+
+def test_high_certainty_counts_the_alphas_it_was_given(fake_state):
+    # Stable at every alpha the caller passed (two here) is the "high" condition,
+    # not a fixed count of three.
+    _stub_default_navigator(
+        fake_state,
+        is_anomaly=True,
+        delta_norm=10.0,
+        single_dim_driven=False,
+        conformal_p=0.001,
+        calibration_health="good",
+    )
+    parsed = json.loads(
+        assess_anomaly_certainty("E1", "account_pattern", perturbation_alphas=[0.01, 0.05])
+    )
+    assert parsed["stability_across_alphas"] == {"0.01": True, "0.05": True}
+    assert parsed["certainty_verdict"] == "high"
+    assert parsed["certainty_score"] >= 0.90
+
+
+def test_empty_perturbation_alphas_is_refused(fake_state):
+    _stub_default_navigator(fake_state, is_anomaly=True, conformal_p=0.001)
+    with pytest.raises(ValueError, match="perturbation_alphas"):
+        assess_anomaly_certainty("E1", "account_pattern", perturbation_alphas=[])
+
+
+def test_stable_at_its_only_alpha_but_single_dim_is_moderate(fake_state):
+    # Stable at every alpha given, held back from "high" only by a flag: the
+    # same verdict whether the caller passed one alpha or the default three.
+    _stub_default_navigator(
+        fake_state,
+        is_anomaly=True,
+        delta_norm=10.0,
+        single_dim_driven=True,
+        conformal_p=0.001,
+        calibration_health="good",
+    )
+    one = json.loads(assess_anomaly_certainty("E1", "account_pattern", perturbation_alphas=[0.01]))
+    three = json.loads(assess_anomaly_certainty("E1", "account_pattern"))
+    assert one["certainty_verdict"] == three["certainty_verdict"] == "moderate"

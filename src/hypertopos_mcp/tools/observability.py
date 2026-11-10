@@ -16,10 +16,10 @@ from scipy.special import ndtr
 
 from hypertopos_mcp._format import hoist_repeated_text, json_default, sanitize_for_json
 from hypertopos_mcp.server import (
-    _register_manual_tools,
     _require_navigator,
     _state,
     mcp,
+    name_profiles,
     timed,
 )
 
@@ -31,7 +31,7 @@ def sphere_overview(
     detail: str = "summary",
     ctx: Context | None = None,
 ) -> str:
-    """Population-level health summary of one or all patterns in the sphere.
+    """How healthy is each pattern? Population-level summary of one or all patterns in the sphere.
 
     detail: "summary" (instant O(1)) or "full" (+ temporal_quality, forecast, calibration).
     Returns: per-pattern entity count, anomaly_rate, calibration_health,
@@ -57,7 +57,7 @@ def sphere_overview(
             entry["continuous_mode_note"] = (
                 "This pattern uses continuous edge encoding — "
                 "centroid_map(group_by_line) and contrast_populations(edge spec) "
-                "are unavailable. Use group_by_property instead."
+                "(full profile) are unavailable. Use group_by_property instead."
             )
         if pattern.dim_percentiles:
             dim_columns = (
@@ -158,7 +158,8 @@ def sphere_overview(
                         f"Run aggregate(event_pattern_id='{event_pid}', "
                         f"group_by_line='{anchor_line}', "
                         f"metric='count', time_from=<period_start>, time_to=<period_end>) "
-                        f"on two time windows to confirm WHEN the event burst happened."
+                        f"(inspector profile) on two time windows to confirm WHEN the event burst "
+                        f"happened."
                     )
 
     # Investigation hints — O(1) metadata-only, per pattern (detail="full" only)
@@ -172,9 +173,10 @@ def sphere_overview(
             if entry.get("has_temporal"):
                 hints.append(
                     "trajectory_anomaly: temporal data available — use detect_trajectory_anomaly"
+                    " (full profile)"
                 )
-                hints.append("drift: temporal data — use find_drifting_entities")
-                hints.append("regime_changes: temporal — use find_regime_changes")
+                hints.append("drift: temporal data — use find_drifting_entities (full profile)")
+                hints.append("regime_changes: temporal — use find_regime_changes (full profile)")
 
             # Cross-pattern: multiple patterns on same entity line
             entity_line = sphere.entity_line(pid)
@@ -186,7 +188,7 @@ def sphere_overview(
                     hints.append(
                         f"cross_pattern: {len(patterns_on_line)} patterns"
                         f" on {entity_line}"
-                        " — use detect_cross_pattern_discrepancy"
+                        " — use detect_cross_pattern_discrepancy (full profile)"
                     )
 
             # Segment shift: categorical properties available
@@ -195,12 +197,13 @@ def sphere_overview(
                 hints.append(
                     f"segment_shift: {len(pattern.prop_columns)}"
                     " categorical properties"
-                    " — use detect_segment_shift"
+                    " — use detect_segment_shift (full profile)"
                 )
 
             # Neighbor contamination: always available via ANN index
             hints.append(
                 "neighbor_contamination: ANN index available — use detect_neighbor_contamination"
+                " (full profile)"
             )
 
             # Anomaly scan: always available
@@ -212,10 +215,6 @@ def sphere_overview(
 
         # Cache for detect_pattern planning
         _state["investigation_hints"] = all_hints
-
-    # Phase 3: unlock full manual toolset after first sphere_overview
-    if not _state.get("manual_mode"):
-        _register_manual_tools(ctx)
 
     # Sphere-level cross-pattern discrepancy (only when no pattern_id filter,
     # i.e. response covers the whole sphere).
@@ -344,16 +343,19 @@ def line_geometry_stats(
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def check_alerts(pattern_id: str | None = None) -> str:
-    """Evaluate geometric health checks and return alerts.
+    """Is anything wrong with the sphere right now? Geometric health checks as alerts.
 
     Use without pattern_id to scan all patterns. Returns alerts sorted by severity (HIGH first).
     On a calibrated pattern, calibration_age reports an old calibration and alarm_rate_drift
     reports rows written since the calibration flagged above the alarm budget (the population
-    moved; recalibrate, ideally on a branch, and compare first).
+    moved; recalibrate (full profile), ideally on a branch, and compare first). population_drift
+    reports those rows no longer following the calibrated population (their p-values or a
+    dimension's values, the same test as Spark calibration_status), also when the flagged count
+    looks normal.
     """
     _require_navigator()
     result = _state["navigator"].check_alerts(pattern_id)
-    return json.dumps(sanitize_for_json(result), indent=2)
+    return name_profiles(json.dumps(sanitize_for_json(result), indent=2))
 
 
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
@@ -418,7 +420,7 @@ def audit_pattern_dims(pattern_id: str, top_k: int = 10) -> str:
     ``recommended_action: "keep"`` — plus a top-level ``reason`` field
     naming which of these applies.
 
-    Tier: ``base`` (manual-mode diagnostic).
+    Tier: ``base``.
 
     Example invocation::
 
@@ -650,7 +652,7 @@ def audit_label_alignment(pattern_id: str, top_n: int = 10) -> str:
     - the geometry's ``delta_norm_signed`` column is fully null, or
     - the joined sample has zero positives or zero negatives.
 
-    Tier: ``base`` (manual-mode diagnostic).
+    Tier: ``base``.
 
     Example invocation::
 

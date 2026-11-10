@@ -41,7 +41,7 @@ _FULL_RESPONSE = "open_sphere(<path>, response_format='full') returns every fiel
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def get_polygon(pattern_id: str) -> str:
-    """Build and return the polygon for the current Point position (call goto() first).
+    """What does this entity's polygon look like? Edges and delta at the goto() position.
 
     Returns: delta vector, delta_norm, is_anomaly, alive edges, temporal_hint (anchor only).
     Calibrated patterns (non-empty score_dims) add anomaly_score, conformal_p, score_rank_pct

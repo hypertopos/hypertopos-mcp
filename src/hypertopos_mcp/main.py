@@ -3,6 +3,7 @@
 """Entry point for the Hypertopos MCP server."""
 
 import argparse
+import os
 
 # Import tool modules to register them with the MCPServer instance
 import hypertopos_mcp.tools.aggregation  # noqa: F401
@@ -13,10 +14,12 @@ import hypertopos_mcp.tools.navigation  # noqa: F401
 import hypertopos_mcp.tools.observability  # noqa: F401
 import hypertopos_mcp.tools.session  # noqa: F401
 import hypertopos_mcp.tools.smart  # noqa: F401
-from hypertopos_mcp.server import _unregister_phase2_tools, mcp, set_header_session_idle_timeout
-
-# Start in Phase 1 mode — only always-tier tools visible until open_sphere
-_unregister_phase2_tools()
+from hypertopos_mcp.server import (
+    mcp,
+    profile_names,
+    select_profile,
+    set_header_session_idle_timeout,
+)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -54,11 +57,24 @@ def _build_parser() -> argparse.ArgumentParser:
         default=10000,
         help="Most concurrent HTTP client sessions (default: 10000). Ignored for stdio.",
     )
+    parser.add_argument(
+        "--profile",
+        default=os.environ.get("HYPERTOPOS_MCP_PROFILE"),
+        help=(
+            "Tool profile(s) the server lists, comma-separated and combined: "
+            f"{', '.join(profile_names())} (default: investigator; env HYPERTOPOS_MCP_PROFILE)."
+        ),
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    try:
+        select_profile(args.profile)
+    except ValueError as err:
+        parser.error(str(err))
     if args.transport == "http":
         set_header_session_idle_timeout(args.session_idle_timeout)
         mcp.run(

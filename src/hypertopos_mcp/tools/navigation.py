@@ -35,11 +35,11 @@ _STALE_SOLID_DAYS = 180
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 @timed
 def goto(primary_key: str, line_id: str) -> str:
-    """Navigate to a specific entity by business key and line. Sets current position.
+    """Where is primary_key on line_id? Moves the navigator to that entity (the position get_polygon reads).
 
     Returns: the new navigator position (a serialised Point with line_id,
     primary_key, and entity properties).
-    """
+    """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
     nav.goto(primary_key, line_id)
@@ -297,30 +297,11 @@ def find_anomalies(
     summary: bool | None = None,
     rank_order: str = "desc",
 ) -> str:
-    """Find the most anomalous polygons in a pattern, ranked by the pattern's own score.
+    """List the top_n entities most likely to be anomalous in pattern_id (screening: 'which 100 accounts should an analyst see first').
 
-    Calibrated patterns (non-empty score_dims in get_sphere_info): the selection is the stored is_anomaly (conformal_p <= 1 - anomaly_percentile/100, the calibrated alarm budget) and the order is conformal_p ascending, then anomaly_score descending (the same order within one calibration; rows added by incremental ingest are scored without the event axis, so only their p-values compare with built rows). ranked_by reports "anomaly_score" for this order. Each polygon carries anomaly_score, conformal_p and score_rank_pct (rank of anomaly_score in the population, 0-100). On a per-group calibrated pattern (score_per_group: true in sphere.json) each polygon also carries score_group: the key of the reference that scored it — the group name, "(small groups)" for the pool, or null when scored against the whole population. theta is not the boundary there, so radius, metric="Linf", dimension_weights, rank_by="delta_norm" / "signed_confidence", boundary_aware and min_confidence > 0 raise. Other patterns (event, GMM, discrete) rank by delta_norm against theta and accept every option.
-
-    radius: multiplier on the theta_norm threshold (default None = 1). Higher = looser boundary. Uncalibrated patterns only.
-    metric: "L2" (default, pre-computed delta_norm) or "Linf" (max single-dimension |delta|; uncalibrated patterns only).
-    include_emerging: append entities trending toward anomaly (requires temporal data). On calibrated patterns emerging is empty with emerging_note: the forecast tracks delta_norm against theta, which does not decide is_anomaly there.
-    missing_edge_to: keep only anomalous entities with NO edge to this line.
-    rank_by_property: re-rank by a raw entity property instead of the score.
-    rank_order: "desc" (default) or "asc" for rank_by_property — "asc" lists the lowest values first; missing values rank last.
-    property_filters: filter by entity properties before ranking ({"col": {"gt": X}}, {"col": {"in": ["A", "B"]}}).
-    fdr_alpha: level of the cell gate; requires fdr_resolution or fdr_temporal_resolution. There is no entity-level FDR: is_anomaly already is the calibrated alarm budget.
-    fdr_method: "storey" (default, LSL null-proportion estimator) or "bh" (Benjamini-Hochberg, pi0=1) for the cell gate.
-    fdr_resolution: spatial-hierarchy level name declared on the pattern's fdr_hierarchy. Survivors are gated to those whose cell at this level is enriched in is_anomaly (hypergeometric upper tail per cell, BH/Storey over cells). Requires fdr_alpha. Survivors gain cell_q_spatial and cell_path. Use to localise anomalies to a geographic / segment region instead of a flat entity ranking.
-    fdr_temporal_resolution: temporal-hierarchy level name declared on the pattern's fdr_temporal_hierarchy (e.g. hour / day / week). Same semantics on the temporal axis. Requires fdr_alpha. Survivors gain cell_q_temporal and cell_path. When both are set, an entity survives iff its cell clears every named spatial AND temporal level; cell_q_spatial and cell_q_temporal then carry the conservative joint q.
-    rank_by: None (default, the pattern's own score: conformal_p then anomaly_score on calibrated patterns, delta_norm otherwise), "delta_norm", or "signed_confidence" (delta_norm_signed × |lda_alignment| × (1 - reliability_penalty) descending, onto the Fisher LDA axis; requires a pattern rebuilt with sphere.yaml label_audit: enabled; incompatible with select="diverse"). Both explicit values: uncalibrated patterns only.
-    select: "top_norm" (default, rank by score) or "diverse" (submodular facility location — K most diverse representatives with representativeness counts).
-    min_confidence: filter by bootstrap confidence threshold (0.0 = no filter). Requires bregman_calibration=True on the sphere; uncalibrated patterns only.
-    dimension_weights: optional {dim_name: float} multipliers on each dim's contribution to delta_norm before ranking (missing dims 1.0, 0.0 silences a dim, {} = None). Uncalibrated patterns only. Only `delta_norm` on the returned polygons is the weighted score; `delta`, `is_anomaly`, `bregman_divergence` and `score_rank_pct` come from storage.
-    sample_size: optional cap on geometry rows scanned. When set below the population size, a random sample is drawn before threshold filtering and ranking. Forces the in-process scan path. Default None = scan full population.
-    boundary_aware: when True (default False), half the sample_size budget goes to entities within [0.8 * theta_norm, 1.2 * theta_norm], half to the rest. Requires sample_size; uncalibrated patterns only.
-    summary: None (default) follows the session response_format — compact drops positional delta vectors (anomaly_dimensions and cluster labels stay) and numeric properties columns, listed in `omitted`; full keeps everything plus top-level dim_labels. False forces full. True drops delta, edges and properties entirely (smallest payload); retains primary_key, delta_norm, anomaly_score, conformal_p, is_anomaly, score_rank_pct, bregman_divergence, cell gate fields, reliability_flags, and anomaly_dimensions. Call get_polygon for full per-polygon detail.
-    The edges list (when present) is filtered to actual jumpable entity edges; degenerate dim-line edges with empty point_key are omitted for response size — call get_polygon to retrieve the full edge list including dim lines.
-    Returns: anomalous polygons with anomaly_dimensions, clusters, total_found, found (polygons in this page), ranked_by.
+    Calibrated patterns (non-empty score_dims): the stored is_anomaly (the calibrated alarm budget), ordered by conformal_p then anomaly_score; radius, metric="Linf", dimension_weights, explicit rank_by, boundary_aware and min_confidence > 0 raise there. Other patterns rank by delta_norm against theta and accept every option.
+    Narrow or re-rank: property_filters, rank_by_property + rank_order, missing_edge_to, select="diverse". Region gate: fdr_alpha + fdr_method with fdr_resolution / fdr_temporal_resolution. Page and size: offset, sample_size, summary (None follows response_format, True is smallest). include_emerging appends entities trending toward anomaly. Full parameter notes: tools.md.
+    Returns: polygons (anomaly_score, conformal_p, score_rank_pct, anomaly_dimensions), properties, clusters, total_found, found, ranked_by; then explain_anomaly per entity.
     """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
@@ -347,7 +328,7 @@ def find_anomalies(
         capped_warning = (
             f"top_n={top_n} exceeds adaptive hard cap {cap} (based on {len(pattern.relations)} "
             f"edges/polygon) — truncated to keep response under ~50K chars. "
-            f"For anomaly counts use anomaly_summary()."
+            f"For anomaly counts use anomaly_summary (full profile)."
         )
         top_n = cap
     # Delegate to navigator — handles subprocess fast path and emerging internally
@@ -451,7 +432,7 @@ def find_anomalies(
         "clusters": clusters,
         "note": (
             "clusters[].count reflects returned polygons only (top_n). "
-            "Call anomaly_summary for population-wide cluster counts."
+            "Call anomaly_summary (full profile) for population-wide cluster counts."
         ),
     }
     if any("delta" in p for p in enriched):

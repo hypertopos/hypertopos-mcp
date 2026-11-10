@@ -6,9 +6,11 @@
 
 **Install:** `pip install hypertopos-mcp`
 
-**Start:** `python -m hypertopos_mcp.main` (set `HYPERTOPOS_SPHERE_PATH` to your sphere directory so the agent can call `open_sphere()` without a path; every tool except `open_sphere`, `close_sphere` and `get_session_stats` stays hidden until a sphere is opened)
+**Start:** `python -m hypertopos_mcp.main` (set `HYPERTOPOS_SPHERE_PATH` to your sphere directory so the agent can call `open_sphere()` without a path)
 
-**Transport:** Defaults to `stdio` for local desktop MCP clients. Pass `--transport http --port 8080` to serve the MCP streamable-HTTP transport on TCP port 8080 of the loopback interface (`127.0.0.1`). The HTTP transport is for local use on one machine: it has no authentication, and any session can open any sphere path the server process can read — do not expose it to a network. Over HTTP each client session keeps its own sphere, session and call statistics, keyed by the `Mcp-Session-Id` the server assigns at `initialize`; a request without a session id is rejected. A session's tool calls run one at a time; calls of different sessions run concurrently. Each session has its own tool phase: `tools/list` shows only that session's tools, and a call to a tool its phase has not unlocked is refused. When an HTTP session ends — the client disconnects, or it stays idle longer than `--session-idle-timeout` seconds (default 1800) — the server closes its sphere and forgets it. `--max-sessions` (default 10000) caps concurrent HTTP sessions.
+**Tool profiles:** the server lists one fixed set of tools, chosen at startup with `--profile NAME[,NAME…]` or `HYPERTOPOS_MCP_PROFILE`: `investigator` (the default: screening, explanation, flow, scheme typology, ring members), `inspector` (developer and data inspection: navigation, search, schema, aggregation), `minimal` (`detect_pattern` and the session tools) or `full` (every tool on this page). Names combine, e.g. `--profile investigator,inspector`. The whole profile is listed from the first `tools/list`; after `open_sphere`, tools the sphere cannot serve (temporal, multi-pattern, trajectory) are hidden. A call to a tool outside the profile is refused with a message naming `--profile full`. Each profile's tool list: [mcp-spec.md](mcp-spec.md#tool-profiles).
+
+**Transport:** Defaults to `stdio` for local desktop MCP clients. Pass `--transport http --port 8080` to serve the MCP streamable-HTTP transport on TCP port 8080 of the loopback interface (`127.0.0.1`). The HTTP transport is for local use on one machine: it has no authentication, and any session can open any sphere path the server process can read — do not expose it to a network. Over HTTP each client session keeps its own sphere, session and call statistics, keyed by the `Mcp-Session-Id` the server assigns at `initialize`; a request without a session id is rejected. A session's tool calls run one at a time; calls of different sessions run concurrently. All sessions share the server's tool profile; `tools/list` shows each session the profile's tools its open sphere can serve, and a call to any other tool is refused. When an HTTP session ends — the client disconnects, or it stays idle longer than `--session-idle-timeout` seconds (default 1800) — the server closes its sphere and forgets it. `--max-sessions` (default 10000) caps concurrent HTTP sessions.
 
 **Concepts:** See [hypertopos core concepts](https://github.com/hypertopos/hypertopos-py/blob/main/docs/concepts.md) for Point, Edge, Polygon, Solid, Pattern, Alias, Manifest.
 
@@ -164,7 +166,7 @@ Evaluates the built-in geometric health checks across all patterns and returns a
 |-----------|------|---------|-------------|
 | `pattern_id` | string | `null` | Pattern to check. When `null`, all patterns are scanned. |
 
-**Returns:** `alerts[]` sorted by severity (HIGH first). Alert types: `anomaly_rate_spike`, `population_size_shock`, `high_anomaly_rate` (>30%), `theta_miscalibration` (includes >20% detection), `regime_changepoint`, `calibration_drift`, `calibration_age` (MEDIUM: the pattern's calibration is older than 60 days, so its p-values drift as the population moves — `recalibrate(pattern_id)` refreshes it — `details` carries `age_days`, `max_age_days`), `alarm_rate_drift` (MEDIUM: among rows written since the last calibration, the flagged count exceeds the alarm budget at a one-sided p < 0.01 (beta-binomial: the rows share one calibration) — the population has moved; `recalibrate(pattern_id)`, ideally on a branch first — `details` carries `n_new`, `flagged`, `expected`, `p_value`; not emitted for per-group calibrated patterns, which do not support incremental ingest, nor on spheres built before new rows were calibrated out of fold, whose new rows over-flag).
+**Returns:** `alerts[]` sorted by severity (HIGH first). Alert types: `anomaly_rate_spike`, `population_size_shock`, `high_anomaly_rate` (>30%), `theta_miscalibration` (includes >20% detection), `regime_changepoint`, `calibration_drift`, `calibration_age` (MEDIUM: the pattern's calibration is older than 60 days, so its p-values drift as the population moves — `recalibrate(pattern_id)` refreshes it — `details` carries `age_days`, `max_age_days`), `alarm_rate_drift` (MEDIUM: among rows written since the last calibration, the flagged count exceeds the alarm budget at a one-sided p < 0.01 (beta-binomial: the rows share one calibration) — the population has moved; `recalibrate(pattern_id)`, ideally on a branch first — `details` carries `n_new`, `flagged`, `expected`, `p_value`; not emitted for per-group calibrated patterns, which do not support incremental ingest, nor on spheres built before new rows were calibrated out of fold, whose new rows over-flag), `population_drift` (MEDIUM: the rows written since the last calibration no longer follow the calibrated population, by the same test Spark's `calibration_status` reports as `drift`: their `conformal_p` against uniform and each dimension against the population's distribution, read back from the stored score deltas, with a combined false-alarm rate of up to about 2.5 % when nothing has changed (about half that on spheres built before new rows were calibrated out of fold, where only the dimension test runs); it also catches shifts that leave the flagged count normal — `details` carries `rows`, `flagged`, `alarm_rate`, `expected_alarm_rate`, `p_distribution`, `p_dimensions`, `drifted_dimensions`, `p_flag_count`, `status`; at least 100 rows; on spheres built before new rows were calibrated out of fold only the dimension test runs and `p_distribution` is null; a value below the smallest or above the largest calibrated value counts as that end value, so a shift only past a mostly-tied end, such as below a dimension that is mostly zero, can be understated).
 
 ---
 
@@ -208,7 +210,7 @@ Per-dim calibration audit of a pattern. Reports raw population moments alongside
 | `pattern_id` | string | required | Pattern to audit |
 | `top_k` | int | `10` | Cap on returned rows, sorted by \|`cohens_d_pos_neg`\| descending |
 
-**Returns:** `{pattern_id, label_aware_available, n_dims_total, n_dims_returned, dims[] ({dim_label, mu, sigma, mu_pos, sigma_pos, mu_neg, sigma_neg, cohens_d_pos_neg, direction_component, recommended_action}), vector_index_health}`. When label-aware calibration is unavailable, also emits a top-level `reason` and dim rows carry only `mu`, `sigma`, `recommended_action`.
+**Returns:** `{pattern_id, label_aware_available, n_dims_total, n_dims_returned, dims[] ({dim_label, mu, sigma, mu_pos, sigma_pos, mu_neg, sigma_neg, cohens_d_pos_neg, auroc_per_dim, direction_component, recommended_action}), vector_index_health, intrinsic_displacement_mean, extrinsic_displacement_mean}` (the two means are always present, `null` when the pattern has none). When label-aware calibration is unavailable, also emits a top-level `reason` and dim rows carry only `mu`, `sigma`, `recommended_action`.
 
 Every response also carries a `vector_index_health` block reporting ANN (IVF) index staleness for the pattern's geometry: `{pattern_id, line_id, index_present, index_type, num_indexed_rows, num_unindexed_rows, total_rows, indexed_fraction, num_partitions, is_stale, stale_threshold, recommendation}`. `is_stale` is `true` when incrementally-appended rows sit outside the index (unindexed fraction > `0.1`), meaning ANN-backed tools such as `pi10_attract_trajectory` currently miss those rows until the next reindex. Metadata-only read — no geometry column scan.
 
@@ -423,7 +425,7 @@ get_line_profile("accounts", "balance_volatility", group_by="region")  # stats p
 
 ### `goto`
 
-Sets navigator position to a named entity on a line (π1 entry point).
+Where is this entity? Sets navigator position to a named entity on a line (π1 entry point); `get_polygon` then reads that position.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -592,7 +594,7 @@ get_event_polygons("2", "tx_pattern", top_n=10, offset=10)  # page 2
 
 ### `find_anomalies`
 
-Finds the most anomalous polygons in a pattern, ranked by the pattern's own score.
+Lists the `top_n` entities most likely to be anomalous in a pattern, ranked by the pattern's own score — the screening question "which 100 accounts should an analyst see first".
 
 **Calibrated patterns** (non-empty `score_dims` in `get_sphere_info`; every continuous anchor pattern whose dimensions are point properties): the selection is the stored `is_anomaly` — `conformal_p ≤ 1 − anomaly_percentile/100`, the calibrated alarm budget (at the 95th percentile, at most 5 % of the population is flagged; entities scored later keep that budget while the population does not move) — and the order is `conformal_p` ascending, then `anomaly_score` descending. θ is not the boundary on these patterns, so the shape-space options `radius`, `metric="Linf"`, `dimension_weights`, `rank_by="delta_norm"` / `"signed_confidence"`, `boundary_aware` and `min_confidence > 0` raise an error. **Other patterns** (event, GMM, discrete) rank by `delta_norm` against θ and accept every option.
 
@@ -613,14 +615,16 @@ There is no entity-level FDR: the conformal p-values of the fitted population ar
 | `fdr_alpha` | float | `null` | Level of the cell gate (0–1 exclusive). Requires `fdr_resolution` or `fdr_temporal_resolution`; passing it alone raises an error. |
 | `fdr_method` | string | `null` | Cell-gate FDR method: `"storey"` (default; Storey LSL estimator of the share of null cells) or `"bh"` (Benjamini-Hochberg, assumes every cell null). |
 | `fdr_resolution` | string | `null` | Spatial hierarchy level name declared on the pattern's `fdr_hierarchy`. Survivors are gated to entities whose cell at this level is enriched in `is_anomaly` (hypergeometric upper tail per cell, BH / Storey over the cells of the level). Requires `fdr_alpha`. Survivors gain `cell_q_spatial` and `cell_path`. |
-| `fdr_temporal_resolution` | string | `null` | Temporal hierarchy level name declared on the pattern's `fdr_temporal_hierarchy`. Same semantics as `fdr_resolution` on the temporal axis. Requires `fdr_alpha`. Survivors gain `cell_q_temporal` and `cell_path`. |
+| `fdr_temporal_resolution` | string | `null` | Temporal hierarchy level name declared on the pattern's `fdr_temporal_hierarchy`. Same semantics as `fdr_resolution` on the temporal axis. Requires `fdr_alpha`. Survivors gain `cell_q_temporal` and `cell_path`. When both resolutions are set, an entity survives only if its cell clears every named spatial and temporal level; `cell_q_spatial` and `cell_q_temporal` then carry the conservative joint q. |
 | `select` | string | `"top_norm"` | `"top_norm"` ranks by score descending. `"diverse"` applies submodular facility location to pick the K most geometrically diverse representatives — each result includes a `representativeness` count. |
 | `metric` | string | `"L2"` | `"L2"` (pre-computed delta_norm, fast) or `"Linf"` (max single-dimension \|delta\|, runtime scan; patterns without the calibrated score only). Linf catches single-dimension spikes that L2 dilutes. Every result also carries `bregman_divergence` (per-dimension kind-aware scoring: poisson KL for counts, bernoulli KL for binary, gaussian for continuous), worth comparing with `delta_norm` on mixed-type patterns. |
-| `min_confidence` | float | `0.0` | Keep only entities with `anomaly_confidence >= min_confidence` (0–1). `0.0` = no filter. Has no effect when `anomaly_confidence` is `None` (bootstrap was skipped). Patterns without the calibrated score only. |
-| `dimension_weights` | dict | `null` | Optional `{dim_name: float}` mapping. Each weight multiplies the corresponding dim's contribution to the rank score before computing `delta_norm`. Missing dims default to `1.0`; explicit `0.0` silences a dim. Requires `metric` in `"L2"` or `"Linf"` (Bregman is precomputed and cannot be reweighted). Use to discount dims that fail a stratified correlation gate (NOISE → `0.0`, HEAVY-TAIL → `0.5`). Validates dim names against the pattern's labels and rejects negative / non-finite / non-numeric weights. Patterns without the calibrated score only. |
+| `min_confidence` | float | `0.0` | Keep only entities with `anomaly_confidence >= min_confidence` (0–1). `0.0` = no filter. Has no effect when `anomaly_confidence` is `None` (bootstrap was skipped). Requires `bregman_calibration=True` on the sphere. Patterns without the calibrated score only. |
+| `dimension_weights` | dict | `null` | Optional `{dim_name: float}` mapping. Each weight multiplies the corresponding dim's contribution to the rank score before computing `delta_norm`. Missing dims default to `1.0`; explicit `0.0` silences a dim. Requires `metric` in `"L2"` or `"Linf"` (Bregman is precomputed and cannot be reweighted). Use to discount dims that fail a stratified correlation gate (NOISE → `0.0`, HEAVY-TAIL → `0.5`). Validates dim names against the pattern's labels and rejects negative / non-finite / non-numeric weights; `{}` is the same as `null`. Only `delta_norm` on the returned polygons is the weighted score; `delta`, `is_anomaly`, `bregman_divergence` and `score_rank_pct` come from storage. Patterns without the calibrated score only. |
 | `sample_size` | int | `null` | Cap on geometry rows scanned. When set below the population size, a random sample is drawn before threshold filtering and ranking. Forces the in-process scan path. `null` = scan full population. |
 | `boundary_aware` | bool | `false` | Stratified sampling — when `true`, half of `sample_size` is drawn from entities within `[0.8 × theta_norm, 1.2 × theta_norm]` (boundary band), the rest from the complement. Requires `sample_size`. Surfaces boundary cases under-represented under uniform sampling — useful for calibration audits. Patterns without the calibrated score only. |
-| `summary` | bool | `null` | `null` follows the session response format: compact drops positional `delta` (polygons and clusters; `anomaly_dimensions` and labels stay) and numeric `properties` columns except the ranked / filtered ones, listed in `omitted`; full keeps everything and adds `dim_labels`. `true`: no delta (polygons and clusters), edges or properties (smallest). `false`: everything. |
+| `summary` | bool | `null` | `null` follows the session response format: compact drops positional `delta` (polygons and clusters; `anomaly_dimensions` and labels stay) and numeric `properties` columns except the ranked / filtered ones, listed in `omitted`; full keeps everything and adds `dim_labels`. `true`: no delta (polygons and clusters), edges or properties (smallest); each polygon keeps `primary_key`, `delta_norm`, `anomaly_score`, `conformal_p`, `is_anomaly`, `score_rank_pct`, `bregman_divergence`, the cell-gate fields, `reliability_flags` and `anomaly_dimensions` — call `get_polygon` for full per-polygon detail. `false`: everything. |
+
+The `edges` list on each polygon (when present) keeps only jumpable entity edges: degenerate dim-line edges with an empty `point_key` are dropped for response size (an empty list is omitted; `total_edges` / `alive_edges` still report the counts). `get_polygon` returns the full edge list including dim lines.
 
 **Returns:** `polygons[]`, `properties` (entity properties keyed by `primary_key`, see [Properties table](#hypertopos-mcp--tool-reference); absent with `summary=true`), `related_properties` (properties of entities referenced by polygon edges, one table per line), `clusters[]`, `total_found` (total flagged), `found` (polygons in this page), `ranked_by` (`anomaly_score`, `delta_norm`, the `rank_by` value or the `rank_by_property` name), `capped_warning` when top_n was reduced. A calibrated pattern orders by `conformal_p` ascending, then `anomaly_score` descending: the two agree within one calibration, and rows added by incremental ingest (scored without the event axis) compare with built rows only by their p-value.
 
@@ -684,7 +688,7 @@ Aggregates the anomaly population by a property column — useful for understand
 
 ### `explain_anomaly`
 
-Full structured explanation combining severity, witness, repair, top dimensions, conformal p-value, reputation, and composite risk.
+Why is this entity flagged? Full structured explanation combining severity, witness, repair, top dimensions, conformal p-value, reputation, and composite risk.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -731,7 +735,7 @@ K diverse hypotheses for why an entity is anomalous. Greedy selection over per-d
 
 ### `assess_anomaly_certainty`
 
-Agent-correctness composer — how confident should an investigator be in an entity's anomaly classification. Composes `explain_anomaly` (conformal_p, signed_confidence, single-dim driver), `get_entity_geometry_meta` (boundary band: `conformal_p` within `[alpha/2, 2·alpha]` of the alarm budget on calibrated patterns, `delta_norm` within `[0.8, 1.2] × theta_norm` otherwise), the focal entity's stored `conformal_p` thresholded against each of `perturbation_alphas` (sample-free FDR-alpha stability), `sphere_overview` (calibration staleness), and `cross_pattern_profile` (cross-pattern consistency) into one verdict.
+How sure can I be that this entity is (or is not) anomalous? Agent-correctness composer — how confident should an investigator be in an entity's anomaly classification. Composes `explain_anomaly` (conformal_p, signed_confidence, single-dim driver), `get_entity_geometry_meta` (boundary band: `conformal_p` within `[alpha/2, 2·alpha]` of the alarm budget on calibrated patterns, `delta_norm` within `[0.8, 1.2] × theta_norm` otherwise), the focal entity's stored `conformal_p` thresholded against each of `perturbation_alphas` (sample-free FDR-alpha stability), `sphere_overview` (calibration staleness), and `cross_pattern_profile` (cross-pattern consistency) into one verdict.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -752,7 +756,7 @@ Agent-correctness composer — how confident should an investigator be in an ent
 | `signed_confidence` | Signed LDA-aligned confidence from `explain_anomaly` (or `null` when `label_audit` is not enabled on the pattern) |
 | `stability_across_alphas` | `{alpha_str: bool}` — per-alpha `conformal_p <= alpha` (sample-free FDR-alpha stability) |
 | `reliability_flags` | `{single_dim_driven, near_data_boundary, calibration_stale}` — derived from `explain_anomaly.reliability_flags`, the `[0.8·θ, 1.2·θ]` band, and `sphere_overview.calibration_health` |
-| `cross_pattern_consistency` | `{n_other_patterns_anomalous, consistent_classification}` from `cross_pattern_profile` |
+| `cross_pattern_consistency` | `{n_other_patterns_anomalous, consistent_classification}` from `cross_pattern_profile`: the count of patterns other than `pattern_id` that also flag the entity, and `true` when at least one other pattern agrees with the focal classification (anomalous or normal) |
 | `rationale` | Human-readable summary of which signals drove the verdict |
 | `recommended_next_steps` | List of suggested follow-up tool calls |
 | `steps_status` | `{step_name: {ok: bool, error?: str}}` — per sub-composition success / failure, never null / missing |
@@ -760,10 +764,13 @@ Agent-correctness composer — how confident should an investigator be in an ent
 **Verdict rule (deterministic):**
 
 If `is_anomalous == True`:
-- `stability_count == 3` AND not `single_dim_driven` AND not `near_data_boundary` AND not `calibration_stale` → `"high"`
-- `stability_count == 0` OR (`single_dim_driven` AND `near_data_boundary`) → `"contested"`
-- `stability_count == 1` → `"low"`
-- `stability_count == 2` → `"moderate"`
+- stable at every alpha of `perturbation_alphas` (`stability_count == len(perturbation_alphas)`) AND not `single_dim_driven` AND not `near_data_boundary` AND not `calibration_stale` → `"high"`
+- `stability_count == 0` (`conformal_p` above the loosest swept alpha — the calibrated p-value disagrees with the stored `is_anomaly`) OR (`single_dim_driven` AND `near_data_boundary`) → `"contested"`
+- stable at every alpha but held back from `"high"` by a flag → `"moderate"`
+- `stability_count == 1` (of several alphas) → `"low"`
+- else → `"moderate"`
+
+`perturbation_alphas` must name at least one alpha (an empty list raises).
 
 If `is_anomalous == False`:
 - not `near_data_boundary` AND not `calibration_stale` → `"high"`
@@ -776,7 +783,7 @@ If `is_anomalous == False`:
 
 ### `consensus_classification`
 
-Agent-correctness composer — single-entity view over the population sweep `classify_detector_consensus`. Scores the population, then extracts and routes the row for `primary_key`: surfaces the detector-agreement pattern (which detectors call the entity anomalous vs normal vs borderline) and a routing recommendation, so a single-detector hit is never mistaken for a corroborated consensus. Answers "do my detectors agree on this entity?" without re-scanning a ranked list. For the population ranking, use `classify_detector_consensus`.
+Do my detectors agree on this entity, or is it a single-detector hit / mixed-signal mule? Agent-correctness composer — single-entity view over the population sweep `classify_detector_consensus`. Scores the population, then extracts and routes the row for `primary_key`: surfaces the detector-agreement pattern (which detectors call the entity anomalous vs normal vs borderline) and a routing recommendation, so a single-detector hit is never mistaken for a corroborated consensus. Answers "do my detectors agree on this entity?" without re-scanning a ranked list. For the population ranking, use `classify_detector_consensus`.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -948,7 +955,7 @@ Checks anomaly status for a batch of entity keys.
 
 ### `find_similar_entities`
 
-Finds the top-N entities nearest to a given entity by geometric distance.
+Which accounts behave most like this one? Finds the top-N entities nearest to a given entity by geometric distance.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -1444,7 +1451,7 @@ Shows hub score evolution reconstructed from temporal slices.
 
 ### `find_counterparties`
 
-Finds counterparty entities via an event line (outgoing targets and incoming sources). When `pattern_id` is given and the pattern has an edge table, uses fast BTREE lookup with amount aggregates.
+Other accounts in the same scheme as `primary_key`: finds counterparty entities via an event line (outgoing targets and incoming sources). When `pattern_id` is given and the pattern has an edge table, uses fast BTREE lookup with amount aggregates.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -1463,7 +1470,7 @@ Finds counterparty entities via an event line (outgoing targets and incoming sou
 
 ### `extract_chains`
 
-Extracts chain patterns from an event line. With `seed_nodes=[key]` the traversal starts from specific entities and uses every event (exact, no sampling). Without `seed_nodes`, start nodes are sampled for population-wide extraction. No edge table required. `from_col`/`to_col`/`time_col`/`amount_col` default to the event pattern's edge-table column configuration, so passing just `event_pattern_id` is sufficient for most event patterns.
+Which money chains run through an account, or through the population? Extracts chain patterns from an event line. With `seed_nodes=[key]` the traversal starts from specific entities and uses every event (exact, no sampling). Without `seed_nodes`, start nodes are sampled for population-wide extraction. No edge table required. `from_col`/`to_col`/`time_col`/`amount_col` default to the event pattern's edge-table column configuration, so passing just `event_pattern_id` is sufficient for most event patterns.
 
 The `chain_id` values it returns (`CHAIN-000000`, …) number the chains of this one call only; they change with `seed_nodes`, `sample_size`, `max_chains` and the time window, and do not name the chains of the sphere's chain line. Tools that take a `chain_id` (`classify_chain_typology`, `extend_chain`, `anomaly_propagation_in_chain`, `investigate_chain`) expect ids from the chain line — use `find_chains_for_entity` or `find_chains_with_coherent_anomaly` to get them.
 
@@ -1492,7 +1499,7 @@ The `chain_id` values it returns (`CHAIN-000000`, …) number the chains of this
 
 ### `find_chains_for_entity`
 
-Finds which chains involve a specific entity — reverse lookup via chain keys.
+Which built chains run through `primary_key`? Finds which chains involve a specific entity — reverse lookup via chain keys.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -1763,7 +1770,9 @@ Show edge table statistics for a pattern — quick diagnostic to verify edge dat
 
 ### `entity_flow`
 
-Net flow analysis per counterparty via edge table. Computes outgoing/incoming totals and per-counterparty net flow.
+Where does an account's money go and come from? Net flow analysis per counterparty via edge table. Computes outgoing/incoming totals and per-counterparty net flow.
+
+This is flow, not shape: for the scheme's typology call `score_motif`; for its other members `find_counterparties` or `extract_chains`.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -1807,7 +1816,9 @@ Contagion score for multiple entities in one call.
 
 ### `degree_velocity`
 
-Temporal connection velocity — how an entity's degree changes over time. Buckets edges by timestamp and counts unique counterparties per bucket.
+Is an account gaining or losing counterparties over time? Temporal connection velocity — how an entity's degree changes over time. Buckets edges by timestamp and counts unique counterparties per bucket.
+
+This is flow, not shape: for the scheme's typology call `score_motif`; for its other members `find_counterparties` or `extract_chains`.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -1916,7 +1927,20 @@ Rank all edges in the pattern's companion event table by geometric edge potentia
 
 ### `score_motif`
 
-Score the best structural motif seeded at `primary_key`. Composes `edge_potential` across the edges of the motif via product — a motif of rare edges is rare. Closed vocabulary of eight motif types covering the structural atoms of 25 documented AML typologies.
+Which scheme typology is `primary_key` part of? Scores the best motif of `motif_type` seeded at it. Composes `edge_potential` across the edges of the motif via product — a motif of rare edges is rare. Closed vocabulary of eight motif types covering the structural atoms of 25 documented AML typologies.
+
+**Typology words → `motif_type`:**
+
+| Typology word | Call |
+|---|---|
+| fan-out (one source, many targets) | `motif_type="fan_out"` |
+| fan-in (many sources, one sink) | `motif_type="fan_in"` |
+| cycle / round-trip | `motif_type="cycle_2"` (A↔B) or `"cycle_3"` (A→B→C→A) |
+| scatter-gather | `motif_type="split_recombine", direction="forward"` (seed is the source) |
+| gather-scatter | `motif_type="split_recombine", direction="backward"` (seed is the sink) |
+| bipartite | `motif_type="bipartite_burst"` (k sources × m sinks) |
+| stack / layering | `motif_type="chain_k"` (open chain of `k` accounts) |
+| structuring / smurfing | `motif_type="structuring"` |
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -1932,8 +1956,8 @@ Score the best structural motif seeded at `primary_key`. Composes `edge_potentia
 | `min_m` | int | `3` | **bipartite_burst only** — sink-side cardinality of the K_{k,m} subgraph (must be ≥ 2). Ignored for other motif types. |
 
 **Motif types:**
-- **`fan_out`** — hub → k distinct targets in the window (min k=3). Typology atoms: T6 Offshore Hub, T13 Concentrator (source side).
-- **`fan_in`** — k distinct sources → sink in the window (min k=3). Mirror of `fan_out`. Typology atoms: T12 Parallel Layering (destination side), T13 Concentrator/Sink.
+- **`fan_out`** — hub → k distinct targets within one window of `time_window_hours`, the densest anywhere in the hub's history (min k=3). Typology atoms: T6 Offshore Hub, T13 Concentrator (source side).
+- **`fan_in`** — k distinct sources → sink within one window of `time_window_hours`, the densest anywhere in the sink's history (min k=3). Mirror of `fan_out`. Typology atoms: T12 Parallel Layering (destination side), T13 Concentrator/Sink.
 - **`cycle_2`** — A↔B bidirectional pair within the window. Typology atoms: T2 Flash-Burst Round-Trip, T4 Bidirectional Burst.
 - **`cycle_3`** — A→B→C→A triad with strict temporal ordering `ts1 < ts2 < ts3`, total span ≤ window. Typology atoms: T3 Round-Tripping 3-Party, T5 Long-Cycle, T11 Multi-Round-Tripping.
 - **`chain_k`** — open A→B→…→Z chain of length `k` (3 ≤ k ≤ 8), no cycle closure, no node revisit, strict monotone timestamps, total span ≤ window. Typology atoms: T5 Multi-Stage Layering, T18 Multi-Jurisdiction Latency Chain, T15 Attenuation Pattern (when `k ≥ 4` with wider window). Default `k=4` matches typology depth; raise for deeper layering investigations, lower (`k=3`) for faster scans of shallow chains.
@@ -1996,7 +2020,7 @@ Example (small, k = 3):
 
 ### `find_high_potential_motifs`
 
-Rank all motifs of a given type across the pattern's companion event table, highest score first.
+Which accounts form the strongest schemes of `motif_type` in the pattern? Ranks all motifs of that type across the pattern's companion event table, highest score first. The parameters mean the same as in `score_motif`, whose entry maps typology words to motif types; to check one known account, call `score_motif` instead.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -2012,7 +2036,7 @@ Rank all motifs of a given type across the pattern's companion event table, high
 | `direction` | string | `"forward"` | **split_recombine only** — `"forward"` ranks seeds as the source S of a S → {M₁,…,Mₖ} → D diamond; `"backward"` ranks them as the sink D. Part of the cache key. Ignored for other motif types. |
 | `min_m` | int | `3` | **bipartite_burst only** — sink-side cardinality of the K_{k,m} subgraph (must be ≥ 2). Part of the cache key. Ignored for other motif types. |
 
-**Latency note:** first call per `(pattern, motif_type, window, amt1_min, amt2_max, k, direction, min_m)` is cold — enumerates motifs across all seeds in the pattern. Cold call can take 30–90s on patterns with >500k entities. Subsequent calls hit an LRU cache (cap 8). `cycle_3` is deduplicated by canonical ring; `structuring` and `chain_k` are deduplicated by canonical path tuple; `split_recombine` is deduplicated by `(direction, source, sink, sorted intermediaries)`; `bipartite_burst` is deduplicated by `(frozenset sources, frozenset sinks)`. `chain_k` cost scales with out-degree and `k`; prefer `k=3` for fast scans and `k≥6` only for targeted deep-layering investigations.
+**Latency note:** first call per `(pattern, motif_type, window, min_k, amt1_min, amt2_max, k, direction, min_m)` is cold — enumerates motifs across all seeds in the pattern. Cold call can take 30–90s on patterns with >500k entities. Subsequent calls hit an LRU cache (cap 8). `cycle_3` is deduplicated by canonical ring; `structuring` and `chain_k` are deduplicated by canonical path tuple; `split_recombine` is deduplicated by `(direction, source, sink, sorted intermediaries)`; `bipartite_burst` is deduplicated by `(frozenset sources, frozenset sinks)`. `chain_k` cost scales with out-degree and `k`; prefer `k=3` for fast scans and `k≥6` only for targeted deep-layering investigations.
 
 **Returns:** `motif_type` (once, not per instance) and `results[]` of motif instances with `score`, `log_score`, `score_clamped`, `score_rank_pct`, `is_high_potential` (p95 threshold within motif_type), motif-specific fields (see `score_motif` above for the per-type field list, including `frontier_truncated` on `chain_k`). The same large-motif truncation rules from `score_motif` apply — motifs with > 50 edges carry top-50 `edges` / `breakdown` plus `breakdown_summary` population stats; the envelope `count` (number of motif instances) is unaffected.
 
@@ -2312,7 +2336,7 @@ Compares population centroid between two time windows (π11).
 | `window_b_from` | string | required | ISO-8601 start of second window |
 | `window_b_to` | string | required | ISO-8601 end of second window |
 
-**Returns:** `centroid_shift`, `top_shifted_dimensions[]`, `entity_count_a`, `entity_count_b`.
+**Returns:** `centroid_shift`, `top_changed_dimensions[]` (top 5), `window_a` / `window_b` (`{from, to, entry_count}`), `interpretation`.
 
 ---
 
@@ -2659,18 +2683,20 @@ detection methods based on sphere capabilities and query intent.
 
 Falls back to keyword-based planning if MCP sampling is unavailable.
 
-**Available step handlers (42)** — selected automatically based on capabilities.
+**Available step handlers (45)** — selected automatically based on capabilities.
 See [mcp-spec.md](mcp-spec.md) for the full handler table. Categories:
 
-| Category | Count | Examples |
-|----------|-------|---------|
+| Category | Count | Steps |
+|----------|-------|-------|
 | Detection | 6 | find_anomalies, detect_trajectory_anomaly, detect_segment_shift, detect_neighbor_contamination, detect_cross_pattern_discrepancy, find_regime_changes |
-| Analysis | 10 | find_hubs, find_clusters, find_drifting_entities, find_similar_entities, contrast_populations, explain_anomaly, trace_root_cause |
-| Composite Risk | 3 | composite_risk, composite_risk_batch, combine_anomaly_pvalues |
+| Analysis | 9 | find_hubs, find_clusters, find_drifting_entities, find_similar_entities, contrast_populations, check_anomaly_batch, explain_anomaly, cross_pattern_profile, passive_scan |
+| Composite Risk | 2 | composite_risk, composite_risk_batch |
 | Aggregation | 1 | aggregate |
 | Observability | 5 | sphere_overview, check_alerts, detect_data_quality, anomaly_summary, aggregate_anomalies |
 | Temporal | 3 | compare_time_windows, find_drifting_similar, hub_history |
-| Network/Graph | 6 | find_counterparties, extract_chains, find_chains_for_entity, find_common_relations, find_geometric_path, edge_stats |
+| Network/Fraud | 4 | find_counterparties, extract_chains, find_chains_for_entity, find_common_relations |
+| Chains | 5 | find_chains_with_coherent_anomaly, classify_chain_typology, extend_chain, anomaly_propagation_in_chain, trace_root_cause |
+| Edges & motifs | 2 | find_high_potential_edges, find_high_potential_motifs |
 | Population | 2 | get_centroid_map, attract_boundary |
 | Smart-mode exclusive | 6 | assess_false_positive, detect_event_rate_anomaly, detect_hub_anomaly_concentration, detect_composite_subgroup_inflation, detect_collective_drift, detect_temporal_burst |
 
@@ -2708,7 +2734,7 @@ Continuous anchor patterns whose dimensions are point properties carry a second 
 - `is_anomaly = conformal_p ≤ 1 − anomaly_percentile/100` — the alarm budget: at the 95th percentile at most 5 % of the population is flagged; entities scored later keep that budget while the population does not move. θ is not the boundary on these patterns
 - `score_delta` — the rank-Gaussian coordinates the score is computed on (`{dim: z}` in `get_polygon`)
 
-`explain_anomaly` splits the evidence `−log2 conformal_p` into bits per axis and per dimension. New entities (incremental ingest, hypothetical-entity tools) are scored against the stored reference, keeping the alarm budget while the population does not move (on smaller calibrations via out-of-fold scores; on larger ones the difference is within noise); `check_alerts` raises `calibration_age` when the reference is older than 60 days, and `alarm_rate_drift` (MEDIUM) when rows written since the calibration exceed that budget.
+`explain_anomaly` splits the evidence `−log2 conformal_p` into bits per axis and per dimension. New entities (incremental ingest, hypothetical-entity tools) are scored against the stored reference, keeping the alarm budget while the population does not move (on smaller calibrations via out-of-fold scores; on larger ones the difference is within noise); `check_alerts` raises `calibration_age` when the reference is older than 60 days, `alarm_rate_drift` (MEDIUM) when rows written since the calibration exceed that budget, and `population_drift` (MEDIUM) when those rows no longer follow the calibrated population.
 
 ### Continuous anomaly signal
 

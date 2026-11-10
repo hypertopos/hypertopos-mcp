@@ -10,7 +10,7 @@
       "anomaly_rate": 0.05,
       "anomaly_rate_source": "delta_norm_scan",
       "calibration_health": "good",
-      "continuous_mode_note": "This pattern uses continuous edge encoding \u2014 centroid_map(group_by_line) and contrast_populations(edge spec) are unavailable. Use group_by_property instead.",
+      "continuous_mode_note": "This pattern uses continuous edge encoding \u2014 centroid_map(group_by_line) and contrast_populations(edge spec) (full profile) are unavailable. Use group_by_property instead.",
       "dim_quality_warnings": [
         {
           "dim_label": "balance",
@@ -62,7 +62,7 @@
       "anomaly_rate": 0.0413,
       "anomaly_rate_source": "is_anomaly",
       "calibration_health": "good",
-      "continuous_mode_note": "This pattern uses continuous edge encoding \u2014 centroid_map(group_by_line) and contrast_populations(edge spec) are unavailable. Use group_by_property instead.",
+      "continuous_mode_note": "This pattern uses continuous edge encoding \u2014 centroid_map(group_by_line) and contrast_populations(edge spec) (full profile) are unavailable. Use group_by_property instead.",
       "dim_quality_warnings": [
         {
           "dim_label": "balance_to_loan",
@@ -115,7 +115,7 @@
       "anomaly_rate": 0.0909,
       "anomaly_rate_source": "is_anomaly",
       "calibration_health": "good",
-      "continuous_mode_note": "This pattern uses continuous edge encoding \u2014 centroid_map(group_by_line) and contrast_populations(edge spec) are unavailable. Use group_by_property instead.",
+      "continuous_mode_note": "This pattern uses continuous edge encoding \u2014 centroid_map(group_by_line) and contrast_populations(edge spec) (full profile) are unavailable. Use group_by_property instead.",
       "dim_quality_warnings": [
         {
           "dim_label": "balance_to_loan",
@@ -178,7 +178,7 @@
       "anomaly_rate": 0.0667,
       "anomaly_rate_source": "is_anomaly",
       "calibration_health": "good",
-      "continuous_mode_note": "This pattern uses continuous edge encoding \u2014 centroid_map(group_by_line) and contrast_populations(edge spec) are unavailable. Use group_by_property instead.",
+      "continuous_mode_note": "This pattern uses continuous edge encoding \u2014 centroid_map(group_by_line) and contrast_populations(edge spec) (full profile) are unavailable. Use group_by_property instead.",
       "dim_quality_warnings": [
         {
           "dim_label": "penalty_interest_count",
@@ -231,7 +231,7 @@
       "anomaly_rate": 0.0502,
       "anomaly_rate_source": "delta_norm_scan",
       "calibration_health": "good",
-      "continuous_mode_note": "This pattern uses continuous edge encoding \u2014 centroid_map(group_by_line) and contrast_populations(edge spec) are unavailable. Use group_by_property instead.",
+      "continuous_mode_note": "This pattern uses continuous edge encoding \u2014 centroid_map(group_by_line) and contrast_populations(edge spec) (full profile) are unavailable. Use group_by_property instead.",
       "dim_quality_warnings": [
         {
           "dim_label": "pair_sum_amount",

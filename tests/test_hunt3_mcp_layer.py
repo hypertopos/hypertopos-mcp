@@ -184,15 +184,13 @@ def test_failed_open_keeps_previous_session(reopening_berka_sphere: str) -> None
     from hypertopos_mcp.tools.session import open_sphere
 
     open_sphere(reopening_berka_sphere)
-    _state["phase"] = 3
-    _state["manual_mode"] = True
+    caps = dict(_state["capabilities"] or {})
     old_session = _state["session"]
     with pytest.raises(Exception, match="does_not_exist"):
         open_sphere("does_not_exist")
     assert _state["session"] is old_session
     assert old_session._manifest.status != "expired"
-    assert _state["phase"] == 3
-    assert _state["manual_mode"] is True
+    assert _state["capabilities"] == caps
 
 
 # --- local agent temporal scope ---------------------------------------------------

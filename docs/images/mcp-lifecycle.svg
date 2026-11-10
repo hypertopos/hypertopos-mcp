@@ -1,54 +1,60 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 360" font-family="'Segoe UI', system-ui, -apple-system, sans-serif" role="img" aria-labelledby="mcpl-title mcpl-desc">
-<title id="mcpl-title">MCP tool phases</title>
-<desc id="mcpl-desc">The MCP server shows tools in three phases per client session. Phase 1, before any sphere is open: open_sphere, close_sphere and get_session_stats. Phase 2, after open_sphere: 22 tools, including detect_pattern (smart mode), sphere_overview and the edge-traversal tools. Phase 3, after sphere_overview: the full surface the sphere supports. Smart mode answers one sentence with server-side chained steps; manual mode lets the agent pick every call. The server runs over stdio or streamable HTTP, where each client session keeps its own sphere, phase and statistics.</desc>
+<title id="mcpl-title">MCP tool profiles</title>
+<desc id="mcpl-desc">The MCP server lists one fixed tool profile, chosen at startup with --profile or HYPERTOPOS_MCP_PROFILE. minimal: detect_pattern and the session tools. investigator, the default: screening, explanation, flow, scheme typology and ring members. inspector: developer and data inspection, entity, polygon and line navigation, search and aggregation. full: every registered tool. Names combine: investigator,inspector stays under a 50-tool supervisor cap. Inside the profile, tools the open sphere cannot serve (temporal, multi-pattern, trajectory) are hidden. The server runs over stdio or streamable HTTP, where each client session keeps its own sphere and statistics.</desc>
 <defs>
 <linearGradient id="mcpl-bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#0a0e27"/><stop offset="100%" stop-color="#1a1a3e"/></linearGradient>
 <radialGradient id="mcpl-glow"><stop offset="0%" stop-color="#4808FC" stop-opacity="0.55"/><stop offset="100%" stop-color="#4808FC" stop-opacity="0"/></radialGradient>
 </defs>
 <rect width="760" height="360" rx="14" fill="url(#mcpl-bg)" stroke="#230C7C" stroke-width="1.5"/>
-<text x="380" y="26" font-size="11" fill="#FFFFFF" fill-opacity="0.55" font-weight="600" text-anchor="middle" letter-spacing="2">MCP TOOL PHASES — PER CLIENT SESSION</text>
-<rect x="24" y="44" width="184" height="118" rx="10" fill="#0f2040" stroke="#6D39FD" stroke-width="1.2"/>
-<text x="116" y="68" font-size="14" fill="#FFFFFF" font-weight="700" text-anchor="middle">Phase 1</text>
-<text x="116" y="84" font-size="10" fill="#FFFFFF" fill-opacity="0.7" text-anchor="middle">no sphere open</text>
-<line x1="42" y1="94" x2="190" y2="94" stroke="#230C7C" stroke-width="1"/>
-<text x="116" y="113" font-size="12" fill="#DACEFE" font-weight="700" text-anchor="middle">3 tools</text>
-<text x="116" y="132" font-size="8.5" fill="#A484FE" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">open_sphere</text>
-<text x="116" y="146" font-size="8.5" fill="#A484FE" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">close_sphere · get_session_stats</text>
-<rect x="288" y="44" width="184" height="118" rx="10" fill="#0f2040" stroke="#6D39FD" stroke-width="1.2"/>
-<text x="380" y="68" font-size="14" fill="#FFFFFF" font-weight="700" text-anchor="middle">Phase 2</text>
-<text x="380" y="84" font-size="10" fill="#FFFFFF" fill-opacity="0.7" text-anchor="middle">sphere open</text>
-<line x1="306" y1="94" x2="454" y2="94" stroke="#230C7C" stroke-width="1"/>
-<text x="380" y="113" font-size="12" fill="#DACEFE" font-weight="700" text-anchor="middle">22 tools</text>
-<text x="380" y="132" font-size="8.5" fill="#A484FE" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">detect_pattern · sphere_overview</text>
-<text x="380" y="146" font-size="9" fill="#FFFFFF" fill-opacity="0.7" text-anchor="middle">+ edge-traversal tools</text>
-<rect x="552" y="44" width="184" height="118" rx="10" fill="#0f2040" stroke="#6D39FD" stroke-width="1.2"/>
-<text x="644" y="68" font-size="14" fill="#FFFFFF" font-weight="700" text-anchor="middle">Phase 3</text>
-<text x="644" y="84" font-size="10" fill="#FFFFFF" fill-opacity="0.7" text-anchor="middle">full surface</text>
-<line x1="570" y1="94" x2="718" y2="94" stroke="#230C7C" stroke-width="1"/>
-<text x="644" y="113" font-size="12" fill="#DACEFE" font-weight="700" text-anchor="middle">94–111 tools</text>
-<text x="644" y="132" font-size="9" fill="#FFFFFF" fill-opacity="0.7" text-anchor="middle">temporal · multi-pattern · trajectory</text>
-<text x="644" y="146" font-size="9" fill="#FFFFFF" fill-opacity="0.7" text-anchor="middle">tools appear when the data exists</text>
-<line x1="216" y1="103" x2="274.4" y2="103" stroke="#885EFD" stroke-width="2"/>
-<polygon points="280,103 273,99.15 273,106.85" fill="#885EFD"/>
-<text x="248" y="94" font-size="8" fill="#A484FE" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">open_sphere</text>
-<line x1="480" y1="103" x2="538.4" y2="103" stroke="#885EFD" stroke-width="2"/>
-<polygon points="544,103 537,99.15 537,106.85" fill="#885EFD"/>
-<text x="512" y="94" font-size="8" fill="#A484FE" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">sphere_overview</text>
-<rect x="24" y="182" width="346" height="86" rx="10" fill="#0f2040" stroke="#230C7C" stroke-width="1"/>
-<text x="197" y="204" font-size="12" fill="#FFFFFF" font-weight="700" text-anchor="middle">Smart mode</text>
-<text x="197" y="222" font-size="9" fill="#DACEFE" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">detect_pattern("find anomalous accounts")</text>
-<text x="197" y="240" font-size="9" fill="#FFFFFF" fill-opacity="0.7" text-anchor="middle">45 step handlers, chained server-side</text>
-<text x="197" y="256" font-size="9" fill="#FFFFFF" fill-opacity="0.55" text-anchor="middle">one round trip → filtered, interpreted results</text>
-<rect x="390" y="182" width="346" height="86" rx="10" fill="#0f2040" stroke="#230C7C" stroke-width="1"/>
-<text x="563" y="204" font-size="12" fill="#FFFFFF" font-weight="700" text-anchor="middle">Manual mode</text>
-<text x="563" y="222" font-size="9" fill="#DACEFE" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">sphere_overview → find_anomalies → explain_anomaly</text>
-<text x="563" y="240" font-size="9" fill="#FFFFFF" fill-opacity="0.7" text-anchor="middle">the agent chooses every call</text>
-<text x="563" y="256" font-size="9" fill="#FFFFFF" fill-opacity="0.55" text-anchor="middle">full control over each step</text>
+<text x="380" y="26" font-size="11" fill="#FFFFFF" fill-opacity="0.55" font-weight="600" text-anchor="middle" letter-spacing="2">MCP TOOL PROFILES — ONE PER SERVER, CHOSEN AT STARTUP</text>
+<ellipse cx="289" cy="110" rx="120" ry="80" fill="url(#mcpl-glow)"/>
+<rect x="24" y="44" width="166" height="132" rx="10" fill="#0f2040" stroke="#6D39FD" stroke-width="1.2"/>
+<text x="107" y="68" font-size="14" fill="#FFFFFF" font-weight="700" text-anchor="middle">minimal</text>
+<text x="107" y="86" font-size="12" fill="#DACEFE" font-weight="700" text-anchor="middle">5 tools</text>
+<line x1="40" y1="96" x2="174" y2="96" stroke="#230C7C" stroke-width="1"/>
+<text x="107" y="114" font-size="9" fill="#FFFFFF" fill-opacity="0.7" text-anchor="middle">smart mode only</text>
+<text x="107" y="128" font-size="9" fill="#FFFFFF" fill-opacity="0.7" text-anchor="middle">one sentence, server-side steps</text>
+<text x="107" y="148" font-size="8.5" fill="#A484FE" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">detect_pattern</text>
+<text x="107" y="162" font-size="8.5" fill="#A484FE" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">+ session tools</text>
+<rect x="206" y="44" width="166" height="132" rx="10" fill="#0f2040" stroke="#4808FC" stroke-width="2"/>
+<text x="289" y="68" font-size="14" fill="#FFFFFF" font-weight="700" text-anchor="middle">investigator</text>
+<text x="289" y="86" font-size="12" fill="#DACEFE" font-weight="700" text-anchor="middle">34 tools</text>
+<line x1="222" y1="96" x2="356" y2="96" stroke="#230C7C" stroke-width="1"/>
+<text x="289" y="114" font-size="9" fill="#FFFFFF" fill-opacity="0.85" text-anchor="middle" font-weight="600">default</text>
+<text x="289" y="128" font-size="9" fill="#FFFFFF" fill-opacity="0.7" text-anchor="middle">screen · explain · flow · typology</text>
+<text x="289" y="148" font-size="8.5" fill="#A484FE" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">find_anomalies · score_motif</text>
+<text x="289" y="162" font-size="8.5" fill="#A484FE" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">entity_flow · extract_chains</text>
+<rect x="388" y="44" width="166" height="132" rx="10" fill="#0f2040" stroke="#6D39FD" stroke-width="1.2"/>
+<text x="471" y="68" font-size="14" fill="#FFFFFF" font-weight="700" text-anchor="middle">inspector</text>
+<text x="471" y="86" font-size="12" fill="#DACEFE" font-weight="700" text-anchor="middle">23 tools</text>
+<line x1="404" y1="96" x2="538" y2="96" stroke="#230C7C" stroke-width="1"/>
+<text x="471" y="114" font-size="9" fill="#FFFFFF" fill-opacity="0.7" text-anchor="middle">developer · data inspection</text>
+<text x="471" y="128" font-size="9" fill="#FFFFFF" fill-opacity="0.7" text-anchor="middle">navigation · search · aggregation</text>
+<text x="471" y="148" font-size="8.5" fill="#A484FE" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">goto · walk_line · emerge</text>
+<text x="471" y="162" font-size="8.5" fill="#A484FE" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">get_polygon · aggregate</text>
+<rect x="570" y="44" width="166" height="132" rx="10" fill="#0f2040" stroke="#6D39FD" stroke-width="1.2"/>
+<text x="653" y="68" font-size="14" fill="#FFFFFF" font-weight="700" text-anchor="middle">full</text>
+<text x="653" y="86" font-size="12" fill="#DACEFE" font-weight="700" text-anchor="middle">111 tools</text>
+<line x1="586" y1="96" x2="720" y2="96" stroke="#230C7C" stroke-width="1"/>
+<text x="653" y="114" font-size="9" fill="#FFFFFF" fill-opacity="0.7" text-anchor="middle">every registered tool</text>
+<text x="653" y="128" font-size="9" fill="#FFFFFF" fill-opacity="0.7" text-anchor="middle">over a 50-tool supervisor cap</text>
+<text x="653" y="148" font-size="8.5" fill="#A484FE" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">find_clusters · recalibrate</text>
+<text x="653" y="162" font-size="8.5" fill="#A484FE" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">trace_root_cause · …</text>
+<rect x="24" y="192" width="346" height="78" rx="10" fill="#0f2040" stroke="#230C7C" stroke-width="1"/>
+<text x="197" y="214" font-size="12" fill="#FFFFFF" font-weight="700" text-anchor="middle">Names combine</text>
+<text x="197" y="234" font-size="9" fill="#DACEFE" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">--profile investigator,inspector</text>
+<text x="197" y="250" font-size="9" fill="#FFFFFF" fill-opacity="0.7" text-anchor="middle">49 tools, each once — within a 50-tool supervisor cap</text>
+<text x="197" y="263" font-size="9" fill="#FFFFFF" fill-opacity="0.55" text-anchor="middle">or HYPERTOPOS_MCP_PROFILE; default investigator</text>
+<rect x="390" y="192" width="346" height="78" rx="10" fill="#0f2040" stroke="#230C7C" stroke-width="1"/>
+<text x="563" y="214" font-size="12" fill="#FFFFFF" font-weight="700" text-anchor="middle">Capability filter</text>
+<text x="563" y="234" font-size="9" fill="#DACEFE" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">temporal · multi_pattern · trajectory_index</text>
+<text x="563" y="250" font-size="9" fill="#FFFFFF" fill-opacity="0.7" text-anchor="middle">after open_sphere, tools the sphere cannot serve are hidden</text>
+<text x="563" y="263" font-size="9" fill="#FFFFFF" fill-opacity="0.55" text-anchor="middle">the whole profile is listed from the first tools/list</text>
 <rect x="24" y="284" width="712" height="58" rx="10" fill="#130D47" stroke="#230C7C" stroke-width="1"/>
 <text x="40" y="304" font-size="11" fill="#FFFFFF" font-weight="700">Transports</text>
 <text x="130" y="304" font-size="9.5" fill="#DACEFE" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">stdio</text>
 <text x="166" y="304" font-size="9.5" fill="#FFFFFF" fill-opacity="0.7">— one agent per server process</text>
 <text x="130" y="324" font-size="9.5" fill="#DACEFE" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">--transport http</text>
 <text x="232" y="324" font-size="9.5" fill="#FFFFFF" fill-opacity="0.7">— streamable HTTP; each client session (Mcp-Session-Id) keeps its own open sphere,</text>
-<text x="232" y="337" font-size="9.5" fill="#FFFFFF" fill-opacity="0.7">tool phase and call statistics</text>
+<text x="232" y="337" font-size="9.5" fill="#FFFFFF" fill-opacity="0.7">response format and call statistics; all sessions share the server's profile</text>
 </svg>

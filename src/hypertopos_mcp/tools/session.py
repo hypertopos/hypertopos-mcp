@@ -16,14 +16,14 @@ from mcp.types import ToolAnnotations
 from hypertopos_mcp._format import json_default, sanitize_for_json, tabulate_properties
 from hypertopos_mcp.server import (
     RESPONSE_FORMATS,
+    _apply_sphere_capabilities,
     _call_stats,
     _do_open_sphere,
     _refresh_state,
-    _register_phase2_tools,
     _reload_hypertopos_modules,
     _require_sphere,
+    _reset_session_tools,
     _state,
-    _unregister_phase2_tools,
     active_response_format,
     current_session,
     forget_session,
@@ -146,9 +146,8 @@ def open_sphere(
             )
         _reload_hypertopos_modules()
     _do_open_sphere(path, branch=branch)  # on failure the previous session stays as it was
-    _unregister_phase2_tools(ctx)  # stash all → Phase 1
     _state["response_format"] = response_format
-    _register_phase2_tools(ctx)  # restore gateway only → Phase 2
+    _apply_sphere_capabilities(ctx)
     s = _state["sphere"]._sphere
     _caps = sphere_capabilities()
 
@@ -166,8 +165,7 @@ def open_sphere(
         },
         "hint": (
             "Use detect_pattern(query) to find anomalies — describe what to"
-            " look for. Call sphere_overview() ONLY when you need manual"
-            " tools for drill-down."
+            " look for — or find_anomalies / explain_anomaly directly."
         ),
         "capabilities": _caps,
         "available_tools": sorted(visible_tools()),
@@ -191,7 +189,7 @@ def close_sphere(ctx: Context | None = None) -> str:
     for key in list(_state.keys()):
         _state[key] = None
     forget_session(current_session().key)
-    _unregister_phase2_tools(ctx)
+    _reset_session_tools(ctx)
     return json.dumps({"status": "closed", "session_stats": stats})
 
 

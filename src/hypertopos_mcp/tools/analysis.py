@@ -149,7 +149,7 @@ def compare_calibrations(
     top_n: int = 10,
     verbose: bool | None = None,
 ) -> str:
-    """Per-dimension μ/σ/θ drift between two calibration epochs of one pattern.
+    """What moved in pattern_id's calibration between two epochs? Per-dimension μ/σ/θ drift.
 
     Diagnostic for: 'how did this pattern's calibration shift between epoch
     N and M?'. Use after a builder rebuild to inspect what re-fitted
@@ -778,14 +778,14 @@ def find_similar_entities(
     dim_mask: list[str] | None = None,
     metric: str = "L2",
 ) -> str:
-    """Find top-N entities geometrically most similar to the given entity.
+    """Which accounts behave most like primary_key? The top_n entities geometrically most similar to it.
 
     filter_expr: Lance SQL predicate (e.g. "is_anomaly = true", "score_rank_pct > 95").
     missing_edge_to: keep only similar entities with NO edge to this line.
     dim_mask: compute distance only on named dimensions (e.g. ["_d_amount_out_std", "_d_sum_in"]).
     metric: "L2" (Euclidean, default) or "cosine" (shape similarity ignoring magnitude).
     Returns: reference entity metadata + similar entities with distance. Hard cap 50.
-    """
+    """  # noqa: E501
     _require_navigator()
     if missing_edge_to:
         sphere = _state["sphere"]._sphere
@@ -1069,19 +1069,18 @@ def find_counterparties(
     use_edge_table: bool = True,
     timestamp_cutoff: float | None = None,
 ) -> str:
-    """Find transaction counterparties of an entity with optional anomaly enrichment.
+    """Other accounts in the same scheme as primary_key: who it sends to and receives from, with optional anomaly status.
 
     One hop over an event line's from/to columns. For the entities a polygon links
     to through its relation edges (binary FK patterns), use get_polygon or jump_polygon.
     from_col/to_col: columns with source/destination entity keys in the event line.
     When pattern_id is given and edge table exists, uses fast BTREE lookup with
     amount_sum/amount_max per counterparty. Set use_edge_table=False to force points scan.
-    timestamp_cutoff (Unix seconds): edge-table fast path only — only edges with
-    timestamp <= cutoff are considered. Used for as-of graph reconstruction.
-    Points-scan fallback silently ignores it.
-    Returns: outgoing targets, incoming sources, each with tx_count and optional anomaly status.
+    timestamp_cutoff (Unix seconds): edge-table fast path only (as-of reconstruction);
+    the points-scan fallback raises when it is set.
+    Returns: outgoing, incoming (top_n each) with tx_count and optional anomaly status.
     Sorted by tx_count desc; ties by amount_sum desc (edge table), then key asc.
-    """
+    """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
 
@@ -1107,13 +1106,14 @@ def entity_flow(
     top_n: int = 20,
     timestamp_cutoff: float | None = None,
 ) -> str:
-    """Net flow analysis per counterparty via edge table.
+    """Where does primary_key's money go and come from? Net flow per counterparty via the edge table.
 
     Computes outgoing/incoming totals and per-counterparty net flow.
     Requires event pattern with edge table.
     timestamp_cutoff (Unix seconds): only edges with timestamp <= cutoff
     are considered. Use for as-of flow reconstruction.
     Returns: outgoing_total, incoming_total, net_flow, flow_direction, counterparties sorted by |net_flow|.
+    This is flow, not shape: for the scheme's typology call score_motif; for its other members find_counterparties or extract_chains.
     """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
@@ -1133,7 +1133,7 @@ def contagion_score(
     pattern_id: str,
     timestamp_cutoff: float | None = None,
 ) -> str:
-    """Score how many of an entity's counterparties are anomalous.
+    """How many of primary_key's counterparties are anomalous? Contagion score.
 
     Requires event pattern with edge table. Score = anomalous/total counterparties (0.0–1.0).
     timestamp_cutoff (Unix seconds): only edges with timestamp <= cutoff are considered.
@@ -1158,11 +1158,11 @@ def contagion_score_batch(
     max_keys: int = 200,
     timestamp_cutoff: float | None = None,
 ) -> str:
-    """Contagion score for multiple entities in one call.
+    """How many anomalous counterparties do each of primary_keys have? Contagion score for many entities in one call.
 
     timestamp_cutoff (Unix seconds): forwarded to each per-entity contagion_score.
     Returns per-entity scores plus summary (mean, max, high_contagion_count).
-    """
+    """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
     result = nav.contagion_score_batch(
@@ -1183,7 +1183,7 @@ def degree_velocity(
     n_buckets: int = 4,
     timestamp_cutoff: float | None = None,
 ) -> str:
-    """Temporal connection velocity — how entity's degree changes over time.
+    """Is primary_key gaining or losing counterparties over time? Degree velocity per time bucket.
 
     Buckets edges by timestamp, counts unique counterparties per bucket.
     Velocity = last_bucket_degree / first_bucket_degree.
@@ -1191,7 +1191,8 @@ def degree_velocity(
     timestamp_cutoff (Unix seconds): only edges with timestamp <= cutoff are considered;
     the last bucket endpoint is naturally <= cutoff.
     Returns: buckets with out/in degree, velocity_out, velocity_in, interpretation.
-    """
+    This is flow, not shape: for the scheme's typology call score_motif; for its other members find_counterparties or extract_chains.
+    """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
     result = nav.degree_velocity(
@@ -1210,7 +1211,7 @@ def investigation_coverage(
     pattern_id: str,
     explored_keys: list[str] | None = None,
 ) -> str:
-    """Agent guidance: how much of an entity's edge neighborhood has been explored.
+    """How much of primary_key's neighbourhood is still unexplored? Coverage and the anomalous counterparties left.
 
     Pass explored_keys (list of entity PKs already investigated) to see coverage
     and which unexplored counterparties are anomalous. Helps agents decide where to look next.
@@ -1219,7 +1220,7 @@ def investigation_coverage(
     Returns: coverage fraction of the entity's edge neighborhood explored,
     counts of explored vs unexplored counterparties, and the unexplored
     counterparties that are anomalous (next-step candidates).
-    """
+    """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
     explored_set = set(explored_keys) if explored_keys else set()
@@ -1237,7 +1238,7 @@ def propagate_influence(
     min_threshold: float = 0.001,
     timestamp_cutoff: float | None = None,
 ) -> str:
-    """BFS influence propagation from seed entities with geometric decay.
+    """Which accounts near known bad actors are at risk? BFS influence propagation from seed_keys with geometric decay.
 
     At each hop: influence = parent_score * decay * geometric_coherence.
     Use to trace anomaly spread or identify at-risk entities near known bad actors.
@@ -1245,7 +1246,7 @@ def propagate_influence(
     timestamp_cutoff (Unix seconds): BFS only follows edges with timestamp <= cutoff.
     Used to reconstruct what influence propagation would have surfaced on a prior date.
     Returns: affected_entities sorted by influence_score, summary with counts.
-    """
+    """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
     result = nav.propagate_influence(
@@ -1299,14 +1300,14 @@ def anomalous_edges(
     pattern_id: str,
     top_n: int = 10,
 ) -> str:
-    """Find edges between two entities enriched with event-level anomaly scores.
+    """Which transactions between from_key and to_key are anomalous? Edges enriched with event-level anomaly scores.
 
     Unlike path/chain tools which score entities (anchor geometry), this scores
     individual transactions (event geometry). Use to inspect which specific
     transactions between two entities are anomalous.
     Requires event pattern with edge table.
     Returns: edges sorted by delta_norm desc, summary with anomalous count.
-    """
+    """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
     result = nav.anomalous_edges(from_key, to_key, pattern_id, top_n=top_n)
@@ -1330,11 +1331,9 @@ def find_witness_cohort(
     bidirectional_check: bool = True,
     edge_pattern_id: str | None = None,
 ) -> str:
-    """Rank entities that share an anchor entity's witness signature.
+    """Which other accounts look like primary_key's anomaly (cohort expansion)? Ranks entities sharing its witness signature.
 
-    Investigative peer ranking — NOT a forecast of future edges. Surfaces
-    existing peers sharing the target's anomaly signature, not future
-    connections.
+    Investigative peer ranking of existing peers — NOT a forecast of future edges.
 
     Combines four signals into a composite score in [0, 1]:
     - delta similarity: exp(-distance / theta_norm), absolute and pool-independent
@@ -1348,15 +1347,10 @@ def find_witness_cohort(
     Auto-resolves the edge pattern from the anchor's entity line; pass
     edge_pattern_id explicitly to override when multiple event patterns match.
 
-    Use case: surface non-obvious peers that share the target's anomaly
-    signature with explainable per-component scores. Best for fraud cohort
-    expansion (find more accounts like this known launderer), not for
-    predicting which entities will transact in the future.
-
     Requires anchor pattern + at least one event pattern with edge table
     covering its entity line. Returns members sorted by score desc, with
     explanation per member and weights_used summary for reproducibility.
-    """
+    """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
     from hypertopos.navigation.navigator import (
@@ -1396,9 +1390,9 @@ def find_chains_for_entity(
     pattern_id: str,
     top_n: int = 20,
 ) -> str:
-    """Find transaction chains involving a specific entity (requires chain pattern with chain_keys column).
+    """Which built chains run through primary_key? Reverse lookup on a chain pattern (its line needs a chain_keys column).
 
-    Returns: chains enriched with is_anomaly, delta_norm, score_rank_pct.
+    Returns: up to top_n chains (chain_id of the chain line) with is_anomaly, delta_norm, score_rank_pct.
     """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
@@ -1844,23 +1838,12 @@ def find_geometric_path(
     beam_width: int = 50,
     scoring: str = "geometric",
 ) -> str:
-    """Find paths between two entities scored by geometric coherence.
+    """How is from_key connected to to_key? Paths between them, scored by geometric coherence.
 
-    Uses bidirectional BFS on the edge table, then scores discovered
-    paths by delta-vector coherence. beam_width controls how many
-    top-scored paths are returned.
-
-    Scoring modes:
-    - geometric: witness overlap + delta alignment + anomaly preservation
-    - amount: geometric score modulated by log(transaction amount) — higher = coherent path through high-value transactions
-    - anomaly: prefer paths through anomalous entities
-    - shortest: plain BFS (no geometric scoring)
-
-    Requires pattern with edge table (event pattern with from/to structure).
-
-    Returns: `paths` (top 20 by score, each with the entity-key sequence and
-    its coherence score), `summary` (counts plus `paths_truncated_to` when
-    capped), and a `warning` when more than 20 paths were found.
+    Bidirectional BFS (up to max_depth hops) on the edge table, then paths scored by delta-vector coherence; beam_width controls how many top-scored paths are kept.
+    scoring: geometric (witness overlap + delta alignment + anomaly preservation); amount (geometric x log(transaction amount)); anomaly (prefer paths through anomalous entities); shortest (plain BFS).
+    Requires an event pattern with an edge table.
+    Returns: `paths` (top 20 by score: entity-key sequence and coherence score), `summary` (counts, `paths_truncated_to` when capped), `warning` when more than 20 paths were found.
     """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
@@ -1889,7 +1872,7 @@ def find_geometric_path(
 def edge_stats(
     pattern_id: str,
 ) -> str:
-    """Show edge table statistics for a pattern.
+    """How dense is pattern_id's transaction graph? Edge table statistics.
 
     Returns: row_count, unique_from, unique_to, timestamp_range,
     amount_range, avg_degree. Useful for understanding graph density
@@ -1928,12 +1911,12 @@ def find_novel_entities(
     top_n: int = 10,
     sample_size: int = 5000,
 ) -> str:
-    """Find entities whose geometry deviates most from their neighbors' expected position.
+    """Which accounts behave unlike their own counterparties? Geometry farthest from the neighbours' expected position.
 
     High novelty = entity doesn't behave like its neighborhood.
     Requires a pattern with an edge table.
     Returns: {results: [{primary_key, novelty_score, n_neighbors}]} by novelty_score descending.
-    """
+    """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
     try:
@@ -2233,25 +2216,12 @@ def simulate_counterparty_removal(
     top_n: int = 5,
     edge_top_n: int | None = 500,
 ) -> str:
-    """Per-counterparty rollup of per-edge counterfactual contributions.
+    """Which counterparties make primary_key look anomalous? Per-counterparty rollup of per-edge counterfactual contributions.
 
-    AML / fraud analysts think per-counterparty, not per-transaction. This
-    tool runs the per-edge counterfactual over the entity's adjacency
-    (capped at ``edge_top_n`` edges), then groups by counterparty
-    (``edge_partner_key``) and ranks partners by collective anomaly
-    contribution.
-
-    Returns ``{results: [...]}``, ranked, one entry per counterparty:
-    ``partner_key``, ``n_edges``, ``sum_drop_pct``, ``sum_abs_drop_pct``,
-    ``max_abs_drop_pct``, ``dominant_dim_label``, ``edge_ids``. Sorted by
-    ``sum_abs_drop_pct`` descending.
-
-    ``edge_top_n`` defaults to 500 — the per-edge counterfactual scans the
-    entity's full adjacency to find the top-N contributors, so values >> 500
-    on hub entities (>1 k counterparties) push per-call latency past several
-    minutes. Pass an explicit higher value when exhaustive coverage on a
-    specific hub is required and you can budget the wall clock.
-    """
+    Runs the per-edge counterfactual over the entity's adjacency (capped at edge_top_n edges), groups by counterparty and ranks partners by collective anomaly contribution.
+    Returns {results: [...]}, one entry per counterparty: partner_key, n_edges, sum_drop_pct, sum_abs_drop_pct, max_abs_drop_pct, dominant_dim_label, edge_ids; sorted by sum_abs_drop_pct descending.
+    edge_top_n defaults to 500; much higher values on hubs (>1 k counterparties) push one call past several minutes.
+    """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
     try:
@@ -2277,7 +2247,7 @@ def find_graph_geometry_tension(
     top_n_hidden: int = 5,
     top_n_suspicious: int = 5,
 ) -> str:
-    """Cross-tabulate behavioural k-NN with graph adjacency for one entity.
+    """Who behaves like primary_key but never transacts with it, and who transacts with it but behaves differently? Behavioural k-NN cross-tabulated with graph adjacency.
 
     Surfaces two cells of the 2×2 contingency table that scalar anomaly
     detectors cannot separate:
@@ -2288,7 +2258,7 @@ def find_graph_geometry_tension(
 
     Returns: {primary_key, hidden_cluster, suspicious_links, tension_score}
     where tension_score = (|hidden_cluster| + |suspicious_links|) / k_geometric.
-    """
+    """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
     try:
@@ -2943,20 +2913,11 @@ def extract_chains(
     bidirectional: bool = False,
     anchor_pattern_id: str | None = None,
 ) -> str:
-    """Extract transaction chains by following from_col->to_col links within a time window.
+    """Which money chains run through an account (seed_nodes=[key]), or through the population? Follows from_col->to_col links within time_window_hours.
 
-    Population-wide (samples start nodes) or from specific entities (seed_nodes=[key]; then
-    every event is used, so the chains from those entities are exact). Needs no edge table.
-    from_col/to_col/time_col/amount_col default to the event pattern's edge table (time_col
-    also to the pattern's timestamp column), so hops follow time; pass them for a plain line.
-    category_col: optional per-hop tracking.
-    seed_nodes: restrict to specific starting entities. bidirectional: treat edges as undirected.
-    max_chains: global cap (default 100K). sample_size: limit starting nodes for large datasets.
-    anchor_pattern_id: optional anchor pattern over the entity line referenced by from_col/to_col.
-    When supplied, each chain carries a per-hop ``edge_potentials`` list — Euclidean distance
-    between consecutive entities' polygon delta vectors against that anchor pattern. When None,
-    ``edge_potentials`` is a list of nulls per hop. Strict-JSON sanitised (NaN / inf -> null).
-    Returns: chains with hop_count, is_cyclic, keys, amount_decay, edge_potentials. Sorted by sort_by.
+    With seed_nodes every event is used, so the chains from those accounts are exact; without, start nodes are sampled (sample_size). Needs no edge table: event_pattern_id is a pattern or line; from_col/to_col/time_col/amount_col default to its edge table (time_col also to its timestamp column).
+    min_hops / max_hops bound chain length; max_chains caps the search; category_col tracks a value per hop; bidirectional treats edges as undirected. anchor_pattern_id adds per-hop edge_potentials (delta distance of consecutive accounts; nulls without it).
+    Returns: top_n chains (hop_count, is_cyclic, keys, amount_decay, edge_potentials) sorted by sort_by; chain_id numbers this call only.
     """  # noqa: E501
     _require_navigator()
     try:
@@ -2989,10 +2950,10 @@ def cross_pattern_profile(
     primary_key: str,
     line_id: str | None = None,
 ) -> str:
-    """Multi-source risk profile: anomaly status across all patterns the entity participates in.
+    """Is primary_key anomalous in every pattern it appears in? Multi-source risk profile across patterns.
 
     Returns: source_count, risk_score, connected_risk, and per-pattern signal details.
-    """
+    """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
     profile = nav.cross_pattern_profile(primary_key, line_id=line_id)
@@ -3010,7 +2971,7 @@ def passive_scan(
     include_borderline: bool = False,
     borderline_rank_threshold: int = 80,
 ) -> str:
-    """Batch multi-source anomaly screening — geometry once per pattern.
+    """Which accounts are flagged by several sources at once? Batch multi-source anomaly screening, geometry once per pattern.
 
     home_line_id: anchor line to screen.
     sources: JSON array of source configs or null for auto-discover.
@@ -3024,7 +2985,7 @@ def passive_scan(
     include_borderline: auto-discover registers borderline sources.
     borderline_rank_threshold: rank pct for borderline (default 80).
     Returns: per-source breakdown with anomaly_intensity.
-    """
+    """  # noqa: E501
     if scoring not in ("count", "weighted"):
         return json.dumps(
             {"error": f"scoring must be 'count' or 'weighted'; got {scoring!r}"},
@@ -3392,7 +3353,7 @@ def explain_anomaly(
     primary_key: str,
     pattern_id: str,
 ) -> str:
-    """Full structured explanation of why an entity is anomalous.
+    """Why is primary_key flagged in pattern_id? Full structured explanation of the anomaly.
 
     Calibrated patterns (non-empty score_dims): severity (normal|low|medium|high|extreme from conformal_p against the alarm budget alpha = 1 - anomaly_percentile/100; normal above alpha), conformal_p, anomaly_score, delta_norm (shape-space, reference only); when not normal also bits (= -log2 conformal_p), axes ({axis: {rank, bits}}, bits sum to bits) and top_dimensions (`{dim, z, bits, pct_of_total}`, z = rank-Gaussian coordinate, bits sum to axes.mahal.bits; zero-share dims omitted); plus temporal_slices and reputation.
     Other patterns: severity, witness set, repair set, top dimensions (`{dim, kind, delta, pct_of_total}`, `pct_of_total` = the dim's share of `delta_norm²`, the metric behind `is_anomaly`; dims with a zero share omitted), p-value, temporal context, reputation, composite risk.
@@ -3476,77 +3437,19 @@ def assess_anomaly_certainty(
     pattern_id: str,
     perturbation_alphas: list[float] | None = None,
 ) -> str:
-    """Agent-correctness composer — how confident should you be in an entity's anomaly classification.
+    """How sure can I be that primary_key is (or is not) anomalous in pattern_id? One certainty verdict before opening a case.
 
-    Required:
-      - primary_key (str): entity identifier.
-      - pattern_id (str): pattern holding the entity's geometry row.
-
-    Optional:
-      - perturbation_alphas (list[float], default [0.005, 0.01, 0.05]): FDR
-        alphas swept for stability — the entity is "stable" at alpha when its
-        stored conformal p-value (``conformal_p`` = fraction of the population
-        at least as extreme) is ``<= alpha``. This is a direct primary_key
-        lookup of the focal entity's calibrated p-value, so it is independent
-        of any random sampling and always resolves the focal entity (a
-        population scan could miss it). The sweep thresholds the same stored
-        p-value against each alpha — no per-alpha re-scan.
-
-    Composes five existing primitives — explain_anomaly (driving dims,
-    conformal_p, signed_confidence, reliability flags), get_entity_geometry_meta
-    (delta_norm + boundary check), find_anomalies for each alpha
-    (FDR-gated stability), sphere_overview (calibration staleness), and
-    cross_pattern_profile (cross-pattern consistency) — into a single verdict
-    on classification certainty. ``certainty_verdict`` is certainty about
-    the classification, NOT about anomaly status: a confidently-normal
-    entity also receives ``"high"``.
-
-    Verdict rule (deterministic, documented for test discriminability):
-
-      If is_anomalous == True:
-        - stability_count == 3 AND not single_dim_driven AND not near_data_boundary
-          AND not calibration_stale → "high"
-        - stability_count == 0 (conformal_p > the loosest swept alpha — the
-          entity's calibrated p-value disagrees with its stored is_anomaly),
-          OR single_dim_driven AND near_data_boundary → "contested"
-        - stability_count == 1 → "low"
-        - stability_count == 2 → "moderate"
-        - else → "moderate"
-      If is_anomalous == False:
-        - not near_data_boundary AND not calibration_stale → "high"
-        - near_data_boundary → "low"
-        - else → "moderate"
-
-    ``near_data_boundary`` fires, on a calibrated pattern (non-empty
-    ``score_dims``), when conformal_p sits in [alpha/2, 2·alpha] of the alarm
-    budget alpha = 1 - anomaly_percentile/100; on other patterns when
-    delta_norm sits in [0.8·theta_norm, 1.2·theta_norm] — the band
-    ``find_anomalies(boundary_aware=True)`` uses for stratified sampling.
-
-    ``calibration_stale`` mirrors ``sphere_overview.calibration_health`` —
-    True when the focal pattern's health is ``"suspect"`` or ``"poor"``.
-
-    ``cross_pattern_consistency.n_other_patterns_anomalous`` counts patterns
-    OTHER than ``pattern_id`` that also flag the entity as anomalous;
-    ``consistent_classification`` is True when at least one other pattern
-    agrees with the focal classification (anomalous or normal).
-
-    Returns: JSON dict with primary_key, pattern_id, is_anomalous,
-    certainty_verdict ("high" | "moderate" | "low" | "contested"),
-    certainty_score (float in [0.0, 1.0]), conformal_p, signed_confidence,
-    stability_across_alphas (per-alpha bool), reliability_flags
-    (single_dim_driven, near_data_boundary, calibration_stale),
-    cross_pattern_consistency, rationale, recommended_next_steps.
-
-    Per-step ``steps_status`` field exposes which sub-composition succeeded
-    or failed: each step gets ``{ok: true}`` or ``{ok: false, error: <message>}`` —
-    never nulls or missing keys. Strict-JSON sanitised (±inf/NaN → null).
+    Composes explain_anomaly, get_entity_geometry_meta (boundary band), the stored conformal_p checked against each of perturbation_alphas (default [0.005, 0.01, 0.05]; a direct lookup, no sampling), sphere_overview (calibration staleness) and cross_pattern_profile. certainty_verdict is certainty about the classification, not about anomaly status: a confidently normal entity also gets "high".
+    Anomalous: stable at every alpha, not single_dim_driven, not near_data_boundary, not calibration_stale -> "high"; stable at no alpha, or single-dim-driven and near the boundary -> "contested"; stable at every alpha but held back by a flag -> "moderate"; stable at one of several -> "low"; otherwise "moderate". Normal: not near the boundary and not stale -> "high"; near the boundary -> "low"; else "moderate". The boundary band and the full rule: tools.md.
+    Returns: is_anomalous, certainty_verdict, certainty_score (0-1), conformal_p, signed_confidence, stability_across_alphas, reliability_flags, cross_pattern_consistency, rationale, recommended_next_steps, steps_status ({ok, error} per step).
     """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
 
     if perturbation_alphas is None:
         perturbation_alphas = [0.005, 0.01, 0.05]
+    if not perturbation_alphas:
+        raise ValueError("perturbation_alphas must name at least one alpha")
 
     steps_status: dict[str, dict[str, Any]] = {}
     result: dict[str, Any] = {
@@ -3630,6 +3533,7 @@ def assess_anomaly_certainty(
     # "contested" verdicts on most large-sphere entities).
     stability_across_alphas: dict[str, bool] = {}
     stability_count = 0
+    n_alphas = len(perturbation_alphas)
     if conformal_p is not None:
         for alpha in perturbation_alphas:
             stable = bool(conformal_p <= float(alpha))
@@ -3689,12 +3593,15 @@ def assess_anomaly_certainty(
         if stability_count == 0 or (single_dim_driven and near_data_boundary):
             verdict = "contested"
         elif (
-            stability_count == 3
+            stability_count == n_alphas
             and not single_dim_driven
             and not near_data_boundary
             and not calibration_stale
         ):
             verdict = "high"
+        elif stability_count == n_alphas:
+            # Stable at every alpha; only a flag held it back from "high".
+            verdict = "moderate"
         elif stability_count == 1:
             verdict = "low"
         else:
@@ -3708,11 +3615,11 @@ def assess_anomaly_certainty(
             verdict = "moderate"
 
     # certainty_score in [0.0, 1.0] — composed from the same five signals.
-    # Anomalous path: stability is the dominant signal (3 alphas → +0.6),
+    # Anomalous path: stability is the dominant signal (every alpha → +0.6),
     # reliability flags subtract, calibration staleness subtracts, cross-
     # pattern agreement adds a small bonus.
     if is_anomalous:
-        score = 0.6 * (stability_count / 3.0)
+        score = 0.6 * (stability_count / n_alphas)
         if not single_dim_driven:
             score += 0.15
         if not near_data_boundary:
@@ -3741,9 +3648,9 @@ def assess_anomaly_certainty(
         fired.append("delta_norm sits inside [0.8·theta, 1.2·theta] boundary band")
     if calibration_stale:
         fired.append("calibration health is suspect/poor")
-    if is_anomalous and stability_count < 3:
+    if is_anomalous and stability_count < n_alphas:
         fired.append(
-            f"FDR-sweep stability {stability_count}/3 — conformal_p exceeds "
+            f"FDR-sweep stability {stability_count}/{n_alphas} — conformal_p exceeds "
             "the tighter swept alphas"
         )
     if not consistent_classification:
@@ -3768,7 +3675,8 @@ def assess_anomaly_certainty(
         )
     elif verdict == "contested":
         recommended_next_steps.append(
-            "Call find_diverse_explanations to surface alternative hypotheses before acting"
+            "Call find_diverse_explanations (full profile) to surface alternative "
+            "hypotheses before acting"
         )
         if single_dim_driven:
             recommended_next_steps.append(
@@ -3786,7 +3694,7 @@ def assess_anomaly_certainty(
             )
         if near_data_boundary:
             recommended_next_steps.append(
-                "Run check_anomaly_batch on neighbouring boundary entities "
+                "Run check_anomaly_batch (full profile) on neighbouring boundary entities "
                 "to gauge local calibration sensitivity"
             )
 
@@ -3821,39 +3729,11 @@ def consensus_classification(
     pattern_id: str,
     sample_size: int | None = 10_000,
 ) -> str:
-    """Agent-correctness composer — what do the multiple anomaly detectors say about ONE entity.
+    """Do my detectors agree on primary_key, or is it a single-detector hit / mixed-signal mule? Single-entity view of classify_detector_consensus.
 
-    Single-entity focus over the population sweep ``classify_detector_consensus``.
-    The underlying primitive ranks the whole population and truncates to a
-    top-N list; this composer scores the population, then extracts and routes
-    the row for ``primary_key`` — surfacing the detector-agreement pattern and a
-    routing recommendation without the agent re-scanning + filtering a ranked
-    list. Use to answer "do my detectors agree on this entity, or is it a
-    mixed-signal hidden mule?" before opening a case on a single-detector hit.
-
-    Required:
-      - primary_key (str): entity identifier.
-      - pattern_id (str): pattern covering the entity (must have ≥2 patterns on
-        the entity line for cross-detector consensus — same precondition as
-        ``classify_detector_consensus``).
-
-    Optional:
-      - sample_size (int | None, default 10000): cap on geometry rows scored
-        (the population the consensus is calibrated on; ``None`` = all). The
-        focal entity is always scored, added to the sample when the draw
-        missed it; ``top_n`` is forced high internally so a scored entity is
-        never lost to list truncation.
-
-    Returns: JSON dict with primary_key, pattern_id, found (bool),
-    classification (one of ``mixed_signal``, ``anomalous_consensus``,
-    ``single_detector_signal``, ``normal_consensus``, ``insufficient_data`` —
-    null when not found), anomalous_detectors / normal_detectors /
-    borderline_detectors (lists), n_detectors_fired, hmp, p_per_detector,
-    population_rank (the entity's rank in the full consensus sweep),
-    interpretation, recommended_next_steps. ``found=false`` (plus a ``note``) only
-    when the entity has no geometry row in the pattern — never an empty/None
-    payload. Strict-JSON sanitised (±inf/NaN → null).
-    """
+    Scores the population (sample_size rows, default 10000, None = all; the focal entity is always scored) and routes primary_key's row. pattern_id needs >= 2 patterns on its entity line.
+    Returns: found (false, with a note, only when the entity has no geometry row), classification (mixed_signal | anomalous_consensus | single_detector_signal | normal_consensus | insufficient_data), anomalous_detectors / normal_detectors / borderline_detectors, n_detectors_fired, hmp, p_per_detector, population_rank, interpretation, recommended_next_steps.
+    """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
 
@@ -4586,77 +4466,15 @@ def score_motif(
     direction: str = "forward",
     min_m: int = 3,
 ) -> str:
-    """Score the best structural motif seeded at primary_key.
+    """Which scheme typology is primary_key part of? Scores the best motif of motif_type seeded at it.
 
-    motif_type ∈ {fan_out, fan_in, cycle_2, cycle_3, structuring, chain_k,
-    split_recombine, bipartite_burst}. Composes edge_potential across the
-    edges of the motif via product — a motif of rare edges is rare.
-
-    Defaults when time_window_hours is None: fan_out=168h, fan_in=168h,
-    cycle_2=24h, cycle_3=72h, structuring=1h, chain_k=168h,
-    split_recombine=168h, bipartite_burst=24h.
-
-    fan_out: hub → k distinct targets in the window (min k=3). Typology atoms:
-      T6 Offshore Hub, T13 Concentrator (source side).
-    fan_in: k distinct sources → sink in the window (min k=3). Typology atoms:
-      T12 Parallel Layering (destination side), T13 Concentrator/Sink.
-    cycle_2: A↔B bidirectional pair within the window. Typology atoms:
-      T2 Flash-Burst Round-Trip, T4 Bidirectional Burst.
-    cycle_3: A→B→C→A with strict temporal ordering, span ≤ window. Typology
-      atoms: T3 Round-Tripping 3-Party, T5 Long-Cycle, T11 Multi-Round-Tripping.
-    chain_k: open A→B→…→Z chain of length k (3 ≤ k ≤ 8), no cycle closure,
-      strict monotone timestamps, total span ≤ window. Typology atoms:
-      T5 Multi-Stage Layering, T18 Multi-Jurisdiction Latency Chain.
-      Default k=4; override to match the layering depth under investigation.
-    structuring: open A→B→C→D linear chain with hop1 amount ≥ amt1_min, hops
-      2 and 3 amount ≤ amt2_max, strict temporal ordering within window.
-      Typology atoms: structuring / smurfing.
-    split_recombine: diamond S → {M₁,…,Mₖ} → D with stacked-bipartite
-      temporal order — all split-hops S→Mᵢ precede all recombine-hops Mᵢ→D
-      within the window, no node revisits. direction="forward" picks the
-      seed as source S (split-then-recombine); direction="backward" picks
-      the seed as sink D (gather-then-fan). min_k overrides the
-      intermediary-cardinality threshold (default 3, must be ≥ 2).
-      Typology atoms: T1 Structured Layering (forward — scatter-gather
-      diamond), T12 Parallel Layering (backward — multiple chains
-      converging on the seed), T13 Concentrator/Sink (backward — diamond
-      subtype where the sink also looks like a fan_in target).
-    bipartite_burst: complete K_{k,m} bipartite subgraph in a tight time
-      window — k distinct sources each transact with every one of m
-      distinct sinks, all edges fall within the window. Seed is tried as
-      source first, then as sink. min_k sets the source-side cardinality
-      (default 3, must be ≥ 2); min_m sets the sink-side cardinality
-      (default 3, must be ≥ 2). Typology atoms: T16 Mirror-Flow Burst
-      (cohort / parallel-collusion variant — k coordinated senders fan
-      to m shared receivers in a tight window).
-
-    amt1_min/amt2_max gate only structuring; k gates only chain_k.
-    min_k overrides the distinct-neighbour threshold for fan_out / fan_in
-    / split_recombine / bipartite_burst (default 3 when None); ignored for
-    other motif types. Use to single-seed-check whether an entity has e.g.
-    ≥10 sources without triggering the cold ranking cache on
-    find_high_potential_motifs.
-    direction ("forward" | "backward") only steers split_recombine;
-    ignored for other motif types.
-    min_m sets the second cardinality of bipartite_burst K_{k,m}
-    (default 3); ignored for other motif types.
-
-    **Large-motif response truncation.** When a motif contains > 50 edges,
-    `edges` and `breakdown` are capped at the top 50 contributors by
-    `edge_potential` DESC. `edges_total_count` reports the original
-    count; `edges_truncated` / `breakdown_truncated` flag the truncation;
-    `breakdown_summary` provides population statistics (count, mean, std,
-    min, max, p25/p50/p75/p95 of `edge_potential`) over the full edge set
-    so the agent sees the distribution even when only the top 50 are
-    materialised. Rationale: pre-fix, a fan_in hub with ~500 sources
-    produced ~200k-char responses that overflowed the MCP token limit.
-
-    Returns: {found, score, log_score, score_clamped, motif_type,
-    breakdown, edges, edges_total_count, edges_truncated,
-    breakdown_truncated, breakdown_summary (when truncated),
-    motif-specific fields (ring/counterparty/k/path/amounts),
-    frontier_truncated for chain_k, reason when not found}.
-    """
+    Typology word -> motif_type: fan_out (one source, many targets); fan_in (many sources, one sink); cycle / round-trip -> cycle_2 (A<->B) or cycle_3 (A->B->C->A); scatter_gather -> split_recombine, direction="forward" (seed is the source); gather_scatter -> split_recombine, direction="backward" (seed is the sink); bipartite -> bipartite_burst (k sources x m sinks); stack / layering -> chain_k (open chain of k accounts); structuring (one large hop, then small hops).
+    pattern_id is the anchor pattern (an event pattern raises and names its anchor). The score is the product of edge_potential over the motif's edges: a motif of rare edges is rare.
+    time_window_hours: None = motif default (168h fan_out, fan_in, chain_k, split_recombine; 72h cycle_3; 24h cycle_2, bipartite_burst; 1h structuring); fan_out / fan_in take the densest such window in the seed's history.
+    min_k: distinct-neighbour (bipartite_burst: source) threshold for fan_out / fan_in / split_recombine / bipartite_burst (default 3, >= 2). min_m: bipartite_burst sinks (default 3). k: chain_k length, 3-8 (default 4). amt1_min / amt2_max: structuring hop-1 minimum / hops-2-3 maximum. direction: split_recombine only. Each is ignored by other motif types.
+    Over 50 edges, edges and breakdown keep the top 50 by edge_potential (edges_truncated, edges_total_count, breakdown_summary).
+    Returns: found, score, log_score, score_clamped, motif_type, breakdown, edges, motif-specific fields (ring, counterparty, path, sources / sinks, k, frontier_truncated on chain_k); reason when not found. Typology atoms per motif type: the score_motif entry in tools.md.
+    """  # noqa: E501
     _require_navigator()
     nav = _state["navigator"]
     result = nav.score_motif(
@@ -4691,55 +4509,12 @@ def find_high_potential_motifs(
     direction: str = "forward",
     min_m: int = 3,
 ) -> str:
-    """Rank motifs of a given type across the pattern, highest score first.
+    """Which accounts form the strongest schemes of motif_type in pattern_id? Ranks motif instances over every seed, highest score first.
 
-    motif_type ∈ {fan_out, fan_in, cycle_2, cycle_3, structuring, chain_k,
-    split_recombine, bipartite_burst}. First call per (pattern, motif_type,
-    window, amt1_min, amt2_max, k, direction, min_m) is cold — enumerates
-    motifs across all seeds. Subsequent calls hit an LRU cache (cap 8). On
-    large patterns (>500k entities) the cold call can take 30–90s — plan
-    accordingly.
-
-    top_n capped internally at 100. seeds filter restricts to specific entities
-    after the base ranking is cached.
-
-    min_k raises the distinct-neighbour threshold for fan_out / fan_in /
-    split_recombine / bipartite_burst (default 3 when None). amt1_min /
-    amt2_max gate only structuring. k gates only chain_k (3 ≤ k ≤ 8,
-    default 4) and is part of the cache key.
-
-    split_recombine: diamond S → {M₁,…,Mₖ} → D with stacked-bipartite
-    temporal order (all split-hops precede all recombine-hops within the
-    window). direction="forward" ranks seeds as the source S,
-    direction="backward" ranks them as the sink D. Both modes deduplicate
-    by (direction, source, sink, sorted intermediaries). Typology atoms:
-    T1 Structured Layering (forward), T12 Parallel Layering (backward),
-    T13 Concentrator/Sink (backward — diamond subtype of fan_in).
-    bipartite_burst: complete K_{k,m} bipartite subgraph in a tight time
-    window — k distinct sources × m distinct sinks fully connected. min_k
-    sets the source side (default 3); min_m sets the sink side (default
-    3); both must be ≥ 2 and both are part of the cache key. Results
-    deduplicated by (frozenset sources, frozenset sinks). Typology atoms:
-    T16 Mirror-Flow Burst (cohort / parallel-collusion variant).
-    direction is ignored for motifs other than split_recombine; min_m is
-    ignored for motifs other than bipartite_burst.
-
-    **Large-motif response truncation.** When any ranked motif contains
-    > 50 edges, its `edges` and `breakdown` are capped at the top 50
-    contributors by `edge_potential` DESC. `edges_total_count` reports
-    the original count; `edges_truncated` / `breakdown_truncated` flag
-    the truncation; `breakdown_summary` provides population statistics
-    (count, mean, std, min, max, p25/p50/p75/p95 of `edge_potential`)
-    over the full edge set so the agent sees the distribution even when
-    only the top 50 are materialised. Rationale: pre-fix, a fan_in hub
-    with ~500 sources produced ~200k-char responses that overflowed the
-    MCP token limit. `count` in the envelope is the motif-instance count
-    and is unaffected.
-
-    Returns: motif_type (once) and results[] of motif instances with score_rank_pct
-    + is_high_potential (p95 threshold within motif_type), plus the truncation fields above on
-    each instance.
-    """
+    motif_type, time_window_hours, min_k, min_m, k, amt1_min, amt2_max and direction mean the same as in score_motif (which maps typology words to motif types); pattern_id is the anchor pattern. For one known account call score_motif instead.
+    The first call per (pattern, motif_type, window, min_k, min_m, k, amt1_min, amt2_max, direction) enumerates every seed and can take 30-90 s above 500k entities; later calls hit an LRU cache (8 entries). seeds filters the cached ranking to given accounts; top_n is capped at 100. Motifs over 50 edges are truncated as in score_motif.
+    Returns: motif_type once and results[] with score, log_score, score_rank_pct, is_high_potential (p95 within motif_type) and the motif-specific fields.
+    """  # noqa: E501
     _require_navigator()
     navigator = _state["navigator"]
     capped_warning: str | None = None

@@ -2,28 +2,26 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tool-count consistency — documented counts in user-facing files must match runtime.
 
-Locks every `\\d+ tools` / phase-count string in `packages/hypertopos-mcp/` against
-the runtime registry (`_TOOL_TIERS` + `mcp._tool_manager._tools`). Drift in any
-documented count fails this test with a message naming the file, the documented
+Locks every `\\d+ tools` / profile-count string in `packages/hypertopos-mcp/` against
+the runtime registry (`_TOOL_TIERS`, `_PROFILES` and `mcp._tool_manager._tools`). Drift
+in any documented count fails this test with a message naming the file, the documented
 value, the expected runtime value, and the runtime expression that derives the
 expectation.
 
 Coverage:
-* `docs/mcp-spec.md` — phase counts, per-tier counts, token-cost table
-* `docs/images/mcp-lifecycle.svg` — phase boxes + manual-mode total
-* `docs/tools.md`, `README.md`, `src/hypertopos_mcp/__init__.py` — defensive
-  guard. These files have no count strings today; any future `\\d+ tools`
-  introduced there must match runtime.
+* `docs/mcp-spec.md` — the profile table (count and tool list per profile), the union
+  and single-pattern counts, the schema-size table, the read-only annotation count
+* `docs/images/mcp-lifecycle.svg` — one box per profile + the combined-profile line
+* `README.md` — the profile paragraph
+* `docs/tools.md`, `README.md`, `src/hypertopos_mcp/__init__.py` — defensive guard:
+  any `\\d+ tools` string there that no lock covers fails the test.
 
-Runtime canonical source: `_TOOL_TIERS` in `hypertopos_mcp.server`. Equivalent
-to `len(mcp._tool_manager._tools)` after all tool modules import. We use
-`_TOOL_TIERS` because it is the registry that the lifecycle helpers
-(`_unregister_phase2_tools`, `_register_manual_tools`) iterate.
+Runtime canonical sources: `_TOOL_TIERS` (every registered tool; the `full` profile is
+all of them) and `_PROFILES` (the named profiles) in `hypertopos_mcp.server`.
 """
 
 from __future__ import annotations
 
-import collections
 import re
 from pathlib import Path
 
@@ -36,25 +34,15 @@ import hypertopos_mcp.tools.navigation  # noqa: F401
 import hypertopos_mcp.tools.observability  # noqa: F401
 import hypertopos_mcp.tools.session  # noqa: F401
 import hypertopos_mcp.tools.smart  # noqa: F401
-from hypertopos_mcp.server import _TOOL_TIERS, mcp
+from hypertopos_mcp.server import _PROFILES, _TOOL_TIERS, mcp
 
 _PKG_ROOT = Path(__file__).resolve().parent.parent
 
 
-def _tier_counts() -> dict[str, int]:
-    return dict(collections.Counter(_TOOL_TIERS.values()))
-
-
 def _runtime_counts() -> dict[str, int]:
     """Named expressions every documented count must match."""
-    c = _tier_counts()
-    always = c.get("always", 0)
-    gateway = c.get("gateway", 0)
-    edge = c.get("edge", 0)
-    base = c.get("base", 0)
-    phase2_total = always + gateway + edge
-    phase3_min = phase2_total + base  # no optional capabilities
-    phase3_max = sum(c.values())  # all capabilities present
+    investigator = _PROFILES["investigator"]
+    union = dict.fromkeys((*investigator, *_PROFILES["inspector"]))
     read_only = sum(
         1
         for t in mcp._tool_manager.list_tools()
@@ -62,58 +50,70 @@ def _runtime_counts() -> dict[str, int]:
     )
     return {
         "read_only": read_only,
-        "always": always,
-        "gateway": gateway,
-        "edge": edge,
-        "base": base,
-        "phase2_total": phase2_total,
-        "phase3_min": phase3_min,
-        "phase3_max": phase3_max,
-        "total": sum(c.values()),
+        "minimal": len(_PROFILES["minimal"]),
+        "investigator": len(investigator),
+        "inspector": len(_PROFILES["inspector"]),
+        "investigator_inspector": len(union),
+        # a sphere with one pattern per entity line hides the multi_pattern tier
+        "investigator_single_pattern": sum(
+            1 for name in investigator if _TOOL_TIERS.get(name) != "multi_pattern"
+        ),
+        "total": len(_TOOL_TIERS),
     }
 
 
-# (file_relpath, regex, expected_key_or_tuple) — every entry is locked.
-# When a regex captures one group, expected is a single key; when it captures two
-# (range like "86-101"), expected is a (min_key, max_key) tuple.
-_EXPECTATIONS: list[tuple[str, str, object]] = [
-    # docs/mcp-spec.md — phase intros
-    ("docs/mcp-spec.md", r"Only (\d+) tools are visible", "always"),
-    ("docs/mcp-spec.md", r"tier: `edge`, (\d+) tools", "edge"),
-    ("docs/mcp-spec.md", r"\| \*\*base\*\* \| Always after sphere_overview \| (\d+) tools", "base"),
-    # docs/mcp-spec.md — lifecycle ASCII diagram
-    ("docs/mcp-spec.md", r"Session start → Phase 1 \((\d+) tools", "always"),
-    ("docs/mcp-spec.md", r"open_sphere\(path\) → Phase 2 \((\d+) tools", "phase2_total"),
+def _svg_box(name: str) -> str:
+    """A profile box in the lifecycle SVG: the name text, then its count text."""
+    return rf"<text [^>]*>{name}</text>\s*<text [^>]*>(\d+) tools</text>"
+
+
+# (file_relpath, regex, expected_key) — every entry is locked; regexes run multiline.
+_EXPECTATIONS: list[tuple[str, str, str]] = [
+    # docs/mcp-spec.md — the profile table: | `name` | count | purpose | list |
+    ("docs/mcp-spec.md", r"^\| `minimal` \| (\d+) \| [A-Z]", "minimal"),
+    ("docs/mcp-spec.md", r"^\| `investigator` \| (\d+) \| [A-Z]", "investigator"),
+    ("docs/mcp-spec.md", r"^\| `inspector` \| (\d+) \| [A-Z]", "inspector"),
+    ("docs/mcp-spec.md", r"^\| `full` \| (\d+) \| [A-Z]", "total"),
+    # docs/mcp-spec.md — prose counts
     (
         "docs/mcp-spec.md",
-        r"sphere_overview\(\)\s+→ Phase 3 \((\d+)-(\d+) tools",
-        ("phase3_min", "phase3_max"),
+        r"`--profile investigator,inspector` lists (\d+) tools",
+        "investigator_inspector",
     ),
-    ("docs/mcp-spec.md", r"close_sphere\(\) → Phase 1 \((\d+) tools", "always"),
-    ("docs/mcp-spec.md", r"open_sphere\(other_path\) → Phase 2 \((\d+) tools", "phase2_total"),
-    # docs/mcp-spec.md — Token Cost per Phase table
-    ("docs/mcp-spec.md", r"Phase 1 — before open_sphere \| (\d+) ", "always"),
-    ("docs/mcp-spec.md", r"Phase 2 — after open_sphere \| (\d+) ", "phase2_total"),
-    ("docs/mcp-spec.md", r"Phase 3 — full sphere \(all capabilities\) \| ~(\d+) ", "phase3_max"),
-    ("docs/mcp-spec.md", r"Phase 3 — simple sphere \(base only\) \| ~(\d+) ", "phase3_min"),
-    ("docs/mcp-spec.md", r"all (\d+) tool schemas would be in context", "phase3_max"),
+    (
+        "docs/mcp-spec.md",
+        r"one pattern per entity line,\s+`investigator` lists (\d+) tools",
+        "investigator_single_pattern",
+    ),
+    # docs/mcp-spec.md — schema size table: | `name` | count | chars | tokens |
+    ("docs/mcp-spec.md", r"^\| `minimal` \| (\d+) \| [\d,]+ \|", "minimal"),
+    ("docs/mcp-spec.md", r"^\| `investigator` \| (\d+) \| [\d,]+ \|", "investigator"),
+    ("docs/mcp-spec.md", r"^\| `inspector` \| (\d+) \| [\d,]+ \|", "inspector"),
+    (
+        "docs/mcp-spec.md",
+        r"^\| `investigator,inspector` \| (\d+) \| [\d,]+ \|",
+        "investigator_inspector",
+    ),
+    ("docs/mcp-spec.md", r"^\| `full` \| (\d+) \| [\d,]+ \|", "total"),
     # docs/mcp-spec.md — readOnlyHint annotation count, read from the registered tools
     ("docs/mcp-spec.md", r"`read_only_hint=True` on (\d+) read-only tools", "read_only"),
-    # docs/images/mcp-lifecycle.svg — phase boxes
+    # docs/images/mcp-lifecycle.svg — one box per profile + the combined line
+    ("docs/images/mcp-lifecycle.svg", _svg_box("minimal"), "minimal"),
+    ("docs/images/mcp-lifecycle.svg", _svg_box("investigator"), "investigator"),
+    ("docs/images/mcp-lifecycle.svg", _svg_box("inspector"), "inspector"),
+    ("docs/images/mcp-lifecycle.svg", _svg_box("full"), "total"),
     (
         "docs/images/mcp-lifecycle.svg",
-        r"<text [^>]*>(\d+) tools</text>\s*<text [^>]*>open_sphere</text>",
-        "always",
+        r"investigator,inspector</text>\s*<text [^>]*>(\d+) tools, each once",
+        "investigator_inspector",
     ),
+    # README.md — the profile paragraph
+    ("README.md", r"`investigator`, the default, holds (\d+) tools", "investigator"),
+    ("README.md", r"`full` is all (\d+)\.", "total"),
     (
-        "docs/images/mcp-lifecycle.svg",
-        r"<text [^>]*>(\d+) tools</text>\s*<text [^>]*>detect_pattern · sphere_overview",
-        "phase2_total",
-    ),
-    (
-        "docs/images/mcp-lifecycle.svg",
-        r"<text [^>]*>(\d+)[–-](\d+) tools</text>",
-        ("phase3_min", "phase3_max"),
+        "README.md",
+        r"`--profile investigator,inspector` lists (\d+) tools",
+        "investigator_inspector",
     ),
 ]
 
@@ -128,8 +128,7 @@ def _read(rel: str) -> str:
 
 
 def test_runtime_registry_matches_tier_map() -> None:
-    """`_TOOL_TIERS` must enumerate every registered tool (the registry is fixed;
-    phases only change per-session visibility)."""
+    """`_TOOL_TIERS` must enumerate every registered tool (it is what `full` lists)."""
     registered = {t.name for t in mcp._tool_manager.list_tools()}
     tiered = set(_TOOL_TIERS.keys())
     assert registered == tiered, (
@@ -146,36 +145,34 @@ def test_documented_counts_match_runtime() -> None:
     failures: list[str] = []
 
     for rel, pattern, expected in _EXPECTATIONS:
-        text = _read(rel)
-        match = re.search(pattern, text)
+        match = re.search(pattern, _read(rel), re.MULTILINE)
         if match is None:
             failures.append(
                 f"{rel}: pattern not found, lock obsolete or content removed — pattern={pattern!r}"
             )
             continue
-        if isinstance(expected, tuple):
-            lo_key, hi_key = expected
-            doc_lo, doc_hi = int(match.group(1)), int(match.group(2))
-            exp_lo, exp_hi = rc[lo_key], rc[hi_key]
-            if (doc_lo, doc_hi) != (exp_lo, exp_hi):
-                failures.append(
-                    f"{rel}: documented range {doc_lo}-{doc_hi} != "
-                    f"runtime {exp_lo}-{exp_hi} ({lo_key}-{hi_key}) — "
-                    f"matched text: {match.group(0)!r}"
-                )
-        else:
-            doc_n = int(match.group(1))
-            exp_n = rc[expected]
-            if doc_n != exp_n:
-                failures.append(
-                    f"{rel}: documented {doc_n} != runtime {exp_n} ({expected}) — "
-                    f"matched text: {match.group(0)!r}"
-                )
+        doc_n = int(match.group(1))
+        if doc_n != rc[expected]:
+            failures.append(
+                f"{rel}: documented {doc_n} != runtime {rc[expected]} ({expected}) — "
+                f"matched text: {match.group(0)!r}"
+            )
 
     assert not failures, (
-        "Documented tool counts drifted from runtime "
-        f"(_TOOL_TIERS = {sum(_tier_counts().values())} total):\n  - " + "\n  - ".join(failures)
+        f"Documented tool counts drifted from runtime ({rc}):\n  - " + "\n  - ".join(failures)
     )
+
+
+def test_mcp_spec_profile_table_lists_match_code() -> None:
+    """Each named profile's row in mcp-spec.md lists `_PROFILES[name]`, in order."""
+    text = _read("docs/mcp-spec.md")
+    for name, tools in _PROFILES.items():
+        row = re.search(rf"^\| `{name}` \| \d+ \| [A-Z][^|]*\| (.+) \|$", text, re.MULTILINE)
+        assert row is not None, f"mcp-spec.md: no profile table row for {name!r}"
+        assert re.findall(r"`([a-z_]+)`", row.group(1)) == list(tools), name
+    full_row = re.search(r"^\| `full` \| \d+ \| [A-Z][^|]*\| (.+) \|$", text, re.MULTILINE)
+    assert full_row is not None, "mcp-spec.md: no profile table row for 'full'"
+    assert "`" not in full_row.group(1), "the full row names no tools (it is every tool)"
 
 
 def test_total_tool_counts_in_library_and_skill_docs_match_runtime() -> None:
@@ -200,11 +197,10 @@ def test_total_tool_counts_in_library_and_skill_docs_match_runtime() -> None:
 
 
 def test_no_unlocked_tool_counts_in_user_facing_files() -> None:
-    """Files explicitly listed in the M2.4 plan must not carry unlocked \\d+ tools strings.
+    """`tools.md`, `README.md` and `__init__.py` carry no tool-count string without a lock.
 
-    `tools.md`, `README.md`, and `__init__.py` currently have no tool-count strings.
-    If a future edit introduces a `\\d+ tools` phrase in these files, this test
-    fails and the author must add a lock to `_EXPECTATIONS`.
+    A `\\d+ tools` phrase in these files must be covered by an `_EXPECTATIONS` entry;
+    a new one fails this test until the author adds the lock.
     """
     candidates = [
         "docs/tools.md",
@@ -215,11 +211,16 @@ def test_no_unlocked_tool_counts_in_user_facing_files() -> None:
     rogue: list[str] = []
     for rel in candidates:
         text = _read(rel)
+        locked = [
+            m.span(1)
+            for r, lock, _ in _EXPECTATIONS
+            if r == rel
+            for m in re.finditer(lock, text, re.MULTILINE)
+        ]
         for m in pattern.finditer(text):
+            if any(lo <= m.start(1) < hi for lo, hi in locked):
+                continue
             # Skip prose like "4-6 tool workflow" — those are not registry counts.
-            # Heuristic: registry-count phrases like "23 tools" are immediately
-            # preceded by whitespace and followed by punctuation or end of line.
-            # Loose narrative ("a 4-6 tool workflow") gets a pass.
             start = max(0, m.start() - 20)
             context = text[start : m.end() + 20]
             if "workflow" in context.lower() or "-" in m.group(0):

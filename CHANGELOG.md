@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-11-10
+
+### Added
+
+- `check_alerts` reports `population_drift` (MEDIUM): rows written since a calibrated pattern's calibration no longer follow its population (p-values or a dimension's values, the same test as Spark's `calibration_status`), also when the flagged count looks normal; `details` name the `drifted_dimensions`.
+
+### Changed
+
+- The server exposes a fixed tool profile instead of unlocking tools in phases: `investigator` (default, 34 tools for screening, explanation, money flow, scheme typology, ring members and the escalation checks), `inspector` (developer and data inspection: entity, polygon and line navigation, search, schema and aggregation), `minimal` (`detect_pattern` and the session tools) and `full` (every tool). Select with `--profile NAME[,NAME]` or `HYPERTOPOS_MCP_PROFILE`; names are combined, e.g. `investigator,inspector`. Every tool of the profile is listed from the first `tools/list`, in a fixed order; `sphere_overview` no longer unlocks anything; tools whose data the open sphere does not hold (temporal, multi-pattern, trajectory index) are still hidden, and a call to a tool outside the profile says how to enable it.
+- Tool descriptions of the default profile open with the question they answer (screening, why, flow, typology, ring members), and the motif tools name the laundering typology vocabulary (`fan_out`, `fan_in`, `cycle`, `scatter_gather`, `bipartite`, `stack`) they match.
+
+### Fixed
+
+- `assess_anomaly_certainty` reads stability against the alphas in `perturbation_alphas`: "high" needs every given alpha stable, an entity stable at every alpha but held back by a flag is "moderate" whatever the number of alphas, and the certainty score and rationale count against that number (they assumed three); an empty `perturbation_alphas` is refused. Next-step advice that needs a tool outside the default profile says so.
+- Tool reference: `compare_time_windows` returns `top_changed_dimensions` and `window_a` / `window_b` (`{from, to, entry_count}`), as the tool always did; `audit_pattern_dims` lists `auroc_per_dim` and the top-level `intrinsic_displacement_mean` / `extrinsic_displacement_mean`; the `detect_pattern` step-handler table lists the 45 handlers it has.
+- `fan_out` / `fan_in` motifs count the densest window of `time_window_hours` in the seed's whole history, so a burst followed by later ordinary transfers is found.
+- Next-step advice returned by default-profile tools (`find_anomalies`, `sphere_overview`, `check_alerts` and its alert messages) names the profile of every tool it points to outside that profile, e.g. `anomaly_summary (full profile)`, so an agent on the default profile is not sent to a tool the server refuses.
+
 ## [0.10.3] — 2026-10-31
 
 ### Changed

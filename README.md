@@ -6,7 +6,7 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-compatible-green.svg)](https://modelcontextprotocol.io)
-[![Version](https://img.shields.io/badge/version-0.10.3-%235500FF.svg)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-0.11.0-%235500FF.svg)](pyproject.toml)
 
 Point the server at a sphere built with [hypertopos](https://github.com/hypertopos/hypertopos-py), connect an MCP client, and the agent navigates the data instead of querying it: rank what is out of place, explain one entity, jump along a relationship, test a what-if on a branch.
 
@@ -25,6 +25,7 @@ Point the server at a sphere built with [hypertopos](https://github.com/hypertop
 ```bash
 pip install hypertopos-mcp          # installs the `hypertopos-mcp` command and the hypertopos engine
 hypertopos-mcp                      # stdio transport: the MCP client starts and owns this process
+hypertopos-mcp --profile full       # every tool instead of the default investigator profile
 ```
 
 Register it with your MCP client — the sphere path goes in the environment so the agent's first call needs no arguments:
@@ -66,20 +67,20 @@ follow_up      the next queries worth asking, given what was found
 coverage       which pattern / detector pairs this query explored and which are still open
 ```
 
-For manual drill-down, read the population first — that unlocks the full toolset — then rank, explain and trace:
+For manual drill-down, read the population, then rank, explain and look for entities that confirm the pattern:
 
 ```python
 sphere_overview()
 find_anomalies(pattern_id="account_behavior_pattern", top_n=10)
 explain_anomaly(primary_key="85", pattern_id="account_behavior_pattern")
-trace_root_cause(primary_key="85", pattern_id="account_behavior_pattern")
+find_witness_cohort(primary_key="85", pattern_id="account_behavior_pattern")
 ```
 
 > [!NOTE]
 > `open_sphere(path=…)` takes a path relative to the server's working directory, or an absolute one. Set `HYPERTOPOS_SPHERE_PATH` in the client config and call `open_sphere()` with no arguments.
 
 > [!TIP]
-> `detect_pattern` works right after `open_sphere`. Everything else — the manual toolset — appears only after `sphere_overview()`, and only the tools the sphere can serve: temporal tools when it has temporal data, cross-pattern tools when several patterns cover the same entities.
+> The server lists one [tool profile](docs/mcp-spec.md#tool-profiles), whole, from the first call. The default, `investigator`, holds the investigation loop; `--profile full` (or `HYPERTOPOS_MCP_PROFILE=full`) lists every tool. Within the profile a session sees only what its sphere can serve: temporal tools when it has temporal data, cross-pattern tools when several patterns cover the same entities.
 
 ## See it in action
 
@@ -197,9 +198,9 @@ Chains work the same way: find the chains an entity belongs to, read which hops 
 2. Point the server at it and connect an MCP client
 3. The agent explores — each finding leads to the next
 
-![MCP tool phases](docs/images/mcp-lifecycle.svg)
+![MCP tool profiles](docs/images/mcp-lifecycle.svg)
 
-**Tools unlock in phases.** Before a sphere is open, only `open_sphere`, `close_sphere` and `get_session_stats` are listed. `open_sphere` adds the gateway pair (`detect_pattern`, `sphere_overview`) and the edge-table tools. `sphere_overview` unlocks the full manual toolset, filtered to what the sphere can serve. The agent's context holds only the tools it can use at that moment.
+**One tool profile per server.** The server lists a fixed set of tools, chosen at startup with `--profile` (or `HYPERTOPOS_MCP_PROFILE`), and nothing is unlocked later: an agent that reads the tool list once has all of it. `investigator`, the default, holds 34 tools for screening, explanation, flow, scheme typology, ring members and cross-pattern confirmation. `inspector` is the developer and data-inspection set: entity, polygon and line navigation, search, schema and aggregation. `minimal` is `detect_pattern` and the session tools; `full` is all 111. Names combine: `--profile investigator,inspector` lists 49 tools, within the 50-tool cap of hosted agent supervisors. Inside the profile, tools the open sphere cannot serve are hidden. The [MCP Specification](docs/mcp-spec.md#tool-profiles) lists every profile's tools.
 
 **A session reads one snapshot.** `open_sphere` pins the session to the sphere state current at that moment; ingests and recalibrations by other processes do not change its answers. A session's own `recalibrate` is visible to it immediately and records a new calibration epoch, as a rebuild does, so `compare_calibrations` can compare the fits before and after it.
 
@@ -222,6 +223,9 @@ get_session_stats()
 ## What-if work on branches
 
 A sphere branch is a what-if workspace created without copying data; writes on a branch never touch main.
+
+> [!NOTE]
+> `recalibrate`, `compare_branches` and `manage_branch` are in the `full` profile: start the server with `--profile full`.
 
 <p align="center">
   <img src="docs/images/demo-branch-whatif.svg" width="900"
@@ -265,7 +269,7 @@ hypertopos-mcp --transport http --port 8080                                    #
 hypertopos-mcp --transport http --session-idle-timeout 600 --max-sessions 200  # close idle sessions after 10 min, cap concurrency
 ```
 
-The server speaks the MCP streamable-HTTP transport on `127.0.0.1`. Each client session — keyed by the `Mcp-Session-Id` the server assigns at `initialize` — keeps its own open sphere, tool phase, response format and call statistics. A client on the stateless protocol names its session with an `X-Hypertopos-Session` header instead; that value is the session's only credential, so use a random, unguessable value (for example a UUID4). It is not authentication, and two clients that send the same value share one session. A request with neither is rejected. Calls from different sessions run concurrently, while one session's calls run one at a time. stdio, the default transport, serves a single session.
+The server speaks the MCP streamable-HTTP transport on `127.0.0.1`. Each client session — keyed by the `Mcp-Session-Id` the server assigns at `initialize` — keeps its own open sphere, response format and call statistics; all sessions share the server's tool profile. A client on the stateless protocol names its session with an `X-Hypertopos-Session` header instead; that value is the session's only credential, so use a random, unguessable value (for example a UUID4). It is not authentication, and two clients that send the same value share one session. A request with neither is rejected. Calls from different sessions run concurrently, while one session's calls run one at a time. stdio, the default transport, serves a single session.
 
 > [!WARNING]
 > The HTTP transport is for local use on one machine. It binds to the loopback interface, has no authentication, and any session can open any sphere path the server process can read. Do not expose it to a network. `--session-idle-timeout` and `--max-sessions` are the only resource limits it enforces.
@@ -275,12 +279,14 @@ The server speaks the MCP streamable-HTTP transport on `127.0.0.1`. Each client 
 
 ## Common calls
 
+Session, screening, explanation and flow calls are in the default `investigator` profile. `jump_polygon` needs `inspector`; `find_diverse_explanations`, `trace_root_cause`, the drift calls and the branch calls need `full`.
+
 ```python
 open_sphere()                                                                  # default path from HYPERTOPOS_SPHERE_PATH
 open_sphere(path="my_sphere", branch="trial")                                  # read a branch instead of main
 open_sphere(path="my_sphere", response_format="full")                          # positional vectors and every property column
 detect_pattern(query="transactions with unusually large amounts")             # plan + run + results, no manual drill-down
-sphere_overview()                                                              # population health per pattern; unlocks the manual toolset
+sphere_overview()                                                              # population health per pattern
 
 find_anomalies(pattern_id="account_behavior_pattern", top_n=10)               # ranked by the calibrated score (conformal_p, then anomaly_score)
 find_anomalies(pattern_id="tx_pattern", rank_by_property="amount", rank_order="asc")   # "lowest / fewest" questions
@@ -311,8 +317,8 @@ Every tool, parameter and return shape is in the [Tool Reference](docs/tools.md)
 | Symptom | Fix |
 |---|---|
 | `open_sphere needs a path: pass path=, or start the server with HYPERTOPOS_SPHERE_PATH set …` | Put the sphere path in the client config's `env`, or pass `path=` relative to the server's working directory. |
-| The agent sees only `open_sphere`, `detect_pattern`, `sphere_overview` and a few edge tools | That is phase two. Call `sphere_overview()` to unlock the manual toolset. |
-| Temporal or cross-pattern tools are missing after `sphere_overview()` | The sphere has no temporal data, or only one pattern covers that line. `open_sphere` reports `capabilities`. |
+| `Tool 'find_clusters' is not in this server's tool profile (investigator); start the server with --profile full …` | The tool is in another profile. Add `--profile full` (or the profile that has it, e.g. `investigator,inspector`) to the server command, or set `HYPERTOPOS_MCP_PROFILE`, and restart the server. |
+| Temporal or cross-pattern tools are missing after `open_sphere` | The sphere has no temporal data, or only one pattern covers that line. `open_sphere` reports `capabilities`. |
 | `unknown parameter 'limit' for tool 'find_anomalies'; did you mean 'top_n'?` | Use the name the error suggests. Result counts are `top_n`, entities are `primary_key`. |
 | `detect_pattern` returns nothing useful | Rephrase with the entity type and a dimension name ("accounts with high transaction counts"), not the same words again. |
 | `jump_polygon` raises `ValueError` on a pattern with `edge_max > 0` | That pattern stores edge counts, not keys (continuous edges). Jump from an event polygon, or use `aggregate`. |
@@ -327,6 +333,7 @@ Every tool, parameter and return shape is in the [Tool Reference](docs/tools.md)
 |---|---|
 | `HYPERTOPOS_SPHERE_PATH` | Default sphere path for `open_sphere()` called without `path`. Nothing is opened until the agent calls it. |
 | `HYPERTOPOS_MCP_FORMAT` | `compact` (default) or `full` — the response format of every session that does not pass `response_format` to `open_sphere`. |
+| `HYPERTOPOS_MCP_PROFILE` | The tool profile when `--profile` is not passed: `investigator` (default), `inspector`, `minimal`, `full`, or a comma-separated combination. |
 
 ## Command-line flags
 
@@ -335,6 +342,7 @@ Every tool, parameter and return shape is in the [Tool Reference](docs/tools.md)
 
 | Flag | Default | Effect |
 |---|---|---|
+| `--profile NAME[,NAME…]` | `investigator` | The tool profile: `investigator`, `inspector`, `minimal`, `full`; names are combined. An unknown name stops the server with the valid names |
 | `--transport {stdio,http}` | `stdio` | `stdio` serves the one client that started the process; `http` serves the MCP streamable-HTTP transport |
 | `--port N` | `8080` | TCP port for the HTTP transport |
 | `--session-idle-timeout SECONDS` | `1800` | Idle time after which an HTTP client session is ended and its sphere closed |
@@ -349,8 +357,8 @@ Every tool, parameter and return shape is in the [Tool Reference](docs/tools.md)
 
 | Family | Tools |
 |---|---|
-| Session | `open_sphere`, `close_sphere`, `get_session_stats`, `get_sphere_info` |
-| Gateway | `detect_pattern`, `sphere_overview` |
+| Session | `open_sphere`, `close_sphere`, `get_session_stats`, `get_sphere_info`, `sphere_overview` |
+| Smart mode | `detect_pattern` |
 | Navigation | `goto`, `walk_line`, `jump_polygon`, `emerge`, `get_position`, `get_polygon`, `get_solid`, `dive_solid`, `search_entities`, `search_entities_fts`, `search_entities_hybrid` |
 | Detection | `find_anomalies`, `explain_anomaly`, `find_diverse_explanations`, `anomaly_summary`, `passive_scan`, `find_clusters`, `find_hubs`, `attract_boundary`, `find_density_gaps`, `find_conformance_violations`, `check_anomaly_batch`, `find_novel_entities` |
 | Confidence | `assess_anomaly_certainty`, `consensus_classification`, `combine_anomaly_pvalues`, `cross_pattern_profile`, `detect_cross_pattern_discrepancy` |
@@ -360,7 +368,7 @@ Every tool, parameter and return shape is in the [Tool Reference](docs/tools.md)
 | Calibration and health | `recalibrate`, `compare_calibrations`, `theta_sensitivity`, `theta_sensitivity_report`, `find_calibration_influencers`, `calibration_drift_report`, `check_alerts`, `detect_data_quality_issues` |
 | What-if | `simulate_edge_removal`, `simulate_dimension_change`, `manage_branch`, `compare_branches` |
 
-The [Tool Reference](docs/tools.md) lists every tool with its parameters and return shape; the [MCP Specification](docs/mcp-spec.md) lists which phase and capability each one belongs to.
+The [Tool Reference](docs/tools.md) lists every tool with its parameters and return shape; the [MCP Specification](docs/mcp-spec.md) lists which profile and capability each one belongs to.
 
 </details>
 
@@ -382,7 +390,7 @@ Other agents: `npx skills add hypertopos/hypertopos-skills`.
 | | |
 |---|---|
 | [Tool Reference](docs/tools.md) | All tool parameters, return shapes, filters |
-| [MCP Specification](docs/mcp-spec.md) | Transports, client sessions, tool phases, response format, smart detection |
+| [MCP Specification](docs/mcp-spec.md) | Transports, client sessions, tool profiles, response format, smart detection |
 
 ## Status
 

@@ -42,7 +42,7 @@
     "balance"
   ],
   "found": 5,
-  "note": "clusters[].count reflects returned polygons only (top_n). Call anomaly_summary for population-wide cluster counts.",
+  "note": "clusters[].count reflects returned polygons only (top_n). Call anomaly_summary (full profile) for population-wide cluster counts.",
   "offset": 0,
   "pattern_id": "tx_pattern",
   "polygons": [
