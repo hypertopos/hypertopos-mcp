@@ -1932,9 +1932,10 @@ class TestAggregateIdea004Sampling:
         assert r1["results"] == r2["results"]
 
     def test_no_seed_nondeterministic(self) -> None:
-        """T12: 10 calls without seed with sample_size=1 from 4 polygons.
+        """T12: 60 calls without seed with sample_size=1 from 4 polygons.
 
-        At least 2 should differ (best-effort). P(all 10 identical) ≈ 0.2% — acceptable flakiness.
+        At least 2 should differ. Ten calls came out identical once in CI; sixty make
+        a run of identical outcomes by chance far less likely.
         """
         from hypertopos_mcp.tools.aggregation import aggregate
 
@@ -1943,7 +1944,7 @@ class TestAggregateIdea004Sampling:
                 json.loads(aggregate("sale_pattern", "items", sample_size=1))["results"],
                 sort_keys=True,
             )
-            for _ in range(10)
+            for _ in range(60)
         ]
         assert len(set(outcomes)) > 1, "Expected at least two distinct outcomes without seed"
 
